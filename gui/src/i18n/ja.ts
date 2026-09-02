@@ -309,7 +309,7 @@ export const ja: Record<TKey, string> = {
   "dash.shadowCallModel": "差し替えモデル",
   "dash.shadowCallTooltip": "Codex App はスレッドタイトル生成、コミットメッセージ生成、スキルオーケストレーションをバックグラウンドで呼び出します。使われるモデルはクライアントのバージョンによって変わるため、opencodex は {models} をまとめて傍受します。これをオンにすると、それらの呼び出しを選択したモデルにリダイレクトします。",
   "models.shadowCallIntercept": "シャドウコール傍受",
-  "models.shadowCallInterceptHint": "Codex App のバックグラウンドヘルパー呼び出し({models}: タイトル、コミットメッセージ)を傍受し、選択したモデルにリダイレクトします。",
+  "models.shadowCallFallback": "Fallback for unlisted source models",  "models.shadowCallInterceptHint": "Codex App のバックグラウンドヘルパー呼び出し({models}: タイトル、コミットメッセージ)を傍受し、選択したモデルにリダイレクトします。",
   "dash.sidecarBackend": "バックエンド",
   "dash.sidecarModel": "モデル",
   "dash.backendAuto": "自動",

@@ -308,7 +308,7 @@ export const fr: Record<TKey, string> = {
   "dash.shadowCallModel": "Modèle de remplacement",
   "dash.shadowCallTooltip": "L’application Codex effectue des appels auxiliaires en arrière-plan pour générer les titres de fils, les messages de commit et orchestrer les compétences. Le modèle auxiliaire ayant changé selon les versions du client, opencodex intercepte tous les modèles de cet ensemble : {models}. Activez cette option pour rediriger ces appels vers le modèle choisi.",
   "models.shadowCallIntercept": "Interception des appels fantômes",
-  "models.shadowCallInterceptHint": "Intercepte les appels auxiliaires en arrière-plan de l’application Codex ({models}) pour les titres et les messages de commit, puis les redirige vers le modèle choisi.",
+  "models.shadowCallFallback": "Fallback for unlisted source models",  "models.shadowCallInterceptHint": "Intercepte les appels auxiliaires en arrière-plan de l’application Codex ({models}) pour les titres et les messages de commit, puis les redirige vers le modèle choisi.",
   "dash.sidecarBackend": "Moteur",
   "dash.sidecarModel": "Modèle",
   "dash.backendAuto": "Auto",

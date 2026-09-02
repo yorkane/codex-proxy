@@ -67,7 +67,7 @@ import {
 } from "./models-shared";
 import { EmptyProviderHint } from "./models-provider-hints";
 import { shadowCallModelOptions } from "./dashboard-shared";
-import { shadowSourceModelBadge, shadowSourceModelList, shadowSourceModelLabel } from "./shadow-call-source";
+import { shadowSourceModelList, shadowSourceModelLabel } from "./shadow-call-source";
 
 type CachedModelsPage = {
   models: ModelRow[];
@@ -1600,22 +1600,28 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         </div>
         <div className="models-shadow-row row muted text-control" aria-busy={!shadowCall || undefined}>
           <span className="models-shadow-label">{t("models.shadowCallIntercept")} <Tooltip content={t("models.shadowCallInterceptHint", { models: shadowSourceModelLabel(shadowCall?.sourceModels) })} side="top" maxWidth={320}><span style={{ cursor: "help" }} aria-label={t("models.shadowCallInterceptHint", { models: shadowSourceModelLabel(shadowCall?.sourceModels) })}>ⓘ</span></Tooltip></span>
-          <code className="text-caption models-shadow-warning" style={{ opacity: 0.6 }}>{t("models.shadowCallOriginal", { models: shadowSourceModelBadge(shadowCall?.sourceModels) })}</code>
           <Switch on={shadowCall?.enabled ?? false} onClick={() => void saveShadowCall({ enabled: !shadowCall?.enabled })} disabled={!shadowCall || shadowCallSaving} label={t("models.shadowCallIntercept")} />
-         <div className="models-shadow-model-slot">
-           <Select value={shadowCall?.model ?? ""} options={shadowCallOptions} onChange={v => { setShadowCall(c => c ? { ...c, model: v } : c); void saveShadowCall({ model: v }); }} disabled={!shadowCall || shadowCallSaving || !shadowCall.enabled} label={t("models.shadowCallIntercept")} />
-         </div>
-       </div>
+        </div>
+        {shadowCall?.enabled && (
+          <div className="models-shadow-row row muted text-control">
+            <code className="models-shadow-source-label models-shadow-fallback-label">{t("models.shadowCallFallback")}</code>
+            <div className="models-shadow-model-slot">
+              <Select
+                value={shadowCall?.model ?? ""}
+                options={shadowCallOptions}
+                onChange={v => { setShadowCall(c => c ? { ...c, model: v } : c); void saveShadowCall({ model: v }); }}
+                disabled={shadowCallSaving}
+                label={t("models.shadowCallFallback")}
+              />
+            </div>
+          </div>
+        )}
         {shadowCall?.enabled && shadowSourceModelList(shadowCall?.sourceModels).map(sourceModel => {
           const current = shadowCall?.modelMap?.[sourceModel] ?? "";
-         const perSourceOptions = shadowCallModelOptions(
-            activeModels,
-           current || undefined,
-           [sourceModel],
-         );
+          const perSourceOptions = shadowCallModelOptions(activeModels, current || undefined, [sourceModel]);
           return (
             <div key={sourceModel} className="models-shadow-row row muted text-control">
-              <code className="text-caption models-shadow-source-label" style={{ opacity: 0.6 }}>{sourceModel} →</code>
+              <code className="models-shadow-source-label models-shadow-source-name">{sourceModel} →</code>
               <div className="models-shadow-model-slot">
                 <Select
                   value={current}

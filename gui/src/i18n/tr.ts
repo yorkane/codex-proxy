@@ -310,7 +310,7 @@ export const tr: Record<TKey, string> = {
   "dash.shadowCallModel": "Yedek model",
   "dash.shadowCallTooltip": "Codex App arka planda başlık ve commit mesajı oluşturmak için yardımcı çağrılar yapar (orijinal {models}). Etkinleştirerek bunları seçtiğiniz modele yönlendirebilirsiniz.",
   "models.shadowCallIntercept": "Gölge Çağrı Yakalama",
-  "models.shadowCallInterceptHint": "Codex App'in başlıklar ve commit mesajları için yaptığı arka plan çağrılarını ({models}) yakalar ve seçtiğiniz modele yönlendirir.",
+  "models.shadowCallFallback": "Fallback for unlisted source models",  "models.shadowCallInterceptHint": "Codex App'in başlıklar ve commit mesajları için yaptığı arka plan çağrılarını ({models}) yakalar ve seçtiğiniz modele yönlendirir.",
   "dash.sidecarBackend": "Arka uç",
   "dash.sidecarModel": "Model",
   "dash.backendAuto": "Otomatik",

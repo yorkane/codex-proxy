@@ -318,7 +318,7 @@ export const en = {
   "dash.shadowCallModel": "Replacement model",
   "dash.shadowCallTooltip": "Codex App makes background helper calls for thread title generation, commit message generation, and skill orchestration. The helper model changed across client versions, so opencodex intercepts every model in this set: {models}. Enable this to redirect those calls to your chosen model.",
   "models.shadowCallIntercept": "Shadow Call Intercept",
-  "models.shadowCallInterceptHint": "Intercepts Codex App's background helper calls ({models}) for titles and commit messages and redirects them to your chosen model.",
+  "models.shadowCallFallback": "Fallback for unlisted source models",  "models.shadowCallInterceptHint": "Intercepts Codex App's background helper calls ({models}) for titles and commit messages and redirects them to your chosen model.",
   "dash.sidecarBackend": "Backend",
   "dash.sidecarModel": "Model",
   "dash.backendAuto": "Auto",

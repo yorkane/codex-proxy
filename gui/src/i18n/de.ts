@@ -300,7 +300,7 @@ export const de: Record<TKey, string> = {
   "dash.shadowCallModel": "Ersatzmodell",
   "dash.shadowCallTooltip": "Die Codex-App ruft im Hintergrund ein Hilfsmodell für Titelgenerierung, Commit-Nachrichten und Skill-Orchestrierung auf. Das Modell wechselt zwischen Client-Versionen, daher fängt opencodex diesen Satz ab: {models}.",
   "models.shadowCallIntercept": "Shadow-Call-Abfangen",
-  "models.shadowCallInterceptHint": "Fängt die Hintergrund-Hilfsaufrufe der Codex-App ({models}) ab und leitet sie an das gewählte Modell um.",
+  "models.shadowCallFallback": "Fallback for unlisted source models",  "models.shadowCallInterceptHint": "Fängt die Hintergrund-Hilfsaufrufe der Codex-App ({models}) ab und leitet sie an das gewählte Modell um.",
   "dash.sidecarBackend": "Backend",
   "dash.sidecarModel": "Modell",
   "dash.backendAuto": "Automatisch",

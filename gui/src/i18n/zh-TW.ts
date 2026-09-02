@@ -203,7 +203,7 @@ export const zhTW: Record<TKey, string> = {
   "dash.shadowCallModel": "替代模型",
   "dash.shadowCallTooltip": "Codex 應用會為執行緒標題生成、提交訊息生成與技能編排發出背景 helper 呼叫。helper 模型因客戶端版本而異，因此 opencodex 攔截此集合中的每個模型：{models}。啟用此選項可將這些呼叫重定向到您選擇的模型。",
   "models.shadowCallIntercept": "影子呼叫攔截",
-  "models.shadowCallInterceptHint": "攔截 Codex 應用的背景 helper 呼叫（{models}）以生成標題與提交訊息，並將它們重定向到您選擇的模型。",
+  "models.shadowCallFallback": "未單獨設定的來源模型後備",  "models.shadowCallInterceptHint": "攔截 Codex 應用的背景 helper 呼叫（{models}）以生成標題與提交訊息，並將它們重定向到您選擇的模型。",
   "dash.sidecarBackend": "後端",
   "dash.sidecarModel": "模型",
   "dash.backendAuto": "自動",

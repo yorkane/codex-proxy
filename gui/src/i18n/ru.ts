@@ -309,7 +309,7 @@ export const ru: Record<TKey, string> = {
   "dash.shadowCallModel": "Модель-замена",
   "dash.shadowCallTooltip": "Codex App в фоновом режиме вызывает служебную модель для генерации заголовков тредов, сообщений коммитов и оркестрации навыков. Эта модель менялась между версиями клиента, поэтому opencodex перехватывает весь набор: {models}. Включите функцию, чтобы перенаправлять такие вызовы на выбранную вами модель.",
   "models.shadowCallIntercept": "Перехват теневых вызовов",
-  "models.shadowCallInterceptHint": "Перехватывает фоновые служебные вызовы Codex App ({models}: заголовки, сообщения коммитов) и перенаправляет их на выбранную вами модель.",
+  "models.shadowCallFallback": "Fallback for unlisted source models",  "models.shadowCallInterceptHint": "Перехватывает фоновые служебные вызовы Codex App ({models}: заголовки, сообщения коммитов) и перенаправляет их на выбранную вами модель.",
   "dash.sidecarBackend": "Бэкенд",
   "dash.sidecarModel": "Модель",
   "dash.backendAuto": "Авто",
