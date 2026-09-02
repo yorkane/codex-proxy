@@ -305,8 +305,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       showCodexSparkQuota: config.showCodexSparkQuota === true,
       // Absent means the historical auto-open, so the GUI can render the toggle
       // without having to know that `undefined` and `true` mean the same thing.
-      oauthOpenBrowser: config.oauthOpenBrowser !== false,
-      startupHealth: await readStartupHealth(config),
+     oauthOpenBrowser: config.oauthOpenBrowser !== false,
+      managementAuthDisabled: config.managementAuthDisabled === true,
+     startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
         version: resolved.runtime.version,
@@ -389,17 +390,19 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAutoStart?: unknown;
       streamMode?: unknown;
       appOwnedMemoryBudgetMb?: unknown;
-      codexAccountPickerEnabled?: unknown;
-      oauthOpenBrowser?: unknown;
-      showCodexSparkQuota?: unknown;
-    };
+     codexAccountPickerEnabled?: unknown;
+     oauthOpenBrowser?: unknown;
+     showCodexSparkQuota?: unknown;
+      managementAuthDisabled?: unknown;
+   };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
       && body.appOwnedMemoryBudgetMb === undefined
       && body.codexAccountPickerEnabled === undefined
-      && body.oauthOpenBrowser === undefined
-      && body.showCodexSparkQuota === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, or showCodexSparkQuota" }, 400);
+   && body.oauthOpenBrowser === undefined
+    && body.showCodexSparkQuota === undefined
+    && body.managementAuthDisabled === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, showCodexSparkQuota, or managementAuthDisabled" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -414,8 +417,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && typeof body.codexAccountPickerEnabled !== "boolean") {
       return jsonResponse({ error: "codexAccountPickerEnabled boolean is required" }, 400);
     }
-    if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
-      return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
+   if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
+     return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
+   }
+    if (body.managementAuthDisabled !== undefined && typeof body.managementAuthDisabled !== "boolean") {
+      return jsonResponse({ error: "managementAuthDisabled boolean is required" }, 400);
     }
     if (body.appOwnedMemoryBudgetMb !== undefined && (
       typeof body.appOwnedMemoryBudgetMb !== "number"
@@ -466,8 +472,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (typeof body.oauthOpenBrowser === "boolean") {
         config.oauthOpenBrowser = body.oauthOpenBrowser;
       }
-      if (typeof body.showCodexSparkQuota === "boolean") {
-        config.showCodexSparkQuota = body.showCodexSparkQuota;
+     if (typeof body.showCodexSparkQuota === "boolean") {
+       config.showCodexSparkQuota = body.showCodexSparkQuota;
+     }
+      if (typeof body.managementAuthDisabled === "boolean") {
+        config.managementAuthDisabled = body.managementAuthDisabled;
       }
       pickerIsEnabled = codexAccountPickerEnabled(config);
       (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
@@ -512,10 +521,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAccountPickerEnabled: pickerIsEnabled,
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
-      showCodexSparkQuota: config.showCodexSparkQuota === true,
-      startupHealth: await readStartupHealth(config),
-    });
-  }
+     showCodexSparkQuota: config.showCodexSparkQuota === true,
+      managementAuthDisabled: config.managementAuthDisabled === true,
+     startupHealth: await readStartupHealth(config),
+   });
+ }
 
   if (url.pathname === "/api/diagnostics/project-config" && req.method === "GET") {
     const { getCachedProjectConfigDiagnostics } = await import("../../codex/project-config-warnings");

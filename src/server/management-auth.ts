@@ -448,8 +448,13 @@ export function requireManagementAuth(
   config?: OcxConfig,
   local?: LocalManagementAuthContext,
 ): Response | null {
-  if (hasSystemRestartCapability(req, local)) return null;
-  if (hasLocalProviderReloadCapability(req, local)) return null;
+ if (hasSystemRestartCapability(req, local)) return null;
+  // Opt-in bypass: a local single-user deployment can disable admin-token auth on /api/*.
+  // Guarded to loopback binds so it can never take effect on a public listener.
+  if (config?.managementAuthDisabled === true && isLoopbackHostname(config.hostname)) {
+    return null;
+  }
+ if (hasLocalProviderReloadCapability(req, local)) return null;
   if (hasLocalReadCapability(req, local)) return null;
   if (!state.available) {
     return Response.json({
