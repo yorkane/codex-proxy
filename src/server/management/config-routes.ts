@@ -306,9 +306,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Absent means the historical auto-open, so the GUI can render the toggle
       // without having to know that `undefined` and `true` mean the same thing.
      oauthOpenBrowser: config.oauthOpenBrowser !== false,
-      managementAuthDisabled: config.managementAuthDisabled === true,
-     startupHealth: await readStartupHealth(config),
-      codexRuntime: {
+     managementAuthDisabled: config.managementAuthDisabled === true,
+     disableOriginCheck: config.disableOriginCheck === true,
+    startupHealth: await readStartupHealth(config),
+     codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
         version: resolved.runtime.version,
         source: resolved.runtime.source,
@@ -393,7 +394,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
      codexAccountPickerEnabled?: unknown;
      oauthOpenBrowser?: unknown;
      showCodexSparkQuota?: unknown;
-      managementAuthDisabled?: unknown;
+     managementAuthDisabled?: unknown;
+     disableOriginCheck?: unknown;
    };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
@@ -401,8 +403,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexAccountPickerEnabled === undefined
    && body.oauthOpenBrowser === undefined
     && body.showCodexSparkQuota === undefined
-    && body.managementAuthDisabled === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, showCodexSparkQuota, or managementAuthDisabled" }, 400);
+    && body.managementAuthDisabled === undefined
+    && body.disableOriginCheck === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, showCodexSparkQuota, managementAuthDisabled, or disableOriginCheck" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -420,8 +423,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
    if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
      return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
    }
-    if (body.managementAuthDisabled !== undefined && typeof body.managementAuthDisabled !== "boolean") {
-      return jsonResponse({ error: "managementAuthDisabled boolean is required" }, 400);
+   if (body.managementAuthDisabled !== undefined && typeof body.managementAuthDisabled !== "boolean") {
+     return jsonResponse({ error: "managementAuthDisabled boolean is required" }, 400);
+   }
+    if (body.disableOriginCheck !== undefined && typeof body.disableOriginCheck !== "boolean") {
+      return jsonResponse({ error: "disableOriginCheck boolean is required" }, 400);
     }
     if (body.appOwnedMemoryBudgetMb !== undefined && (
       typeof body.appOwnedMemoryBudgetMb !== "number"
@@ -475,8 +481,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
      if (typeof body.showCodexSparkQuota === "boolean") {
        config.showCodexSparkQuota = body.showCodexSparkQuota;
      }
-      if (typeof body.managementAuthDisabled === "boolean") {
-        config.managementAuthDisabled = body.managementAuthDisabled;
+     if (typeof body.managementAuthDisabled === "boolean") {
+       config.managementAuthDisabled = body.managementAuthDisabled;
+     }
+      if (typeof body.disableOriginCheck === "boolean") {
+        config.disableOriginCheck = body.disableOriginCheck;
       }
       pickerIsEnabled = codexAccountPickerEnabled(config);
       (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
@@ -522,10 +531,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
      showCodexSparkQuota: config.showCodexSparkQuota === true,
-      managementAuthDisabled: config.managementAuthDisabled === true,
-     startupHealth: await readStartupHealth(config),
-   });
- }
+     managementAuthDisabled: config.managementAuthDisabled === true,
+     disableOriginCheck: config.disableOriginCheck === true,
+    startupHealth: await readStartupHealth(config),
+  });
+}
 
   if (url.pathname === "/api/diagnostics/project-config" && req.method === "GET") {
     const { getCachedProjectConfigDiagnostics } = await import("../../codex/project-config-warnings");
