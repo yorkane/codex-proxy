@@ -305,11 +305,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       showCodexSparkQuota: config.showCodexSparkQuota === true,
       // Absent means the historical auto-open, so the GUI can render the toggle
       // without having to know that `undefined` and `true` mean the same thing.
-     oauthOpenBrowser: config.oauthOpenBrowser !== false,
-     managementAuthDisabled: config.managementAuthDisabled === true,
-     disableOriginCheck: config.disableOriginCheck === true,
-    startupHealth: await readStartupHealth(config),
-     codexRuntime: {
+      oauthOpenBrowser: config.oauthOpenBrowser !== false,
+      // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
+      codexDesktopAuthless: config.codexDesktopAuthless === true,
+      managementAuthDisabled: config.managementAuthDisabled === true,
+      disableOriginCheck: config.disableOriginCheck === true,
+      startupHealth: await readStartupHealth(config),
+      codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
         version: resolved.runtime.version,
         source: resolved.runtime.source,
@@ -391,21 +393,23 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAutoStart?: unknown;
       streamMode?: unknown;
       appOwnedMemoryBudgetMb?: unknown;
-     codexAccountPickerEnabled?: unknown;
-     oauthOpenBrowser?: unknown;
-     showCodexSparkQuota?: unknown;
-     managementAuthDisabled?: unknown;
-     disableOriginCheck?: unknown;
-   };
+      codexAccountPickerEnabled?: unknown;
+      oauthOpenBrowser?: unknown;
+      showCodexSparkQuota?: unknown;
+      codexDesktopAuthless?: unknown;
+      managementAuthDisabled?: unknown;
+      disableOriginCheck?: unknown;
+    };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
       && body.appOwnedMemoryBudgetMb === undefined
       && body.codexAccountPickerEnabled === undefined
-   && body.oauthOpenBrowser === undefined
-    && body.showCodexSparkQuota === undefined
-    && body.managementAuthDisabled === undefined
-    && body.disableOriginCheck === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, showCodexSparkQuota, managementAuthDisabled, or disableOriginCheck" }, 400);
+      && body.oauthOpenBrowser === undefined
+      && body.showCodexSparkQuota === undefined
+      && body.codexDesktopAuthless === undefined
+      && body.managementAuthDisabled === undefined
+      && body.disableOriginCheck === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, showCodexSparkQuota, codexDesktopAuthless, managementAuthDisabled, or disableOriginCheck" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -428,6 +432,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
    }
     if (body.disableOriginCheck !== undefined && typeof body.disableOriginCheck !== "boolean") {
       return jsonResponse({ error: "disableOriginCheck boolean is required" }, 400);
+    }
+    if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
+      return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
     }
     if (body.appOwnedMemoryBudgetMb !== undefined && (
       typeof body.appOwnedMemoryBudgetMb !== "number"
@@ -452,9 +459,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
       showCodexSparkQuota: config.showCodexSparkQuota,
       hasShowCodexSparkQuota: Object.hasOwn(config, "showCodexSparkQuota"),
+      codexDesktopAuthless: config.codexDesktopAuthless,
+      hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
     let pickerIsEnabled = pickerWasEnabled;
+    const authlessWasEnabled = config.codexDesktopAuthless === true;
     try {
       if (typeof body.codexAutoStart === "boolean") {
         config.codexAutoStart = body.codexAutoStart;
@@ -487,6 +497,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (typeof body.disableOriginCheck === "boolean") {
         config.disableOriginCheck = body.disableOriginCheck;
       }
+      if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
+      else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       pickerIsEnabled = codexAccountPickerEnabled(config);
       (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
     } catch (error) {
@@ -509,13 +521,19 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasShowCodexSparkQuota) {
         config.showCodexSparkQuota = previousSettings.showCodexSparkQuota;
       } else deleteConfigTopLevelKey(config, "showCodexSparkQuota");
+      if (previousSettings.hasCodexDesktopAuthless) {
+        config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
+      } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
+    // The authless switch changes the injected config.toml shape, so converge now rather than
+    // waiting for the next start; the injector re-reads config and rewrites the form.
+    const authlessIsEnabled = config.codexDesktopAuthless === true;
+    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
       ? await convergeCodexCatalog()
       : undefined;
     const catalogRefreshPending = catalogRefresh
@@ -530,12 +548,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAccountPickerEnabled: pickerIsEnabled,
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
-     showCodexSparkQuota: config.showCodexSparkQuota === true,
-     managementAuthDisabled: config.managementAuthDisabled === true,
-     disableOriginCheck: config.disableOriginCheck === true,
-    startupHealth: await readStartupHealth(config),
-  });
-}
+      showCodexSparkQuota: config.showCodexSparkQuota === true,
+      codexDesktopAuthless: authlessIsEnabled,
+      managementAuthDisabled: config.managementAuthDisabled === true,
+      disableOriginCheck: config.disableOriginCheck === true,
+      startupHealth: await readStartupHealth(config),
+    });
+  }
 
   if (url.pathname === "/api/diagnostics/project-config" && req.method === "GET") {
     const { getCachedProjectConfigDiagnostics } = await import("../../codex/project-config-warnings");

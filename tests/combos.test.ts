@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,8 @@ import {
   comboPublicModelId,
   comboRequestHasImageInput,
   concreteComboRequestBody,
+  comboCooldownRetryAfterSeconds,
+  COMBO_REQUEST_RATE_COOLDOWN_MS,
   coolComboTarget,
   earliestQuotaResetAt,
   getCombo,
@@ -29,6 +31,7 @@ import {
   normalizeComboConfig,
   parseComboModelId,
   parseRetryAfterMs,
+  remainingComboCooldownMs,
   pickComboTarget,
   preservesPhysicalComboProvider,
   resetComboEffortWarningStateForTests,
@@ -37,7 +40,12 @@ import {
   tryPickComboModel,
   UnknownComboError,
 } from "../src/combos";
-import { comboFailureDecision } from "../src/combos/failover";
+import {
+  comboFailureCooldownScope,
+  comboFailureDecision,
+  isTransientRequestRateLimit,
+} from "../src/combos/failover";
+import { comboUnavailableResponse } from "../src/server/responses/core";
 import { getConfigPath, readConfigDiagnostics, saveConfig } from "../src/config";
 import { routeModel } from "../src/router";
 import { handleManagementAPI } from "../src/server/management-api";
@@ -53,6 +61,7 @@ import {
   setCachedProviderQuotaForTests,
 } from "../src/providers/quota-routing-cache";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const VALID_COMBO = { targets: [{ provider: "a", model: "m1" }] };
 
@@ -119,7 +128,7 @@ async function withTempHome<T>(run: (dir: string) => Promise<T> | T): Promise<T>
     else process.env.OPENCODEX_HOME = previousHome;
     if (previousClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir;
-    rmSync(dir, { recursive: true, force: true });
+    removeTreeWithRetry(dir);
   }
 }
 
@@ -293,11 +302,40 @@ describe("combo request cloning", () => {
     ).reasoning).toEqual({ summary: "concise", effort: "high" });
   });
 
-  test("omits combo defaults for unset, unsupported, and unknown target capabilities", () => {
+  test("omits combo defaults for unset, no-reasoning, and unknown target capabilities", () => {
     expect(concreteComboRequestBody({ model: "combo/x" }, target, null, ["high"]).reasoning).toBeUndefined();
+    // An explicitly empty ladder is how a no-reasoning model is expressed.
     expect(concreteComboRequestBody({ model: "combo/x" }, target, "high", []).reasoning).toBeUndefined();
+    // An unknown ladder stays fail-closed: the picker treats it as a wildcard, runtime injection does not.
     expect(concreteComboRequestBody({ model: "combo/x" }, target, "high", undefined).reasoning).toBeUndefined();
-    expect(concreteComboRequestBody({ model: "combo/x" }, target, "high", ["low", "medium"]).reasoning).toBeUndefined();
+  });
+
+  /**
+   * #3108: a combo configured for `max` routed to a target whose ladder tops out lower
+   * sent NO effort at all, so the provider default applied and the turn ran at `none` —
+   * while the catalog advertised `max` for that same combo, because
+   * effectiveComboDefault downgrades to the nearest supported rung instead of dropping.
+   * The request path now resolves the same way the catalog did.
+   */
+  test("a combo default above the target ladder is downgraded, not dropped (#3108)", () => {
+    expect(concreteComboRequestBody({ model: "combo/x" }, target, "max", ["low", "medium", "high"]).reasoning)
+      .toEqual({ effort: "high" });
+    expect(concreteComboRequestBody({ model: "combo/x" }, target, "high", ["low", "medium"]).reasoning)
+      .toEqual({ effort: "medium" });
+    // Exact support is still passed through untouched.
+    expect(concreteComboRequestBody({ model: "combo/x" }, target, "max", ["high", "max"]).reasoning)
+      .toEqual({ effort: "max" });
+    // Never raises: a request below everything supported takes the lowest rung, not a higher one.
+    expect(concreteComboRequestBody({ model: "combo/x" }, target, "low", ["high", "max"]).reasoning)
+      .toEqual({ effort: "high" });
+    // A caller-supplied effort still wins over the combo default.
+    expect(concreteComboRequestBody(
+      { model: "combo/x", reasoning: { effort: "low" } }, target, "max", ["low", "medium", "high"],
+    ).reasoning).toEqual({ effort: "low" });
+    // The resolved rung merges into a partial reasoning object rather than replacing it.
+    expect(concreteComboRequestBody(
+      { model: "combo/x", reasoning: { summary: "concise" } }, target, "max", ["low", "high"],
+    ).reasoning).toEqual({ summary: "concise", effort: "high" });
   });
 
   test("debug-warns once per unsupported or unknown combo default", () => {
@@ -331,6 +369,7 @@ describe("combo target cooldowns", () => {
     expect(parseRetryAfterMs("120", now)).toBe(120_000);
     expect(parseRetryAfterMs("999999", now)).toBe(600_000);
     expect(parseRetryAfterMs(new Date(now + 90_000).toUTCString(), now)).toBe(90_000);
+    expect(parseRetryAfterMs(new Date(now + 90_000).toUTCString().toLowerCase(), now)).toBe(90_000);
     expect(parseRetryAfterMs(new Date(now + 900_000).toUTCString(), now)).toBe(600_000);
   });
 
@@ -343,6 +382,37 @@ describe("combo target cooldowns", () => {
     expect(parseRetryAfterMs(new Date(now - 1_000).toUTCString(), now)).toBeUndefined();
   });
 
+  test("can preserve valid immediate Retry-After directives", () => {
+    const now = Date.parse("2026-07-18T00:00:00.000Z");
+    const options = { preserveImmediate: true };
+    expect(parseRetryAfterMs("0", now, options)).toBe(1);
+    expect(parseRetryAfterMs(new Date(now - 1_000).toUTCString(), now, options)).toBe(1);
+    expect(parseRetryAfterMs("Sunday, 06-Nov-94 08:49:37 GMT", now, options)).toBe(1);
+    expect(parseRetryAfterMs("Sunday, 06-Nov-50 08:49:37 GMT", now, options)).toBe(600_000);
+    expect(parseRetryAfterMs("Sun Nov  6 08:49:37 1994", now, options)).toBe(1);
+    expect(parseRetryAfterMs("not-a-date", now, options)).toBeUndefined();
+    expect(parseRetryAfterMs("-1", now, options)).toBeUndefined();
+    expect(parseRetryAfterMs("March 1, 2020", now, options)).toBeUndefined();
+    expect(parseRetryAfterMs("Sun Sep 99 99:99:99 2026", now, options)).toBeUndefined();
+    const centuryBoundary = Date.parse("2099-12-31T23:59:00.000Z");
+    expect(parseRetryAfterMs("Friday, 01-Jan-00 00:01:00 GMT", centuryBoundary, options)).toBe(120_000);
+    const fullTimestampBoundary = Date.parse("2026-01-01T00:00:00.000Z");
+    expect(parseRetryAfterMs("Wednesday, 01-Jan-76 00:00:00 GMT", fullTimestampBoundary, options)).toBe(600_000);
+    expect(parseRetryAfterMs("Friday, 31-Dec-76 00:00:00 GMT", fullTimestampBoundary, options)).toBe(1);
+  });
+
+  test("parses asctime Retry-After values as UTC outside the UTC process timezone", () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = "America/Los_Angeles";
+    try {
+      const now = Date.parse("2026-09-06T00:59:00.000Z");
+      expect(parseRetryAfterMs("Sun Sep  6 01:00:00 2026", now)).toBe(60_000);
+    } finally {
+      if (originalTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTimezone;
+    }
+  });
+
   test("expires cooldowns and clears only the requested combo", () => {
     coolComboTarget("free", target, { now: 1_000, cooldownMs: 100 });
     coolComboTarget("other", target, { now: 1_000, cooldownMs: 100 });
@@ -351,6 +421,55 @@ describe("combo target cooldowns", () => {
     expect(isComboTargetInCooldown("other", target, 1_050)).toBe(true);
     clearComboTargetCooldowns("other");
     expect(isComboTargetInCooldown("other", target, 1_050)).toBe(false);
+  });
+
+  test("uses a short cooldown for request-rate 1302 without Retry-After", () => {
+    coolComboTarget("free", target, {
+      now: 1_000,
+      code: "1302",
+      message: "Rate limit reached for requests",
+    });
+    expect(isComboTargetInCooldown("free", target, 1_000 + COMBO_REQUEST_RATE_COOLDOWN_MS - 1)).toBe(true);
+    expect(isComboTargetInCooldown("free", target, 1_000 + COMBO_REQUEST_RATE_COOLDOWN_MS)).toBe(false);
+  });
+
+  test("keeps the default cooldown for usage-window 1308", () => {
+    coolComboTarget("free", target, {
+      now: 1_000,
+      code: "1308",
+      message: "Usage limit reached for 5 hour",
+    });
+    expect(isComboTargetInCooldown("free", target, 1_000 + 59_999)).toBe(true);
+    expect(isComboTargetInCooldown("free", target, 1_000 + 60_000)).toBe(false);
+  });
+
+  test("honors explicit Retry-After over the request-rate default", () => {
+    coolComboTarget("free", target, {
+      now: 1_000,
+      retryAfter: "30",
+      code: "1302",
+    });
+    expect(isComboTargetInCooldown("free", target, 1_000 + 29_999)).toBe(true);
+    expect(isComboTargetInCooldown("free", target, 1_000 + 30_000)).toBe(false);
+  });
+
+  test("reports the soonest remaining cooldown as Retry-After seconds", () => {
+    const later = { provider: "b", model: "m2" };
+    coolComboTarget("free", target, { now: 1_000, cooldownMs: 5_000 });
+    coolComboTarget("free", later, { now: 1_000, cooldownMs: 20_000 });
+    expect(remainingComboCooldownMs("free", 1_000)).toBe(5_000);
+    expect(comboCooldownRetryAfterSeconds("free", 1_000)).toBe("5");
+    expect(comboCooldownRetryAfterSeconds("free", 3_500)).toBe("3");
+    expect(comboCooldownRetryAfterSeconds("missing", 1_000)).toBeUndefined();
+  });
+
+  test("combo unavailable responses advertise remaining cooldown as Retry-After", () => {
+    coolComboTarget("free", target, { now: 1_000, cooldownMs: 5_000 });
+    const response = comboUnavailableResponse("No available targets for combo: free", {
+      retryAfter: comboCooldownRetryAfterSeconds("free", 1_000),
+    });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("5");
   });
 });
 
@@ -382,6 +501,85 @@ describe("combo failure policy and advancement", () => {
     // generic 413 with no structured code keeps its existing conservative handling.
     expect(comboFailureDecision(400, "context_length_exceeded")).toBe("stop");
     expect(comboFailureDecision(413, "request too large")).toBe("stop");
+  });
+
+  test("provider-scoped free-tier and monthly quota failures hop without weakening generic 400 handling", () => {
+    const orca = JSON.stringify({ error: {
+      type: "invalid_request_error",
+      code: "free_rate_limited",
+      message: "This prompt is longer than the free tier allows for a single request.",
+    }});
+    expect(comboFailureDecision(400, orca, { code: "free_rate_limited" })).toBe("hop");
+    expect(comboFailureCooldownScope(400, orca, { code: "free_rate_limited" })).toBe("provider");
+    expect(comboFailureDecision(400, "ordinary invalid request", { code: "invalid_request_error" })).toBe("stop");
+    expect(comboFailureCooldownScope(429, "Monthly usage limit reached. Resets in 14 days.", {
+      code: "GoUsageLimitError",
+    })).toBe("provider");
+    expect(isTransientRequestRateLimit({
+      status: 429,
+      code: "GoUsageLimitError",
+      message: "Monthly usage limit reached. Resets in 14 days.",
+    })).toBe(false);
+    expect(comboFailureCooldownScope(429, "Rate limit reached for requests", { code: "1302" })).toBe("target");
+    expect(isTransientRequestRateLimit({
+      status: 429,
+      code: "1302",
+      message: "Rate limit reached for requests",
+    })).toBe(true);
+  });
+
+  test("failover skips providers with fresh exhausted quota evidence before dispatch", () => {
+    const now = 50_000;
+    const config = baseConfig();
+    setCachedProviderQuotaForTests("a", {
+      monthlyPercent: 100,
+      monthlyResetAt: now + 14 * 24 * 60 * 60_000,
+      updatedAt: now,
+    });
+    const pick = pickComboTarget(config, "free", { now });
+    expect(pick?.target.provider).toBe("b");
+  });
+
+  test("elapsed quota reset does not permanently blacklist a provider", () => {
+    const now = 50_000;
+    const config = baseConfig();
+    setCachedProviderQuotaForTests("a", {
+      monthlyPercent: 100,
+      monthlyResetAt: now - 1,
+      updatedAt: now,
+    });
+    const pick = pickComboTarget(config, "free", { now });
+    expect(pick?.target.provider).toBe("a");
+  });
+
+  test("exhausted credits without an unlimited flag skip the provider", () => {
+    const now = 50_000;
+    const config = baseConfig();
+    setCachedProviderQuotaForTests("a", {
+      creditsUsd: { used: 10, limit: 10, remaining: 0, percent: 100 },
+      updatedAt: now,
+    });
+    expect(pickComboTarget(config, "free", { now })?.target.provider).toBe("b");
+  });
+
+  test("provider-scoped cooldown skips sibling models but leaves other providers eligible", () => {
+    const config = baseConfig({
+      combos: {
+        free: {
+          targets: [
+            { provider: "a", model: "m1" },
+            { provider: "a", model: "m1b" },
+            { provider: "b", model: "m2" },
+          ],
+        },
+      },
+    });
+    config.providers.a!.models = ["m1", "m1b"];
+    const first = pickComboTarget(config, "free", { now: 1_000 })!;
+    const next = advanceComboAfterFailure(config, first, { now: 1_000, cooldownScope: "provider" })!;
+    expect(next.target.provider).toBe("b");
+    expect(isComboTargetInCooldown("free", { provider: "a", model: "m1b" }, 1_001)).toBe(true);
+    expect(isComboTargetInCooldown("free", { provider: "b", model: "m2" }, 1_001)).toBe(false);
   });
 
   test("failure clears the active sticky target without adding a success", () => {
@@ -778,6 +976,7 @@ describe("combo validation and normalization", () => {
       strategy: "failover",
       stickyLimit: 1,
       defaultEffort: "high",
+      reasoningEffortMode: "strict",
       imageInput: "auto",
       alias: null,
       nativeAlias: false,
@@ -785,6 +984,17 @@ describe("combo validation and normalization", () => {
       targets: [{ provider: "a", model: "m1", weight: 2 }],
     });
     expect(normalizeComboConfig({ targets: [{ provider: "a", model: "m1" }] }).defaultEffort).toBeNull();
+    // Anything that is not the literal "adaptive" normalizes to today's behavior, so a
+    // malformed or absent value can never silently opt a user in.
+    expect(normalizeComboConfig({ targets: [{ provider: "a", model: "m1" }] }).reasoningEffortMode).toBe("strict");
+    expect(normalizeComboConfig({
+      reasoningEffortMode: "adaptive",
+      targets: [{ provider: "a", model: "m1" }],
+    }).reasoningEffortMode).toBe("adaptive");
+    expect(comboConfigIssues("free", {
+      reasoningEffortMode: "aggressive",
+      targets: [{ provider: "a", model: "m1" }],
+    }, baseConfig().providers).some(issue => issue.path[0] === "reasoningEffortMode")).toBe(true);
     expect(comboDefaultEffort(baseConfig(), "free")).toBeNull();
     const aliased = baseConfig({
       combos: { free: { ...VALID_COMBO, alias: "  deepseek-v4-flash  " } },

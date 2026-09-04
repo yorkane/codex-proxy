@@ -162,6 +162,33 @@ function expectTableLoaded(container: HTMLElement, model: string): void {
   expect(container.textContent).toContain(model);
 }
 
+test("Logs: renders the ordered ten-column layout schema", async () => {
+  globalThis.fetch = (async (input) => {
+    if (!String(input).includes("/api/logs")) return new Response(null, { status: 404 });
+    return jsonResponse([sampleLog]);
+  }) as typeof fetch;
+
+  const { root, container } = await mountLogs();
+  await flushMicrotasks();
+
+  const colgroup = container.querySelector(".logs-table > colgroup");
+  expect(colgroup).not.toBeNull();
+  expect([...colgroup!.children].map(column => column.className)).toEqual([
+    "logs-col-time",
+    "logs-col-tokens",
+    "logs-col-rate",
+    "logs-col-cost",
+    "logs-col-model",
+    "logs-col-effort",
+    "logs-col-provider",
+    "logs-col-status",
+    "logs-col-request",
+    "logs-col-duration",
+  ]);
+
+  await act(async () => { root.unmount(); });
+});
+
 test("Logs: initial failure shows error; silent failure keeps it; retry then recovers", async () => {
   const calls: string[] = [];
   let mode: "fail" | "ok" = "fail";
@@ -444,8 +471,11 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
   await flushMicrotasks();
   const overviewReasoning = container.querySelector<HTMLElement>(".log-reasoning-cell");
   expect(overviewReasoning?.textContent).toContain("max → high");
-  expect(overviewReasoning?.textContent).toContain("reasoning_effort=high");
   expect(overviewReasoning?.textContent).not.toContain("max → high → high");
+  // The wire field left the table cell (it repeated the label and overflowed the column);
+  // it stays on the cell title and in the attempt rows below.
+  expect(overviewReasoning?.textContent).not.toContain("reasoning_effort=high");
+  expect(overviewReasoning?.getAttribute("title")).toBe("reasoning_effort=high");
   await act(async () => {
     container.querySelector<HTMLButtonElement>(".log-detail-btn")!.click();
   });

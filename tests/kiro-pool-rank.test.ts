@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   clearGenericFailoverHealth,
   forgetGenericFailoverRoster,
+  genericFailoverRetryAfterSeconds,
   preferredInitialAccount,
   rotateGenericOAuthAccountOn429,
 } from "../src/oauth/generic-account-failover";
@@ -26,6 +27,7 @@ import {
   clearKiroAccountUsageState,
   commitKiroAccountUsageState,
 } from "../src/providers/kiro-usage";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const realFetch = globalThis.fetch;
 
@@ -145,16 +147,16 @@ describe("pre-dispatch account preference", () => {
   const originalHome = process.env.OPENCODEX_HOME;
   let home: string;
 
-  async function seedAccounts(count: number): Promise<string[]> {
+  async function seedAccounts(count: number, providerName = "xai"): Promise<string[]> {
     for (let i = 0; i < count; i++) {
-      await saveCredential("xai", {
+      await saveCredential(providerName, {
         access: `access-${i}`,
         refresh: `refresh-${i}`,
         expires: Date.now() + 3_600_000,
         accountId: `uuid-${i}`,
       } as never, { addAccount: true });
     }
-    return getAccountSet("xai")?.accounts.map(a => a.id) ?? [];
+    return getAccountSet(providerName)?.accounts.map(a => a.id) ?? [];
   }
 
   test("the account with more headroom is chosen before the first request", async () => {
@@ -173,7 +175,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -193,7 +195,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -211,7 +213,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -233,7 +235,110 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("an exhausted account without Retry-After stays cooled through its reset window", async () => {
+    home = mkdtempSync(join(tmpdir(), "ocx-predispatch-"));
+    process.env.OPENCODEX_HOME = home;
+    clearGenericFailoverHealth();
+    clearAccountQuotaCache();
+    try {
+      const ids = await seedAccounts(2, "kiro");
+      const now = Date.now();
+      seedExhausted(ids[0]!, now + 60 * 60_000);
+      const kiroConfig = {
+        providers: { kiro: OAUTH_PROVIDER },
+      } as unknown as OcxConfig;
+
+      expect(rotateGenericOAuthAccountOn429(kiroConfig, "kiro", ids[0]!, null, now)).toBe(ids[1]);
+      expect(genericFailoverRetryAfterSeconds("kiro", now)).toBe(60 * 60);
+    } finally {
+      clearGenericFailoverHealth();
+      clearAccountQuotaCache();
+      if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = originalHome;
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("an unparseable Retry-After uses an exhausted account reset", async () => {
+    home = mkdtempSync(join(tmpdir(), "ocx-predispatch-"));
+    process.env.OPENCODEX_HOME = home;
+    clearGenericFailoverHealth();
+    clearAccountQuotaCache();
+    try {
+      const ids = await seedAccounts(2, "kiro");
+      const now = Date.now();
+      seedExhausted(ids[0]!, now + 60 * 60_000);
+      const kiroConfig = {
+        providers: { kiro: OAUTH_PROVIDER },
+      } as unknown as OcxConfig;
+
+      expect(
+        rotateGenericOAuthAccountOn429(kiroConfig, "kiro", ids[0]!, "not-a-duration", now),
+      ).toBe(ids[1]);
+      expect(genericFailoverRetryAfterSeconds("kiro", now)).toBe(60 * 60);
+    } finally {
+      clearGenericFailoverHealth();
+      clearAccountQuotaCache();
+      if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = originalHome;
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("valid immediate Retry-After values override an exhausted account reset", async () => {
+    home = mkdtempSync(join(tmpdir(), "ocx-predispatch-"));
+    process.env.OPENCODEX_HOME = home;
+    clearGenericFailoverHealth();
+    clearAccountQuotaCache();
+    try {
+      const ids = await seedAccounts(2, "kiro");
+      const now = Date.now();
+      seedExhausted(ids[0]!, now + 60 * 60_000);
+      const kiroConfig = {
+        providers: { kiro: OAUTH_PROVIDER },
+      } as unknown as OcxConfig;
+
+      for (const retryAfter of ["0", new Date(now - 1_000).toUTCString()]) {
+        clearGenericFailoverHealth();
+        expect(
+          rotateGenericOAuthAccountOn429(kiroConfig, "kiro", ids[0]!, retryAfter, now),
+        ).toBe(ids[1]);
+        expect(genericFailoverRetryAfterSeconds("kiro", now)).toBe(1);
+      }
+    } finally {
+      clearGenericFailoverHealth();
+      clearAccountQuotaCache();
+      if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = originalHome;
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("a valid Retry-After overrides an exhausted account reset", async () => {
+    home = mkdtempSync(join(tmpdir(), "ocx-predispatch-"));
+    process.env.OPENCODEX_HOME = home;
+    clearGenericFailoverHealth();
+    clearAccountQuotaCache();
+    try {
+      const ids = await seedAccounts(2, "kiro");
+      const now = Date.now();
+      seedExhausted(ids[0]!, now + 60 * 60_000);
+      const kiroConfig = {
+        providers: { kiro: OAUTH_PROVIDER },
+      } as unknown as OcxConfig;
+
+      expect(rotateGenericOAuthAccountOn429(kiroConfig, "kiro", ids[0]!, "120", now)).toBe(ids[1]);
+      expect(genericFailoverRetryAfterSeconds("kiro", now)).toBe(120);
+    } finally {
+      clearGenericFailoverHealth();
+      clearAccountQuotaCache();
+      if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = originalHome;
+      removeTreeWithRetry(home);
     }
   });
 
@@ -256,7 +361,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -291,7 +396,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -325,7 +430,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -358,7 +463,7 @@ describe("pre-dispatch account preference", () => {
       clearAccountQuotaCache();
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = originalHome;
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 });

@@ -18,6 +18,7 @@ import { collectOrcaCodexHomeDiagnostic, type OrcaCodexHomeDiagnostic } from "..
 import { grokFenceEndpointDrift, readGrokStatus } from "../grok/status";
 import { claudeDesktopIntegrationEnabled } from "../codex/desired-state";
 import { claudeDesktopPolicyHealth, probeClaudeDesktopPolicy, type ClaudeDesktopPolicyHealth } from "../claude/desktop-policy";
+import { collectClientConnectionStatus } from "./connect";
 
 type HealthCheck = {
   ok: boolean;
@@ -63,6 +64,18 @@ export type CliStatusJson = {
     source: "default" | "file" | "fallback";
     error: string | null;
   };
+  connection: {
+    state: "disconnected" | "connected" | "invalid" | "mismatched";
+    reason?: string;
+    serverUrl?: string;
+    managementUrl?: string;
+    protocolVersion?: number;
+    apiKeyId?: string;
+    selectedClients?: string[];
+    catalog?: "present" | "missing" | "unsafe";
+    catalogAgeSeconds?: number;
+    credentialFile: "owned" | "missing" | "changed" | "unsafe";
+  };
   service: { summary: string };
   codexShim: { summary: string };
   codexPlugins: CodexPluginsDiagnostic;
@@ -107,20 +120,35 @@ export type ListenTarget = {
   dashboardUrl: string;
 };
 
+type StatusListenConfig = Pick<OcxConfig, "port" | "hostname" | "runtimeRole" | "hub">;
+
+function statusDashboardUrl(config: StatusListenConfig, hostname: string | undefined, port: number): string {
+  const managementOrigin = config.runtimeRole === "hub" ? config.hub?.managementPublicOrigin : undefined;
+  if (managementOrigin) return managementOrigin.endsWith("/") ? managementOrigin : `${managementOrigin}/`;
+
+  const reachableHostname = probeHostname(hostname);
+  const dashboardHostname = reachableHostname === "127.0.0.1"
+    || reachableHostname === "[::1]"
+    || reachableHostname.toLowerCase() === "localhost"
+    ? "localhost"
+    : reachableHostname;
+  return `http://${dashboardHostname}:${port}/`;
+}
+
 export function selectListenTarget(
-  config: Pick<OcxConfig, "port" | "hostname">,
+  config: StatusListenConfig,
   pid: number | null,
   runtimePort: RuntimePortState | null,
 ): ListenTarget {
   const currentRuntimePort = pid && runtimePort?.pid === pid ? runtimePort : null;
   const port = currentRuntimePort ? currentRuntimePort.port : config.port ?? 10100;
-  const hostname = currentRuntimePort ? currentRuntimePort.hostname : config.hostname;
+  const hostname = currentRuntimePort?.hostname ?? config.hostname;
   return {
     port,
     hostname,
     source: currentRuntimePort ? "runtime" : "config",
     healthUrl: `http://${probeHostname(hostname)}:${port}/healthz`,
-    dashboardUrl: `http://localhost:${port}/`,
+    dashboardUrl: statusDashboardUrl(config, hostname, port),
   };
 }
 
@@ -309,6 +337,7 @@ export async function collectStatus(): Promise<CliStatusView> {
     desiredEnabled: claudeDesktopIntegrationEnabled(config),
     policy: claudeDesktopPolicyHealth(probeClaudeDesktopPolicy()),
   };
+  const clientConnection = collectClientConnectionStatus();
   // Prefer identity-verified liveness (runtime-port + /healthz) over ocx.pid alone (#618).
   // Pass the already-resolved diagnostics config so findLiveProxy does not re-load and
   // warn on malformed config.json (status --json must stay stderr-clean).
@@ -327,7 +356,7 @@ export async function collectStatus(): Promise<CliStatusView> {
       hostname: live.hostname,
       source: live.source,
       healthUrl: `http://${probeHostname(live.hostname)}:${live.port}/healthz`,
-      dashboardUrl: `http://localhost:${live.port}/`,
+      dashboardUrl: statusDashboardUrl(config, live.hostname, live.port),
     }
     : selectListenTarget(config, pidFile, pidFile ? readRuntimePort(pidFile) : null);
   // findLiveProxy already identity-probed /healthz; avoid a second fetch that can race.
@@ -490,6 +519,18 @@ export async function collectStatus(): Promise<CliStatusView> {
       config: {
         source: configDiagnostics.source,
         error: configDiagnostics.error,
+      },
+      connection: {
+        state: clientConnection.state,
+        ...(clientConnection.reason ? { reason: clientConnection.reason } : {}),
+        ...(clientConnection.serverUrl ? { serverUrl: clientConnection.serverUrl } : {}),
+        ...(clientConnection.managementUrl ? { managementUrl: clientConnection.managementUrl } : {}),
+        ...(clientConnection.protocolVersion ? { protocolVersion: clientConnection.protocolVersion } : {}),
+        ...(clientConnection.apiKeyId ? { apiKeyId: clientConnection.apiKeyId } : {}),
+        ...(clientConnection.selectedClients ? { selectedClients: [...clientConnection.selectedClients] } : {}),
+        catalog: clientConnection.catalog,
+        ...(clientConnection.catalogAgeSeconds !== undefined ? { catalogAgeSeconds: clientConnection.catalogAgeSeconds } : {}),
+        credentialFile: clientConnection.token,
       },
       service: { summary: serviceSummary },
       codexShim: { summary: codexShimSummary },
