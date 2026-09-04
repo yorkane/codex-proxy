@@ -237,6 +237,12 @@ export function bridgeToResponsesSSE(
     onUsage?: (usage: OcxUsage | undefined) => void;
     /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
     declaredToolNames?: ReadonlySet<string>;
+    /**
+     * Per-provider phantom tool names (undeclaredToolAllowlist): an undeclared call named here is
+     * dropped silently — item, argument deltas, and terminal event never reach the client — instead
+     * of failing the whole turn. Only consulted for names the undeclared guard would otherwise reject.
+     */
+    undeclaredToolPhantomNames?: ReadonlySet<string>;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     /**
@@ -1119,6 +1125,15 @@ export function bridgeToResponsesSSE(
               const mapped = toolNsMap?.get(effectiveName);
               const realName = mapped?.name ?? effectiveName;
               if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
+                // Per-provider phantom allowlist (undeclaredToolAllowlist): a hallucinated native
+                // tool name this provider is known to replay is dropped whole — no item is ever
+                // opened, so its deltas and terminal close below are no-ops against the null
+                // currentToolCall — and the turn continues without the phantom call.
+                if (options.undeclaredToolPhantomNames
+                  && (options.undeclaredToolPhantomNames.has(effectiveName)
+                    || options.undeclaredToolPhantomNames.has(event.name))) {
+                  break;
+                }
                 const failure = responseError(
                   502,
                   "upstream_error",
@@ -1560,6 +1575,8 @@ function buildResponseJSONWithBudget(
     toolNsMap?: Map<string, { namespace: string; name: string; freeform?: true }>;
     /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
     declaredToolNames?: ReadonlySet<string>;
+    /** Per-provider phantom names dropped instead of failing the turn (see bridgeToResponsesSSE). */
+    undeclaredToolPhantomNames?: ReadonlySet<string>;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     freeformToolNames?: Set<string>;
@@ -1892,6 +1909,14 @@ function buildResponseJSONWithBudget(
         flushToolCall();
         const effectiveName = normalizeDeclaredToolName(e.name, options?.declaredToolNames);
         if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
+          // Phantom-allowlist drop for the batch path (see the streaming twin above): the call
+          // is never opened — currentToolCallId stays empty, which every downstream flush
+          // keys on — so its deltas and end event are no-ops and no item enters the output.
+          if (options.undeclaredToolPhantomNames
+            && (options.undeclaredToolPhantomNames.has(effectiveName)
+              || options.undeclaredToolPhantomNames.has(e.name))) {
+            break;
+          }
           errorEvent = {
             type: "error",
             message: `routed provider emitted undeclared client tool "${effectiveName}"; only request-declared tools may be called`,

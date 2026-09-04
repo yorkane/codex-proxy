@@ -642,13 +642,25 @@ export interface OcxProviderConfig {
    */
   reasoningSplitModels?: string[];
   /**
-   * Model ids whose chat endpoint carries thinking as a structured `reasoning_details` array
-   * (MiniMax M-series with `reasoning_split`): stream deltas repeat each detail's `text` as a
-   * cumulative snapshot, so the adapter prefix-diffs instead of appending, and preserved
-   * reasoning replays as a `reasoning_details` array rather than a `reasoning_content` string
-   * (upstream requires the array back verbatim to keep interleaved thinking intact).
-   */
+  * Model ids whose chat endpoint carries thinking as a structured `reasoning_details` array
+  * (MiniMax M-series with `reasoning_split`): stream deltas repeat each detail's `text` as a
+  * cumulative snapshot, so the adapter prefix-diffs instead of appending, and preserved
+  * reasoning replays as a `reasoning_details` array rather than a `reasoning_content` string
+  * (upstream requires the array back verbatim to keep interleaved thinking intact).
+  */
   reasoningDetailsModels?: string[];
+  /**
+   * Tool names this provider may call even when the current turn did not declare them
+   * (#3486-family hallucination). The undeclared-tool guard (#1700) fail-closes on any routed
+   * `function_call`/`custom_tool_call` outside the request catalog; some self-hosted gateways
+   * replay native tool names they were trained on (`update_plan`, `collaboration__update_plan`,
+   * ...) and the guard then kills the stream. Every call named here is DROPPED instead — the
+   * item and its argument deltas never reach the client — so the turn completes honestly
+   * without the phantom call. Match is exact against both the bare name and the flattened
+   * `namespace__name` form. Default off; the guard stays fail-closed for every other name, so
+   * this is a per-provider allowlist of known phantom names, not a policy loosening.
+   */
+  undeclaredToolAllowlist?: string[];
   /**
    * Model ids whose reasoning is a vendor `thinking: {type}` toggle on the
    * chat-completions wire (MiMo v2.x, GLM 5/5.1 style), NOT an OpenAI `reasoning_effort` ladder.

@@ -386,6 +386,7 @@ import {
   undeclaredToolCallMessage,
   undeclaredToolCallName,
   undeclaredToolCallNameInResponse,
+  stripDroppableToolCallsInJsonString,
   type ProviderExecutedCallType,
 } from "../responses-undeclared-tool-guard";
 import { createGithubCopilotResponsesBlockRewrite } from "../github-copilot-responses-repair";
@@ -3695,6 +3696,13 @@ async function handleResponsesInner(
   const refreshRoutedNamespaceToolAliases = (builtRequest: AdapterRequest): void => {
     routedNamespaceToolAliases = builtRequest.convertedRoutedNamespaceToolAliases ?? new Map();
   };
+  // Per-provider phantom tool names (undeclaredToolAllowlist): an undeclared call named here is
+  // dropped instead of failing the turn. Computed once per route from the provider config and
+  // consumed by the passthrough guard rewrite, the passthrough terminal checks, and both bridge
+  // translators; empty (the default) leaves every fail-closed path byte-identical.
+  const undeclaredPhantomNames: ReadonlySet<string> = new Set(
+    route.provider.undeclaredToolAllowlist ?? [],
+  );
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
     let hostAdmissionLease = pendingHostAdmissionLease;
@@ -3936,6 +3944,7 @@ async function handleResponsesInner(
         declaredWireToolNames,
         declaredNamelessClientCallTypes,
         providerExecutedCallTypes,
+        undeclaredPhantomNames,
       ) !== undefined) {
         inspectionSawUndeclaredTool = true;
       }
@@ -3956,6 +3965,7 @@ async function handleResponsesInner(
             declaredWireToolNames,
             declaredNamelessClientCallTypes,
             providerExecutedCallTypes,
+            undeclaredPhantomNames,
           ) !== undefined
         ) {
           return;
@@ -4793,6 +4803,7 @@ async function handleResponsesInner(
             declaredWireToolNames,
             declaredNamelessClientCallTypes,
             providerExecutedCallTypes,
+            undeclaredPhantomNames,
           )
           : undefined,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
@@ -5006,10 +5017,14 @@ async function handleResponsesInner(
         // The bounded-JSON answer bypasses the SSE payload rewrite, so content-
         // channel reasoning needs the same normalization here for the plain
         // JSON answer and every reframed-SSE variant built from clientJson.
-        return parsed.options.hideThinkingSummary !== true
+        return stripDroppableToolCallsInJsonString(
+          parsed.options.hideThinkingSummary !== true
           && routeUsesContentChannelReasoning(route.provider, route.modelId)
           ? rewriteReasoningSummaryInJsonString(modelRewritten)
-          : modelRewritten;
+          : modelRewritten,
+          declaredWireToolNames,
+          undeclaredPhantomNames,
+        );
       })();
       // #1700: same fail-closed policy as the SSE relay above. Both the plain JSON answer and
       // the reframed-SSE branch below are built from this body, so one check covers them. This
@@ -5595,6 +5610,7 @@ async function handleResponsesInner(
           stallTimeoutSec: config.stallTimeoutSec,
           hideThinkingSummary: parsed.options.hideThinkingSummary,
           declaredToolNames,
+          undeclaredToolPhantomNames: undeclaredPhantomNames,
           toolParameterSchemas,
           ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
           ...(routedCompaction ? { compaction: true } : {}),
@@ -5668,6 +5684,7 @@ async function handleResponsesInner(
       hideThinkingSummary: parsed.options.hideThinkingSummary,
       toolNsMap,
       declaredToolNames,
+      undeclaredToolPhantomNames: undeclaredPhantomNames,
       toolParameterSchemas,
       freeformToolNames,
       toolSearchToolNames,
@@ -6673,6 +6690,7 @@ async function handleResponsesInner(
         stallTimeoutSec: config.stallTimeoutSec,
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         declaredToolNames,
+        undeclaredToolPhantomNames: undeclaredPhantomNames,
       toolParameterSchemas,
         ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
         ...(routedCompaction ? { compaction: true } : {}),
@@ -6751,6 +6769,7 @@ async function handleResponsesInner(
       hideThinkingSummary: parsed.options.hideThinkingSummary,
       toolNsMap,
       declaredToolNames,
+      undeclaredToolPhantomNames: undeclaredPhantomNames,
       toolParameterSchemas,
       freeformToolNames,
       toolSearchToolNames,
