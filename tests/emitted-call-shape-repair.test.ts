@@ -57,6 +57,18 @@ describe('repairEmittedToolName', () => {
     expect(repairEmittedToolName('collaboration__update_plan', bareOnly)).toBe('update_plan');
   });
 });
+describe('sandbox-namespace composition repair', () => {
+  test('tools__web_run repairs to declared web__run', () => {
+    const declared = new Set(['web__run', 'exec']);
+    expect(repairEmittedToolName('tools__web_run', declared)).toBe('web__run');
+  });
+  test('tools.exec repairs to declared exec', () => {
+    expect(repairEmittedToolName('tools.exec', new Set(['exec']))).toBe('exec');
+  });
+  test('tools__ prefix without a declared remainder stays phantom', () => {
+    expect(repairEmittedToolName('tools__web_run', new Set(['exec']))).toBe('tools__web_run');
+  });
+});
 
 describe('bridge call-shape repair', () => {
   test('a bare sub-agent call reaches the client under its declared name', async () => {

@@ -91,6 +91,22 @@ export function repairEmittedToolName(name: string, declared: ReadonlySet<string
     const bare = name.slice(name.indexOf("__") + 2);
     if (bare.length > 0) push(bare);
   }
+  // Sandbox-namespace composition: tools__web_run means the model prefixed the JS
+  // sandbox namespace onto a real tool name. Strip the prefix when the remainder
+  // is declared (the intended call is recoverable), otherwise leave it phantom.
+  if (candidates.length === 0 && (name.startsWith("tools__") || name.startsWith("tools."))) {
+    const stripped = name.startsWith("tools__") ? name.slice("tools__".length) : name.slice("tools.".length);
+    if (stripped.length > 0) {
+      push(stripped);
+      // The model also tends to collapse the namespace separator itself
+      // (tools__web_run -> web_run for declared web__run), so fall back to a
+      // separator-insensitive exact match when the plain strip misses.
+      const squashed = stripped.replaceAll("__", "_");
+      for (const d of declared) {
+        if (d.replaceAll("__", "_") === squashed) push(d);
+      }
+    }
+  }
   return candidates.length === 1 ? candidates[0] : name;
 }
 
