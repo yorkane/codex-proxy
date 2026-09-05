@@ -6,6 +6,7 @@ export {
   CODE_MODE_EXEC_TOOL_NAME,
   namespacedToolName,
   normalizeDeclaredToolName,
+  repairEmittedToolName,
   toolChoiceAliases,
   createToolChoiceResolver,
   toolChoiceCandidates,

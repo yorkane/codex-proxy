@@ -55,6 +55,45 @@ const CODE_MODE_HELPER_TOOL_NAMES = [
  */
 export const CODE_MODE_EXEC_TOOL_NAME = "exec";
 
+/**
+ * Collaboration/sub-agent call-shape repair.
+ *
+ * Routed models (Q38-class) frequently emit a Codex tool in a different naming
+ * form than the request declared: the bare name for a namespaced declaration
+ * (spawn_agent for collaboration__spawn_agent), the dotted form
+ * (collaboration.spawn_agent), or a functions__-prefixed form. When exactly one
+ * declared wire name matches the emitted one after flattening, rewrite the call
+ * to that declared name so the turn survives; ambiguous or unmatched names fall
+ * through to the undeclared phantom guard unchanged.
+ */
+export function repairEmittedToolName(name: string, declared: ReadonlySet<string> | undefined): string {
+  if (!declared || declared.size === 0 || declared.has(name)) return name;
+  const candidates: string[] = [];
+  const push = (n: string) => {
+    if (declared.has(n) && !candidates.includes(n)) candidates.push(n);
+  };
+  // functions__exec / functions.exec are the historical ChatGPT prefix for the
+  // built-in surface; the current catalog declares the bare name.
+  if (name.startsWith("functions__")) push(name.slice("functions__".length));
+  if (name.startsWith("functions.")) push(name.slice("functions.".length));
+  // Dotted namespace form: collaboration.spawn_agent -> collaboration__spawn_agent.
+  if (name.includes(".")) push(name.replaceAll(".", "__"));
+  // Bare name: unique declared namespace__name suffix match.
+  if (!name.includes("__") && !name.includes(".")) {
+    const suffix = "__" + name;
+    for (const d of declared) {
+      if (d.length > suffix.length && d.endsWith(suffix)) push(d);
+    }
+  }
+  // Namespaced emission with only the bare name declared: collaboration__update_plan
+  // -> update_plan. Only when the bare form is declared and the full form is not.
+  if (candidates.length === 0 && name.includes("__")) {
+    const bare = name.slice(name.indexOf("__") + 2);
+    if (bare.length > 0) push(bare);
+  }
+  return candidates.length === 1 ? candidates[0] : name;
+}
+
 export function normalizeDeclaredToolName(
   name: string,
   declared: ReadonlySet<string> | undefined,

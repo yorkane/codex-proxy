@@ -34,7 +34,7 @@ import {
   stripCitationMarkers,
   type CitationMarkerFilter,
 } from "./responses/citation-markers";
-import { normalizeDeclaredToolName } from "./types";
+import { normalizeDeclaredToolName, repairEmittedToolName } from "./types";
 import { usageDisplayTotalTokens } from "./usage/totals";
 import { appendSafeWebSearchSource, safeWebSearchSources } from "./web-search/sources";
 import {
@@ -1132,7 +1132,13 @@ export function bridgeToResponsesSSE(
                 rememberReasoningForCall(event.id, rawReasoningForNextToolCall, replayCacheScope);
               }
               if (currentToolCall) closeCurrentToolCall();
-              const effectiveName = normalizeDeclaredToolName(event.name, options?.declaredToolNames);
+              // Repair known Codex call-shape mistakes (bare spawn_agent, dotted
+              // collaboration.spawn_agent, functions__exec) back to the declared wire
+              // name before the undeclared phantom guard runs.
+              const effectiveName = repairEmittedToolName(
+                normalizeDeclaredToolName(event.name, options?.declaredToolNames),
+                options?.declaredToolNames,
+              );
               const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
                 ? event.name
                 : undefined;
@@ -1951,7 +1957,11 @@ function buildResponseJSONWithBudget(
           rememberReasoningForCall(e.id, rawReasoningForNextToolCall, replayCacheScope);
         }
         flushToolCall();
-        const effectiveName = normalizeDeclaredToolName(e.name, options?.declaredToolNames);
+        // Same call-shape repair as the streaming twin above.
+        const effectiveName = repairEmittedToolName(
+          normalizeDeclaredToolName(e.name, options?.declaredToolNames),
+          options?.declaredToolNames,
+        );
         if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
           // Phantom-allowlist drop for the batch path (see the streaming twin above): the call
           // is never opened — currentToolCallId stays empty, which every downstream flush
