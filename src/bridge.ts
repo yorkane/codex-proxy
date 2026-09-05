@@ -17,6 +17,7 @@ import {
 } from "./lib/errors";
 import { redactSecretString } from "./lib/redact";
 import { repairFreeformToolInput } from "./responses/apply-patch-envelope";
+import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "./responses/exec-envelope-repair";
 import { encodeCompactionSummary } from "./responses/compaction";
 import { compileCodeModeHelperInput } from "./responses/code-mode-helper-compat";
 import { isTruncatedStopReason, truncationReasonFor } from "./responses/truncated-stop-reason";
@@ -285,7 +286,20 @@ export function bridgeToResponsesSSE(
     codeModeHelperName?: string,
   ): string => codeModeHelperName
     ? compileCodeModeHelperInput(args, codeModeHelperName)
-    : repairFreeformToolInput(args, toolName, namespace);
+    : execEnvelopeAwareFreeformInput(args, toolName, namespace);
+  // exec is freeform JavaScript for the client VM; a leaked tool-call envelope is
+  // dead-on-arrival syntax there, so convert it into an actionable directive error.
+  const execEnvelopeAwareFreeformInput = (
+    args: string,
+    toolName: string,
+    namespace?: string,
+  ): string => {
+    const unwrapped = repairFreeformToolInput(args, toolName, namespace);
+    const ownsJsGrammar = namespace === undefined || namespace === "functions";
+    return ownsJsGrammar && toolName === EXEC_REPAIR_TOOL_NAME
+      ? repairExecEnvelopeLeak(unwrapped)
+      : unwrapped;
+  };
   // Best-effort unwrap of a PARTIAL freeform arg buffer for live input streaming
   // (`response.custom_tool_call_input.delta` — codex-rs uses it for UI preview only;
   // the completed custom_tool_call item stays authoritative). Compact `{"input":"...`
@@ -1685,7 +1699,18 @@ function buildResponseJSONWithBudget(
     codeModeHelperName?: string,
   ): string => codeModeHelperName
     ? compileCodeModeHelperInput(args, codeModeHelperName)
-    : repairFreeformToolInput(args, toolName, namespace);
+    : execEnvelopeAwareFreeformInput(args, toolName, namespace);
+  const execEnvelopeAwareFreeformInput = (
+    args: string,
+    toolName: string,
+    namespace?: string,
+  ): string => {
+    const unwrapped = repairFreeformToolInput(args, toolName, namespace);
+    const ownsJsGrammar = namespace === undefined || namespace === "functions";
+    return ownsJsGrammar && toolName === EXEC_REPAIR_TOOL_NAME
+      ? repairExecEnvelopeLeak(unwrapped)
+      : unwrapped;
+  };
   const parseArgsObj = (args: string): Record<string, unknown> => {
     try { const o = JSON.parse(args); return o && typeof o === "object" ? o : {}; } catch { return {}; }
   };
