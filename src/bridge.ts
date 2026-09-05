@@ -17,6 +17,8 @@ import {
 } from "./lib/errors";
 import { redactSecretString } from "./lib/redact";
 import { repairFreeformToolInput } from "./responses/apply-patch-envelope";
+import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "./responses/exec-envelope-repair";
+import { resolveEmittedCall } from "./responses/emitted-call-guard";
 import { encodeCompactionSummary } from "./responses/compaction";
 import { compileCodeModeHelperInput } from "./responses/code-mode-helper-compat";
 import { isTruncatedStopReason, truncationReasonFor } from "./responses/truncated-stop-reason";
@@ -28,7 +30,11 @@ import {
   awaitThoughtSignatureDurability,
 } from "./responses/thought-signature-replay";
 import { resolveStallTimeoutSec } from "./stall-timeout";
-import { normalizeDeclaredToolName } from "./types";
+import {
+  createCitationMarkerFilter,
+  stripCitationMarkers,
+  type CitationMarkerFilter,
+} from "./responses/citation-markers";
 import { usageDisplayTotalTokens } from "./usage/totals";
 import { appendSafeWebSearchSource, safeWebSearchSources } from "./web-search/sources";
 import {
@@ -54,6 +60,10 @@ function sseEvent(name: string, data: Record<string, unknown>): string {
   return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function responsesUsage(usage: OcxUsage | undefined): Record<string, unknown> {
   // input_tokens_details / output_tokens_details are ALWAYS emitted (zero defaults):
   // strict Responses clients deserialize them as required fields — grok-build's pinned
@@ -75,7 +85,24 @@ function responsesUsage(usage: OcxUsage | undefined): Record<string, unknown> {
   const inputTokens = usage.contextTotalTokens !== undefined
     ? Math.max(0, usage.contextTotalTokens - usage.outputTokens)
     : usage.inputTokens;
+  // openai/codex#41980 parity: unknown upstream usage fields (subscription metadata, future
+  // counters) pass through the rebuild. Normalized values stay authoritative for the known
+  // keys (they are derived from the same raw values, so this never disagrees with upstream).
+  const raw: Record<string, unknown> = usage.rawUsage ?? {};
+  // cache_write_tokens is a KNOWN key: it is emitted only from the validated normalized
+  // value below, never copied through raw (an unknown-shaped value must not leak into the
+  // normalized contract).
+  const rawInputDetails = isRecord(raw.input_tokens_details)
+    ? Object.fromEntries(Object.entries(raw.input_tokens_details as Record<string, unknown>)
+      .filter(([key]) => key !== "cache_write_tokens"))
+    : {} as Record<string, unknown>;
+  const rawOutputDetails = isRecord(raw.output_tokens_details)
+    ? raw.output_tokens_details as Record<string, unknown>
+    : {} as Record<string, unknown>;
   const out: Record<string, unknown> = {
+    ...Object.fromEntries(Object.entries(raw).filter(([key]) =>
+      key !== "input_tokens" && key !== "output_tokens" && key !== "total_tokens"
+      && key !== "input_tokens_details" && key !== "output_tokens_details")),
     input_tokens: inputTokens,
     output_tokens: usage.outputTokens,
     total_tokens: usage.contextTotalTokens !== undefined
@@ -85,18 +112,19 @@ function responsesUsage(usage: OcxUsage | undefined): Record<string, unknown> {
   // cached_tokens carries cache READS only, matching OpenAI semantics, and is always present
   // (zero default) for strict clients. Clamp to inputTokens so a provider's absolute
   // checkpoint can never report more cache reads than input.
-  const inputDetails: Record<string, number> = {
+  const inputDetails: Record<string, unknown> = {
+    ...rawInputDetails,
     cached_tokens: Math.min(usage.cachedInputTokens ?? 0, inputTokens),
   };
   if (usage.cacheCreationInputTokens !== undefined) {
-    const cacheRead = inputDetails.cached_tokens ?? 0;
+    const cacheRead = typeof inputDetails.cached_tokens === "number" ? inputDetails.cached_tokens : 0;
     inputDetails.cache_write_tokens = Math.min(
       usage.cacheCreationInputTokens,
       Math.max(0, inputTokens - cacheRead),
     );
   }
   out.input_tokens_details = inputDetails;
-  out.output_tokens_details = { reasoning_tokens: usage.reasoningOutputTokens ?? 0 };
+  out.output_tokens_details = { ...rawOutputDetails, reasoning_tokens: usage.reasoningOutputTokens ?? 0 };
   return out;
 }
 
@@ -210,6 +238,12 @@ export function bridgeToResponsesSSE(
     onUsage?: (usage: OcxUsage | undefined) => void;
     /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
     declaredToolNames?: ReadonlySet<string>;
+    /**
+     * Per-provider phantom tool names (undeclaredToolAllowlist): an undeclared call named here is
+     * dropped silently — item, argument deltas, and terminal event never reach the client — instead
+     * of failing the whole turn. Only consulted for names the undeclared guard would otherwise reject.
+     */
+    undeclaredToolPhantomNames?: ReadonlySet<string>;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     /**
@@ -252,7 +286,20 @@ export function bridgeToResponsesSSE(
     codeModeHelperName?: string,
   ): string => codeModeHelperName
     ? compileCodeModeHelperInput(args, codeModeHelperName)
-    : repairFreeformToolInput(args, toolName, namespace);
+    : execEnvelopeAwareFreeformInput(args, toolName, namespace);
+  // exec is freeform JavaScript for the client VM; a leaked tool-call envelope is
+  // dead-on-arrival syntax there, so convert it into an actionable directive error.
+  const execEnvelopeAwareFreeformInput = (
+    args: string,
+    toolName: string,
+    namespace?: string,
+  ): string => {
+    const unwrapped = repairFreeformToolInput(args, toolName, namespace);
+    const ownsJsGrammar = namespace === undefined || namespace === "functions";
+    return ownsJsGrammar && toolName === EXEC_REPAIR_TOOL_NAME
+      ? repairExecEnvelopeLeak(unwrapped)
+      : unwrapped;
+  };
   // Best-effort unwrap of a PARTIAL freeform arg buffer for live input streaming
   // (`response.custom_tool_call_input.delta` — codex-rs uses it for UI preview only;
   // the completed custom_tool_call item stays authoritative). Compact `{"input":"...`
@@ -435,7 +482,14 @@ export function bridgeToResponsesSSE(
       const stallSec = resolveStallTimeoutSec(options?.stallTimeoutSec);
       const maxStallTicks = Math.ceil((stallSec * 1000) / heartbeatMs);
 
-      let currentMsg: { itemId: string; outputIndex: number; text: string; textBytes: number; phase?: OcxMessagePhase } | null = null;
+      let currentMsg: {
+        itemId: string;
+        outputIndex: number;
+        text: string;
+        textBytes: number;
+        citationFilter: CitationMarkerFilter;
+        phase?: OcxMessagePhase;
+      } | null = null;
       let currentReasoning: { itemId: string; outputIndex: number; text: string; textBytes: number } | null = null;
       let currentRawReasoning: { itemId: string; outputIndex: number; text: string; textBytes: number } | null = null;
       // Anthropic extended-thinking round-trip state: the signature signs the CURRENT thinking
@@ -565,6 +619,17 @@ export function bridgeToResponsesSSE(
 
       const closeCurrentMessage = (inferredPhase?: OcxMessagePhase) => {
         if (!currentMsg) return;
+        // Release anything the citation filter was holding for this message, then strip the
+        // accumulated text: closeCurrentMessage re-sends it in output_text.done and
+        // output_item.done, so filtering only the deltas would leave the markers in both.
+        const trailing = currentMsg.citationFilter.flush();
+        if (trailing) {
+          emit("response.output_text.delta", {
+            item_id: currentMsg.itemId, output_index: currentMsg.outputIndex,
+            content_index: 0, delta: trailing,
+          });
+        }
+        const messageText = stripCitationMarkers(currentMsg.text);
         // Chat Completions has no message-phase field. Keep its live item provisional, then
         // classify it only when the next adapter event proves whether this text led into more
         // work or completed the turn. Explicit adapter phases always outrank this inference.
@@ -574,15 +639,15 @@ export function bridgeToResponsesSSE(
         // Finalize the text part (Responses protocol). Without these .done events Codex never
         // commits the content part and renders the message as truncated / cut off.
         emit("response.output_text.done", {
-          item_id: currentMsg.itemId, output_index: currentMsg.outputIndex, content_index: 0, text: currentMsg.text,
+          item_id: currentMsg.itemId, output_index: currentMsg.outputIndex, content_index: 0, text: messageText,
         });
         emit("response.content_part.done", {
           item_id: currentMsg.itemId, output_index: currentMsg.outputIndex, content_index: 0,
-          part: { type: "output_text", text: currentMsg.text, annotations },
+          part: { type: "output_text", text: messageText, annotations },
         });
         const item = {
           type: "message", id: currentMsg.itemId, status: "completed", role: "assistant",
-          content: [{ type: "output_text", text: currentMsg.text, annotations }],
+          content: [{ type: "output_text", text: messageText, annotations }],
           ...(phase ? { phase } : {}),
         };
         emit("response.output_item.done", { output_index: currentMsg.outputIndex, item });
@@ -936,7 +1001,11 @@ export function bridgeToResponsesSSE(
                   item_id: itemId, output_index: outputIndex, content_index: 0,
                   part: { type: "output_text", text: "", annotations: [] },
                 });
-                currentMsg = { itemId, outputIndex, text: "", textBytes: 0, ...(event.phase ? { phase: event.phase } : {}) };
+                currentMsg = {
+                  itemId, outputIndex, text: "", textBytes: 0,
+                  citationFilter: createCitationMarkerFilter(),
+                  ...(event.phase ? { phase: event.phase } : {}),
+                };
               }
               ({ value: currentMsg.text, bytes: currentMsg.textBytes } = appendString(
                 currentMsg.text,
@@ -944,10 +1013,16 @@ export function bridgeToResponsesSSE(
                 event.text,
                 "retained_collectors",
               ));
-              emit("response.output_text.delta", {
-                item_id: currentMsg.itemId, output_index: currentMsg.outputIndex,
-                content_index: 0, delta: event.text,
-              });
+              // A citation span can straddle a delta boundary, so the filter withholds an
+              // unterminated tail and releases it at close (#3150). The accumulator above
+              // keeps the raw text; it is stripped once in closeCurrentMessage.
+              const visible = currentMsg.citationFilter.push(event.text);
+              if (visible) {
+                emit("response.output_text.delta", {
+                  item_id: currentMsg.itemId, output_index: currentMsg.outputIndex,
+                  content_index: 0, delta: visible,
+                });
+              }
               break;
             }
             case "thinking_delta": {
@@ -1057,17 +1132,27 @@ export function bridgeToResponsesSSE(
                 rememberReasoningForCall(event.id, rawReasoningForNextToolCall, replayCacheScope);
               }
               if (currentToolCall) closeCurrentToolCall();
-              const effectiveName = normalizeDeclaredToolName(event.name, options?.declaredToolNames);
-              const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
-                ? event.name
-                : undefined;
-              const mapped = toolNsMap?.get(effectiveName);
-              const realName = mapped?.name ?? effectiveName;
-              if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
+              // One decision point for every wrong-name symptom: shape repair,
+              // namespace-leak feedback, phantom drop, or fail closed.
+              const verdict = resolveEmittedCall(event.name, {
+                declaredToolNames: options?.declaredToolNames,
+                freeformToolNames,
+                phantomNames: options?.undeclaredToolPhantomNames,
+              });
+              if (verdict.kind === "drop" && options?.declaredToolNames) {
+                // A known phantom is dropped whole — no item is ever opened, so its
+                // deltas and terminal close below are no-ops against the null
+                // currentToolCall, and the turn continues without it. Anything else
+                // undeclared fails closed instead of reaching the client.
+                if (options.undeclaredToolPhantomNames
+                  && (options.undeclaredToolPhantomNames.has(verdict.name)
+                    || options.undeclaredToolPhantomNames.has(event.name))) {
+                  break;
+                }
                 const failure = responseError(
                   502,
                   "upstream_error",
-                  `routed provider emitted undeclared client tool "${effectiveName}"; only request-declared tools may be called`,
+                  `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
                 );
                 emit("response.failed", {
                   response: {
@@ -1080,6 +1165,30 @@ export function bridgeToResponsesSSE(
                 terminalEvent = true;
                 break;
               }
+              if (verdict.kind === "feedback") {
+                // Namespace leak: the model called the container itself. Emit a
+                // synthetic exec call whose body throws a directive error, so the
+                // client runs it and the model receives an actionable correction.
+                const fbId = `ctc_${uuid()}`;
+                emit("response.output_item.added", {
+                  output_index: outputIndex,
+                  item: { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: "", status: "in_progress" },
+                });
+                emit("response.custom_tool_call_input.done", {
+                  item_id: fbId, output_index: outputIndex, input: verdict.input,
+                });
+                const fbItem = { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: verdict.input, status: "completed" };
+                emit("response.output_item.done", { output_index: outputIndex, item: fbItem });
+                retainFinishedItem(fbItem as OutputItem);
+                outputIndex++;
+                break;
+              }
+              const effectiveName = verdict.name;
+              const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
+                ? event.name
+                : undefined;
+              const mapped = toolNsMap?.get(effectiveName);
+              const realName = mapped?.name ?? effectiveName;
               const ns = mapped?.namespace;
               const toolSearch = toolSearchToolNames?.has(realName) ?? false;
               const freeform = !toolSearch && (mapped
@@ -1223,10 +1332,12 @@ export function bridgeToResponsesSSE(
                 // Exactly one compaction item per turn; codex-rs takes the first and fatals on 0.
                 const item = {
                   type: "compaction", id: `cmp_${uuid()}`,
-                  encrypted_content: encodeCompactionSummary(compactionText),
+                  encrypted_content: event.compactionEncryptedContent ?? encodeCompactionSummary(compactionText),
                 };
                 emit("response.output_item.done", { output_index: outputIndex, item });
-                retainFinishedItem(item as OutputItem, compactionTextBytes);
+                retainFinishedItem(item as OutputItem, event.compactionEncryptedContent
+                  ? bytesOf(event.compactionEncryptedContent)
+                  : compactionTextBytes);
                 outputIndex++;
               }
               // Recognize every adapter's truncation vocabulary, not just the canonical pair.
@@ -1503,6 +1614,8 @@ function buildResponseJSONWithBudget(
     toolNsMap?: Map<string, { namespace: string; name: string; freeform?: true }>;
     /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
     declaredToolNames?: ReadonlySet<string>;
+    /** Per-provider phantom names dropped instead of failing the turn (see bridgeToResponsesSSE). */
+    undeclaredToolPhantomNames?: ReadonlySet<string>;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     freeformToolNames?: Set<string>;
@@ -1574,6 +1687,7 @@ function buildResponseJSONWithBudget(
   let sawTerminal = false;
   let compactionText = "";
   let compactionTextBytes = 0;
+  let compactionEncryptedContent: string | undefined;
 
   let currentText = "";
   let currentTextBytes = 0;
@@ -1610,7 +1724,18 @@ function buildResponseJSONWithBudget(
     codeModeHelperName?: string,
   ): string => codeModeHelperName
     ? compileCodeModeHelperInput(args, codeModeHelperName)
-    : repairFreeformToolInput(args, toolName, namespace);
+    : execEnvelopeAwareFreeformInput(args, toolName, namespace);
+  const execEnvelopeAwareFreeformInput = (
+    args: string,
+    toolName: string,
+    namespace?: string,
+  ): string => {
+    const unwrapped = repairFreeformToolInput(args, toolName, namespace);
+    const ownsJsGrammar = namespace === undefined || namespace === "functions";
+    return ownsJsGrammar && toolName === EXEC_REPAIR_TOOL_NAME
+      ? repairExecEnvelopeLeak(unwrapped)
+      : unwrapped;
+  };
   const parseArgsObj = (args: string): Record<string, unknown> => {
     try { const o = JSON.parse(args); return o && typeof o === "object" ? o : {}; } catch { return {}; }
   };
@@ -1618,6 +1743,10 @@ function buildResponseJSONWithBudget(
   const flushText = (inferredPhase?: OcxMessagePhase) => {
     if (!currentText) return;
     const phase = currentTextPhase ?? inferredPhase;
+    // ChatGPT-backend citation markers arrive as literal private-use characters that the
+    // Codex TUI prints verbatim (#3150). Strip them here rather than at the accumulator so
+    // the retained byte accounting above still describes what the upstream actually sent.
+    const text = stripCitationMarkers(currentText);
     const sourceBytes = pendingWebSources.reduce((sum, source) => sum + bytesOf(JSON.stringify(source)), 0);
     const annotations = pendingWebSources.map(s => ({
       type: "url_citation", url: s.url, ...(s.title ? { title: s.title } : {}), start_index: 0, end_index: 0,
@@ -1625,7 +1754,7 @@ function buildResponseJSONWithBudget(
     pendingWebSources = [];
     const item = {
       type: "message", id: `msg_${uuid()}`, role: "assistant", status: "completed",
-      content: [{ type: "output_text", text: currentText, annotations }],
+      content: [{ type: "output_text", text, annotations }],
       ...(phase ? { phase } : {}),
     } as OutputItem;
     pushOutput(item, currentTextBytes);
@@ -1828,16 +1957,40 @@ function buildResponseJSONWithBudget(
           rememberReasoningForCall(e.id, rawReasoningForNextToolCall, replayCacheScope);
         }
         flushToolCall();
-        const effectiveName = normalizeDeclaredToolName(e.name, options?.declaredToolNames);
-        if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
+        // Same single decision point as the streaming twin above.
+        const verdict = resolveEmittedCall(e.name, {
+          declaredToolNames: options?.declaredToolNames,
+          freeformToolNames: options?.freeformToolNames,
+          phantomNames: options?.undeclaredToolPhantomNames,
+        });
+        if (verdict.kind === "drop" && options?.declaredToolNames) {
+          // Phantom-allowlist drop: the call is never opened — currentToolCallId
+          // stays empty, which every downstream flush keys on — so its deltas and
+          // end event are no-ops and no item enters the output. Anything else
+          // undeclared fails the batch closed.
+          if (options.undeclaredToolPhantomNames
+            && (options.undeclaredToolPhantomNames.has(verdict.name)
+              || options.undeclaredToolPhantomNames.has(e.name))) {
+            break;
+          }
           errorEvent = {
             type: "error",
-            message: `routed provider emitted undeclared client tool "${effectiveName}"; only request-declared tools may be called`,
+            message: `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
             status: 502,
             errorType: "upstream_error",
           };
           break;
         }
+        if (verdict.kind === "feedback") {
+          // Namespace leak: emit the directive-error exec feedback instead of dropping.
+          pushOutput({
+            type: "custom_tool_call", id: `ctc_${uuid()}`,
+            call_id: e.id, name: EXEC_REPAIR_TOOL_NAME,
+            input: verdict.input, status: "completed",
+          });
+          break;
+        }
+        const effectiveName = verdict.name;
         currentToolCallId = e.id;
         budget?.openCall(e.id);
         currentToolCallName = effectiveName;
@@ -1915,6 +2068,7 @@ function buildResponseJSONWithBudget(
         break;
       case "done":
         usage = e.usage;
+        compactionEncryptedContent = e.compactionEncryptedContent;
         sawTerminal = true;
         endTurn = e.endTurn;
         cleanDone = e.stopReason === undefined;
@@ -1967,7 +2121,11 @@ function buildResponseJSONWithBudget(
     && sawTerminal
     && !isTruncatedStopReason(rawStopReason)
   ) {
-    pushOutput({ type: "compaction", id: `cmp_${uuid()}`, encrypted_content: encodeCompactionSummary(compactionText) }, compactionTextBytes);
+   const item = {
+      type: "compaction", id: `cmp_${uuid()}`,
+      encrypted_content: compactionEncryptedContent ?? encodeCompactionSummary(compactionText),
+    };
+    pushOutput(item, compactionEncryptedContent ? bytesOf(compactionEncryptedContent) : compactionTextBytes);
   }
 
   const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;

@@ -49,8 +49,12 @@ export interface ModelInfo { id: string; provider: string; namespaced: string; o
 export interface SettingsData {
   codexAutoStart: boolean;
   /** Whether a login may open a browser on the machine running the proxy. */
-  oauthOpenBrowser?: boolean;
-  port: number;
+ oauthOpenBrowser?: boolean;
+  /** Whether admin-token auth on /api/* is disabled (loopback only). */
+ managementAuthDisabled?: boolean;
+  /** Whether all origin/CORS checks are disabled (for external reverse proxy). */
+  disableOriginCheck?: boolean;
+ port: number;
   hostname: string;
   /** IANA zone of the machine running the proxy, used to render log timestamps (#725). */
   timeZone?: string;
@@ -119,7 +123,7 @@ export interface SidecarPatch {
     timeoutMs?: number;
   };
 }
-export interface ShadowCallData { enabled: boolean; model: string; sourceModels?: string[] }
+export interface ShadowCallData { enabled: boolean; model: string; modelMap?: Record<string, string>; sourceModels?: string[] }
 export interface UsageSummary30d { summary: { requests: number; totalTokens: number; coverageRatio: number } }
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "npm" | "bun" | "source";

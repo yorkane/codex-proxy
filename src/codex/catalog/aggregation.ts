@@ -8,7 +8,7 @@ import { clearModelCache, DEFAULT_MODEL_CACHE_TTL_MS, getFreshCached, getStaleCa
 import { buildModelsRequest, resolveModelsAuthToken } from "../../oauth";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { modelInList } from "../../types";
-import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
+import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, resolveEffortAtOrBelow, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
 import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, resolveMetadataProvider } from "../../generated/model-metadata";
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
 import { getProviderRegistryEntry } from "../../providers/registry";
@@ -77,20 +77,16 @@ export function intersectStrings(values: readonly string[][]): string[] {
   return [...new Set(values[0])].filter(value => rest.every(set => set.has(value)));
 }
 
+/**
+ * The catalog's view of a combo's default effort. Delegates to the shared leaf
+ * resolver so the request path (src/combos/request.ts) cannot drift from what the
+ * catalog advertised (#3108).
+ */
 export function effectiveComboDefault(
   configured: string | null | undefined,
   common: readonly string[],
 ): string | undefined {
-  if (!configured) return undefined;
-  if (configured && common.includes(configured)) return configured;
-  const requestedRank = codexEffortRank(configured);
-  const ranked = common
-    .map(effort => ({ effort, rank: codexEffortRank(effort) }))
-    .filter(item => item.rank >= 0)
-    .sort((a, b) => a.rank - b.rank);
-  if (ranked.length === 0) return undefined;
-  const atOrBelow = ranked.filter(item => item.rank <= requestedRank);
-  return atOrBelow.at(-1)?.effort ?? ranked[0]!.effort;
+  return resolveEffortAtOrBelow(configured, common);
 }
 
 /**
@@ -138,10 +134,18 @@ export function deriveComboCatalogModel(
     : derivedInputModalities;
   if (inputModalities.length === 0) return null;
   // Unknown ladders (`undefined`) are wildcards for catalog derivation — same
-  // boundary as the GUI picker. An explicit empty ladder still constrains.
-  const advertisedLadders = members
+  // boundary as the GUI picker. Under the default `strict` mode an explicit empty
+  // ladder still constrains, so one target that advertises no effort control empties
+  // the whole combo's picker. `adaptive` is the opt-in for mixed-capability groups:
+  // empty ladders drop out of the published intersection while non-empty ladders
+  // still define it. Dispatch is unaffected either way — each concrete target
+  // resolves its own effort at request time.
+  const knownLadders = members
     .map(member => member.reasoningEfforts)
     .filter((ladder): ladder is string[] => ladder !== undefined);
+  const advertisedLadders = combo.reasoningEffortMode === "adaptive"
+    ? knownLadders.filter(ladder => ladder.length > 0)
+    : knownLadders;
   const reasoningEfforts = advertisedLadders.length === 0
     ? []
     : intersectStrings(advertisedLadders);
@@ -158,6 +162,12 @@ export function deriveComboCatalogModel(
     contextWindow,
     ...members.map(member => member.maxInputTokens ?? member.contextWindow!),
   );
+  const knownMaxOutputTokens = members
+    .map(member => member.maxOutputTokens)
+    .filter((value): value is number => typeof value === "number" && value > 0);
+  const maxOutputTokens = knownMaxOutputTokens.length === members.length
+    ? Math.min(...knownMaxOutputTokens)
+    : undefined;
   const autoCompactTokenLimit = Math.min(
     ...members.map(member => clampAutoCompactTokenLimit(
       member.contextWindow!,
@@ -176,6 +186,7 @@ export function deriveComboCatalogModel(
     owned_by: COMBO_NAMESPACE,
     contextWindow,
     maxInputTokens,
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     autoCompactTokenLimit,
     ...(hasLimitingContextCapMetadata ? { contextCapped } : {}),
     inputModalities,
@@ -316,6 +327,7 @@ export function normalizedOpenAiApiSignature(model: CatalogModel): string {
     id: model.id,
     contextWindow: model.contextWindow ?? null,
     maxInputTokens: model.maxInputTokens ?? null,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     autoCompactTokenLimit: model.autoCompactTokenLimit ?? null,
     inputModalities: [...new Set(model.inputModalities ?? [])].sort(),
     reasoningEfforts: [...new Set(model.reasoningEfforts ?? [])].sort(),

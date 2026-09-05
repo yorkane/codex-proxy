@@ -3,7 +3,7 @@ import {
   namespacedToolName,
   normalizeDeclaredToolName,
 } from "../types";
-import { sseDataPayload, type SseBlockRewrite } from "./sse-payload-rewrite";
+import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "./sse-payload-rewrite";
 
 /** Item types the client executes through a request-declared wire name. */
 const CLIENT_EXECUTED_CALL_TYPES = new Set(["function_call", "custom_tool_call"]);
@@ -274,7 +274,8 @@ function undeclaredNameInItem(
   declared: ReadonlySet<string>,
   declaredNamelessClientCallTypes: ReadonlySet<string>,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
-): string | undefined {
+  allowlist?: ReadonlySet<string>,
+): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(item)) return undefined;
   if (typeof item.type !== "string") return undefined;
   // The provider executes this exact measured shape itself, so there is no client name to
@@ -285,7 +286,8 @@ function undeclaredNameInItem(
   if (namelessDisplayName !== undefined) {
     // Only Codex's explicit `execution: "client"` form delegates tool search to the client.
     if (item.type === "tool_search_call" && item.execution !== "client") return undefined;
-    return declaredNamelessClientCallTypes.has(item.type) ? undefined : namelessDisplayName;
+    return declaredNamelessClientCallTypes.has(item.type) ? undefined
+      : { name: namelessDisplayName, droppable: false };
   }
   if (!CLIENT_EXECUTED_CALL_TYPES.has(item.type)) return undefined;
   const name = item.name;
@@ -294,44 +296,153 @@ function undeclaredNameInItem(
     // Namespaced calls are matched by their full wire name only — never legacy-normalize
     // them, or an undeclared namespaced `exec_command` could slip through as bare `exec`.
     if (declared.has(namespacedToolName(item.namespace, name))) return undefined;
-    return name;
+    const wireName = namespacedToolName(item.namespace, name);
+    return { name, droppable: droppableFor(wireName, name, allowlist) };
   }
   const effectiveName = normalizeDeclaredToolName(name, declared);
   if (declared.has(effectiveName)) return undefined;
-  return name;
+  return { name, droppable: droppableFor(effectiveName, name, allowlist) };
 }
 
-/** First undeclared client tool named by a Responses SSE payload, or undefined. */
+/**
+ * Guard outcome for one client-executed call: `name` is what an error message would report,
+ * `droppable` says the routed provider's per-provider phantom allowlist covers it, in which
+ * case the call is silently dropped instead of failing the turn.
+ */
+export type UndeclaredToolVerdict = Readonly<{ name: string; droppable: boolean }>;
+
+function droppableFor(
+  effectiveName: string,
+  rawName: string,
+  allowlist: ReadonlySet<string> | undefined,
+): boolean {
+  if (!allowlist || allowlist.size === 0) return false;
+  return allowlist.has(rawName) || allowlist.has(effectiveName);
+}
+
+/** Verdict for the first undeclared client-executed call an SSE payload announces. */
+export function undeclaredToolCallVerdict(
+  payload: unknown,
+  declared: ReadonlySet<string>,
+  declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
+  providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
+  allowlist?: ReadonlySet<string>,
+): UndeclaredToolVerdict | undefined {
+  if (!isPlainObject(payload)) return undefined;
+  if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
+    return undeclaredNameInItem(payload.item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, allowlist);
+  }
+  if (payload.type === "response.completed" || payload.type === "response.incomplete") {
+    return undeclaredToolCallVerdictInResponse(payload.response, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, allowlist);
+  }
+  return undefined;
+}
+
+function undeclaredToolCallVerdictInResponse(
+  response: unknown,
+  declared: ReadonlySet<string>,
+  declaredNamelessClientCallTypes: ReadonlySet<string>,
+  providerExecutedCallTypes: ProviderExecutedCallTypes,
+  allowlist?: ReadonlySet<string>,
+): UndeclaredToolVerdict | undefined {
+  if (!isPlainObject(response) || !Array.isArray(response.output)) return undefined;
+  for (const item of response.output) {
+    const verdict = undeclaredNameInItem(item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, allowlist);
+    if (verdict !== undefined) return verdict;
+  }
+  return undefined;
+}
+
+/**
+ * Remove phantom calls named by the provider allowlist from a Responses `output` array.
+ * Returns the original object untouched when nothing matched, so callers can cheaply test
+ * for a rewrite. Names the request itself declared are always kept: the allowlist exists for
+ * names the request can NEVER legitimately carry, and a same-name declaration wins.
+ */
+export function stripDroppableToolCallsInResponse(
+  response: unknown,
+  declared: ReadonlySet<string>,
+  allowlist: ReadonlySet<string>,
+): { response: unknown; removed: string[] } {
+  if (!allowlist || allowlist.size === 0) return { response, removed: [] };
+  if (!isPlainObject(response) || !Array.isArray(response.output)) return { response, removed: [] };
+  const removed: string[] = [];
+  const kept = response.output.filter(item => {
+    if (!isPlainObject(item)) return true;
+    if (item.type !== "function_call" && item.type !== "custom_tool_call") return true;
+    const name = item.name;
+    if (typeof name !== "string" || name.length === 0) return true;
+    if (typeof item.namespace === "string") {
+      const wireName = namespacedToolName(item.namespace, name);
+      if (declared.has(wireName)) return true;
+      if (allowlist.has(wireName) || allowlist.has(name)) {
+        removed.push(wireName);
+        return false;
+      }
+      return true;
+    }
+    const effectiveName = normalizeDeclaredToolName(name, declared);
+    if (declared.has(effectiveName)) return true;
+    if (allowlist.has(name) || allowlist.has(effectiveName)) {
+      removed.push(name);
+      return false;
+    }
+    return true;
+  });
+  if (removed.length === 0) return { response, removed };
+  return { response: { ...response, output: kept }, removed };
+}
+
+/**
+ * JSON-string sibling of stripDroppableToolCallsInResponse for the bounded-JSON passthrough
+ * path. A parse failure, a non-object body, or an empty removal set returns the input string
+ * byte-identical: the phantom drop is best-effort, never a new way to fail a request.
+ */
+export function stripDroppableToolCallsInJsonString(
+  json: string,
+  declared: ReadonlySet<string>,
+  allowlist: ReadonlySet<string>,
+): string {
+  if (allowlist.size === 0) return json;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return json;
+  }
+  const stripped = stripDroppableToolCallsInResponse(parsed, declared, allowlist);
+  if (stripped.removed.length === 0) return json;
+  return JSON.stringify(stripped.response);
+}
+
+/** First undeclared, non-droppable client tool named by a Responses SSE payload, or undefined. */
 export function undeclaredToolCallName(
   payload: unknown,
   declared: ReadonlySet<string>,
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
+  phantomAllowlist?: ReadonlySet<string>,
 ): string | undefined {
-  if (!isPlainObject(payload)) return undefined;
-  if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
-    return undeclaredNameInItem(payload.item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes);
-  }
-  // Sparse gateways skip incremental items and only ever ship the terminal snapshot.
-  if (payload.type === "response.completed" || payload.type === "response.incomplete") {
-    return undeclaredToolCallNameInResponse(payload.response, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes);
-  }
-  return undefined;
+  const verdict = undeclaredToolCallVerdict(payload, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, phantomAllowlist);
+  return verdict !== undefined && !verdict.droppable ? verdict.name : undefined;
 }
 
-/** First undeclared client tool in a Responses object's `output` array, or undefined. */
+/** First undeclared, non-droppable client tool in a Responses object's `output` array, or undefined. */
 export function undeclaredToolCallNameInResponse(
   response: unknown,
   declared: ReadonlySet<string>,
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
+  phantomAllowlist?: ReadonlySet<string>,
 ): string | undefined {
-  if (!isPlainObject(response) || !Array.isArray(response.output)) return undefined;
-  for (const item of response.output) {
-    const name = undeclaredNameInItem(item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes);
-    if (name !== undefined) return name;
-  }
-  return undefined;
+  const verdict = undeclaredToolCallVerdictInResponse(
+    response,
+    declared,
+    declaredNamelessClientCallTypes,
+    providerExecutedCallTypes,
+    phantomAllowlist,
+  );
+  return verdict !== undefined && !verdict.droppable ? verdict.name : undefined;
 }
 
 export function undeclaredToolCallMessage(name: string): string {
@@ -369,8 +480,15 @@ export function createUndeclaredToolCallGuardBlockRewrite(
   declared: ReadonlySet<string>,
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
+  phantomAllowlist?: ReadonlySet<string>,
 ): SseBlockRewrite {
   let tripped = false;
+  const phantomActive = phantomAllowlist !== undefined && phantomAllowlist.size > 0;
+  // Ids of items whose announce event the phantom allowlist dropped; every later block
+  // naming them (argument/input deltas, the terminal done event) is dropped with it, and
+  // the terminal snapshot has phantom items stripped so a client that reconstructs output
+  // from `response.completed` never sees the call either.
+  const droppedItemIds = new Set<string>();
   return (block: string) => {
     if (tripped) return [];
     const payload = sseDataPayload(block);
@@ -381,9 +499,44 @@ export function createUndeclaredToolCallGuardBlockRewrite(
     } catch {
       return [block];
     }
+    if (isPlainObject(parsed)) {
+      if (droppedItemIds.size > 0 && referencesDroppedItem(parsed, droppedItemIds)) return [];
+      if (phantomActive && phantomAllowlist !== undefined) {
+        if (parsed.type === "response.output_item.added") {
+          const verdict = undeclaredNameInItem(
+            parsed.item,
+            declared,
+            declaredNamelessClientCallTypes,
+            providerExecutedCallTypes,
+            phantomAllowlist,
+          );
+          if (verdict !== undefined && verdict.droppable) {
+            const item = parsed.item;
+            if (isPlainObject(item) && typeof item.id === "string") droppedItemIds.add(item.id);
+            return [];
+          }
+        } else if (parsed.type === "response.completed" || parsed.type === "response.incomplete") {
+          // Sparse gateways skip the incremental items entirely, so the terminal snapshot
+          // is the only place the phantom call surfaces. Strip every droppable item first;
+          // any undeclared NON-droppable item the snapshot still carries below takes the
+          // ordinary fail-closed path.
+          const stripped = stripDroppableToolCallsInResponse(parsed.response, declared, phantomAllowlist);
+          if (stripped.removed.length > 0) {
+            parsed = { ...parsed, response: stripped.response };
+            block = replaceSseDataPayload(block, JSON.stringify(parsed));
+          }
+        }
+      }
+    }
     const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes);
     if (name === undefined) return [block];
     tripped = true;
     return failedBlocks(name, block.includes("\r\n") ? "\r\n" : "\n");
   };
+}
+
+function referencesDroppedItem(parsed: Record<string, unknown>, droppedItemIds: ReadonlySet<string>): boolean {
+  if (typeof parsed.item_id === "string" && droppedItemIds.has(parsed.item_id)) return true;
+  const item = parsed.item;
+  return isPlainObject(item) && typeof item.id === "string" && droppedItemIds.has(item.id);
 }

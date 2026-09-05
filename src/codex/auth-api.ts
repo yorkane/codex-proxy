@@ -274,6 +274,69 @@ function quotaForPlan<T extends Omit<StoredAccountQuota, "updatedAt"> | StoredAc
   } as T;
 }
 
+/**
+ * Last reset-credit count this process parsed for the main account, tagged with the
+ * physical ChatGPT account it was read from.
+ *
+ * It is deliberately memory-only. The quota store is keyed by the stable `__main__`
+ * ALIAS, and `~/.codex/auth.json` can be swapped for another account while the proxy is
+ * not running — `reconcileMainCodexAccountRuntimeState` only purges alias-keyed state
+ * when it observes the id CHANGE, and its first observation after a restart has nothing
+ * to compare against. A disk-hydrated `__main__` entry can therefore belong to the
+ * previous login, so filling the DTO from it would show one account's tickets on
+ * another's card. Pool accounts have no such hole because their store key IS the account
+ * id. Binding the value to `requestAccountId` keeps the fill honest: after a restart the
+ * badge simply waits for the first usage response that carries the summary.
+ */
+let mainResetCreditsProvenance: { accountId: string; credits: number } | null = null;
+
+function rememberMainResetCredits(accountId: string | null, credits: number | undefined): void {
+  if (accountId === null || credits === undefined) return;
+  mainResetCreditsProvenance = { accountId, credits };
+}
+
+/** Forget the remembered count when the physical main identity is no longer the same. */
+function mainResetCreditsForCurrentIdentity(): number | undefined {
+  if (!mainResetCreditsProvenance) return undefined;
+  const currentAccountId = getMainChatgptAccountId();
+  if (currentAccountId === null) return undefined;
+  if (currentAccountId !== mainResetCreditsProvenance.accountId) {
+    mainResetCreditsProvenance = null;
+    return undefined;
+  }
+  return mainResetCreditsProvenance.credits;
+}
+
+/**
+ * The main account is the only account whose DTO quota comes from the raw WHAM parse
+ * result instead of the merged store: `poolAccountDto` serializes what
+ * `commitPoolQuotaResponse` read back out of `getAccountQuota()`, while the main DTO
+ * spreads `mainInfo.quota` directly. `/wham/usage` carries `rate_limit_reset_credits`
+ * only intermittently, and the store exists to bridge that gap
+ * (`setAccountQuotaFromParsed` carries an existing `resetCredits` forward when the new
+ * snapshot omits it), so the main card lost its ticket badge on every response that
+ * happened to omit the summary while pool cards kept theirs.
+ *
+ * Only `resetCredits` is carried, deliberately, and only from an identity-tagged
+ * in-process observation rather than the alias-keyed store. The window fields have
+ * *clearing* semantics — a monthly-only snapshot must drop a stale weekly value (#382) —
+ * so reinstating the whole stored object would resurrect a window the parse meant to
+ * clear whenever the store write was refused by generation gating. A freshly parsed value
+ * always wins, including `0`: zero is defined, so it never takes the fill branch.
+ */
+function mainQuotaWithCarriedResetCredits(
+  parsed: Omit<StoredAccountQuota, "updatedAt">,
+): StoredAccountQuota {
+  const carried = parsed.resetCredits === undefined
+    ? mainResetCreditsForCurrentIdentity()
+    : undefined;
+  return {
+    ...parsed,
+    ...(carried !== undefined ? { resetCredits: carried } : {}),
+    updatedAt: getAccountQuota(MAIN_CODEX_ACCOUNT_ID)?.updatedAt ?? Date.now(),
+  };
+}
+
 function poolAccountDto(
   account: CodexAccount,
   quotaResult: PoolQuotaResult,
@@ -387,6 +450,49 @@ function safeResetCreditsDto(input: unknown): { credits: { granted_at: string; e
 function safeResetCreditConsumeDto(input: unknown): { code: string } {
   const obj = typeof input === "object" && input !== null ? input as Record<string, unknown> : {};
   return { code: typeof obj.code === "string" ? obj.code : "unknown" };
+}
+
+/**
+ * Background reset-credit access for the auto-redeemer (#822). Goes through the same
+ * account/lease wrapper as the management routes, but takes a caller-owned
+ * `redeem_request_id` so a journaled id can be replayed idempotently after a crash.
+ * Throws on any auth or upstream failure; the caller treats a throw on consume as ambiguous.
+ */
+export function createResetCreditWhamClient(config: OcxConfig, accountId: string): {
+  inspect: () => Promise<{ credits: { granted_at: string; expires_at: string }[] }>;
+  consume: (redeemRequestId: string) => Promise<{ code: string }>;
+} {
+  const run = async <T>(operation: (auth: ResetCreditAuth) => Promise<T>): Promise<T> => {
+    const result = await withResetCreditAuth(getRuntimeConfig(config), accountId, operation);
+    if (result.ok) return result.value;
+    throw new Error(`reset-credit auth unavailable (${result.response.status})`);
+  };
+  return {
+    inspect: () => run(async auth => {
+      const resp = await fetch("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", {
+        headers: { Authorization: `Bearer ${auth.accessToken}`, "ChatGPT-Account-Id": auth.chatgptAccountId },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!resp.ok) { await resp.body?.cancel().catch(() => {}); throw new Error(`upstream ${resp.status}`); }
+      const parsed = await readResetCreditJson(resp, AbortSignal.timeout(8000));
+      if (!parsed.ok) throw new Error("invalid upstream reset-credit response");
+      return { credits: safeResetCreditsDto(parsed.value).credits };
+    }),
+    consume: redeemRequestId => run(async auth => {
+      const resp = await fetch("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.accessToken}`,
+          "ChatGPT-Account-Id": auth.chatgptAccountId,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ redeem_request_id: redeemRequestId }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!resp.ok) { await resp.body?.cancel().catch(() => {}); throw new Error(`upstream ${resp.status}`); }
+      return safeResetCreditConsumeDto(await resp.json());
+    }),
+  };
 }
 
 type ResetCreditJsonRead =
@@ -793,6 +899,9 @@ async function fetchMainAccountInfoWhileOwned(
     const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(cached?.plan) ?? nonEmptyPlan(getMainAccountPlan());
     const quota = parseUsageQuota({ ...data, ...(plan ? { plan_type: plan } : {}) });
     const freshResetCredits = quota?.resetCredits;
+    // Tag the count with the identity it was read from, so a later response that omits the
+    // summary can restore the badge without ever crossing an account boundary.
+    rememberMainResetCredits(requestAccountId, freshResetCredits);
     const result = {
       email: data.email ?? null,
       plan,
@@ -843,6 +952,23 @@ interface PoolQuotaResult {
   /** Present only when this call's WHAM response included `rate_limit_reset_credits.available_count`. */
   freshResetCredits?: number;
   quotaProbeSkipped?: true;
+  /** Positive evidence captured immediately before an upstream WHAM dispatch. */
+  quotaProbeAttempted?: { at: number; credentialGeneration: number };
+}
+
+interface PoolQuotaProbeEvidence {
+  attempted?: NonNullable<PoolQuotaResult["quotaProbeAttempted"]>;
+}
+
+function markQuotaProbeAttempted(evidence: PoolQuotaProbeEvidence, credentialGeneration: number): void {
+  evidence.attempted = { at: Date.now(), credentialGeneration };
+}
+
+function withQuotaProbeEvidence(
+  result: PoolQuotaResult,
+  evidence: PoolQuotaProbeEvidence,
+): PoolQuotaResult {
+  return evidence.attempted ? { ...result, quotaProbeAttempted: evidence.attempted } : result;
 }
 
 interface PoolQuotaRefreshFlight {
@@ -988,6 +1114,7 @@ async function recoverPoolQuotaFrom401(ctx: {
   rejectedAccessToken: string;
   rejectedGeneration: number;
   resp: Response;
+  quotaProbeEvidence: PoolQuotaProbeEvidence;
   onCredentialGeneration?: (generation: number) => void;
 }): Promise<PoolQuotaResult> {
   const { accountId, existing, configuredPlan, rejectedAccessToken, rejectedGeneration, resp } = ctx;
@@ -1061,6 +1188,7 @@ async function recoverPoolQuotaFrom401(ctx: {
   ctx.onCredentialGeneration?.(refreshed.generation);
 
   const writerGeneration = captureConfigGeneration();
+  markQuotaProbeAttempted(ctx.quotaProbeEvidence, refreshed.generation);
   const replay = await fetch("https://chatgpt.com/backend-api/wham/usage", {
     headers: {
       Authorization: `Bearer ${refreshed.accessToken}`,
@@ -1147,57 +1275,75 @@ async function fetchFreshPoolAccountQuota(
   existing: StoredAccountQuota | null,
   configuredPlan?: string,
   onCredentialGeneration?: (generation: number) => void,
+  getValidToken: typeof getValidCodexToken = getValidCodexToken,
 ): Promise<PoolQuotaResult> {
   const writerGeneration = captureConfigGeneration();
   let requestCredentialGeneration = readCodexAccountRecord(accountId)?.generation;
+  const quotaProbeEvidence: PoolQuotaProbeEvidence = {};
   try {
-    const { accessToken, chatgptAccountId, generation } = await getValidCodexToken(accountId);
+    const { accessToken, chatgptAccountId, generation } = await getValidToken(accountId);
     requestCredentialGeneration = generation;
     onCredentialGeneration?.(generation);
+    markQuotaProbeAttempted(quotaProbeEvidence, generation);
     const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
       headers: { Authorization: `Bearer ${accessToken}`, "ChatGPT-Account-Id": chatgptAccountId },
       signal: AbortSignal.timeout(8000),
     });
     if (!resp.ok) {
       if (resp.status !== 401) {
-        return { quota: existing ?? null, needsReauth: false, credentialGeneration: generation };
+        return withQuotaProbeEvidence(
+          { quota: existing ?? null, needsReauth: false, credentialGeneration: generation },
+          quotaProbeEvidence,
+        );
       }
       // A bare 401 is what a stale-but-refreshable bearer produces after a plan change, so
       // quarantining on it tells the operator to re-authenticate an account that was fine
       // (#3019). Refresh once, replay once, and only then decide.
-      return await recoverPoolQuotaFrom401({
+      const recovered = await recoverPoolQuotaFrom401({
         accountId,
         existing,
         configuredPlan,
         rejectedAccessToken: accessToken,
         rejectedGeneration: generation,
         resp,
+        quotaProbeEvidence,
         onCredentialGeneration,
       });
+      return withQuotaProbeEvidence(recovered, quotaProbeEvidence);
     }
-    return await commitPoolQuotaResponse(resp, {
+    const committed = await commitPoolQuotaResponse(resp, {
       accountId, existing, configuredPlan, generation, writerGeneration,
     });
+    return withQuotaProbeEvidence(committed, quotaProbeEvidence);
   } catch (e) {
     if (e instanceof CodexCredentialGenerationConflictError || e instanceof CodexCredentialRefreshLockTimeoutError
       || e instanceof CodexCredentialRefreshBusyError || e instanceof CodexCredentialRefreshStaleError) {
-      return {
+      return withQuotaProbeEvidence({
         quota: existing ?? null,
         needsReauth: false,
         credentialGeneration: requestCredentialGeneration,
-        ...(e instanceof CodexCredentialRefreshBusyError || e instanceof CodexCredentialRefreshStaleError
-          ? { quotaProbeSkipped: true as const }
-          : {}),
-      };
+        quotaProbeSkipped: true,
+      }, quotaProbeEvidence);
     }
     if (e instanceof TokenRefreshError) {
-      return { quota: existing ?? null, needsReauth: true, credentialGeneration: requestCredentialGeneration };
+      return withQuotaProbeEvidence(
+        { quota: existing ?? null, needsReauth: true, credentialGeneration: requestCredentialGeneration },
+        quotaProbeEvidence,
+      );
     }
-    return { quota: existing ?? null, needsReauth: false, credentialGeneration: requestCredentialGeneration };
+    return withQuotaProbeEvidence(
+      { quota: existing ?? null, needsReauth: false, credentialGeneration: requestCredentialGeneration },
+      quotaProbeEvidence,
+    );
   }
 }
 
-async function fetchPoolAccountQuota(accountId: string, forceRefresh = false, configuredPlan?: string): Promise<PoolQuotaResult> {
+async function fetchPoolAccountQuota(
+  accountId: string,
+  forceRefresh = false,
+  configuredPlan?: string,
+  getValidToken: typeof getValidCodexToken = getValidCodexToken,
+): Promise<PoolQuotaResult> {
   const existing = getAccountQuota(accountId);
   if (!forceRefresh && existing && Date.now() - existing.updatedAt < POOL_CACHE_TTL) {
     return {
@@ -1227,6 +1373,7 @@ async function fetchPoolAccountQuota(accountId: string, forceRefresh = false, co
     existing,
     configuredPlan,
     generation => { state.resolvedCredentialGeneration = generation; },
+    getValidToken,
   );
   const flight: PoolQuotaRefreshFlight = { state, promise: refresh };
   const activeFlights = flights ?? new Set<PoolQuotaRefreshFlight>();
@@ -1243,6 +1390,16 @@ async function fetchPoolAccountQuota(accountId: string, forceRefresh = false, co
 }
 
 let primeInFlight: Promise<void> | null = null;
+/**
+ * Last prime attempt per pool account. A failed WHAM lookup stores no quota, so
+ * without this the account stays "unknown" and every later prime trigger re-selects
+ * it as stale and repeats the same failing request. Successful lookups are already
+ * throttled by their stored updatedAt; this gives failures the same TTL backoff.
+ *
+ * Keyed by credential generation so a re-authentication, refresh, or account removal
+ * retries immediately instead of waiting out a backoff earned by the old credential.
+ */
+const poolQuotaPrimeAttemptedAt = new Map<string, { generation: number; at: number }>();
 let cooldownRecoveryInFlight: Promise<void> | null = null;
 
 export async function runCodexCooldownRecoveryProbes(config: OcxConfig, now = Date.now()): Promise<void> {
@@ -1294,6 +1451,19 @@ export interface PrimeCodexPoolQuotasOptions {
   fetchMainInfo?: typeof fetchMainAccountInfo;
 }
 
+let getValidPoolTokenForPrime = getValidCodexToken;
+
+/** Test-only: inject a deterministic pre-dispatch credential outcome for quota priming. */
+export function setCodexPoolQuotaTokenResolverForTests(
+  resolver: typeof getValidCodexToken,
+): () => void {
+  const previous = getValidPoolTokenForPrime;
+  getValidPoolTokenForPrime = resolver;
+  return () => {
+    if (getValidPoolTokenForPrime === resolver) getValidPoolTokenForPrime = previous;
+  };
+}
+
 function tryAcquireNativeMainPrimeLease(): AdmissionLease | null {
   return tryAcquireNativeMainProfileClaim();
 }
@@ -1319,6 +1489,16 @@ export async function primeCodexPoolQuotas(
   options: PrimeCodexPoolQuotasOptions = {},
 ): Promise<void> {
   const openai = config.providers[OPENAI_CODEX_PROVIDER_ID];
+  // Prune attempt markers for accounts that no longer exist BEFORE the eligibility
+  // return. A removal that happens while the provider is disabled or out of pool mode
+  // would otherwise leave a stale failure marker behind; restoring the same account id
+  // within POOL_CACHE_TTL would then read that old failure as current and skip the
+  // retry the restored credential is entitled to.
+  const runtimeConfig = getRuntimeConfig(config);
+  const configuredPoolIds = new Set((runtimeConfig.codexAccounts ?? []).map(account => account.id));
+  for (const accountId of poolQuotaPrimeAttemptedAt.keys()) {
+    if (!configuredPoolIds.has(accountId)) poolQuotaPrimeAttemptedAt.delete(accountId);
+  }
   if (
     !openai
     || openai.disabled === true
@@ -1327,11 +1507,18 @@ export async function primeCodexPoolQuotas(
   ) return;
   if (primeInFlight) return primeInFlight;
   primeInFlight = (async () => {
-    const runtimeConfig = getRuntimeConfig(config);
     const pool = (runtimeConfig.codexAccounts ?? []).filter(isSelectableCodexPoolAccount);
     const stale = pool.filter(a => {
       const q = getAccountQuota(a.id);
-      return !q || Date.now() - q.updatedAt >= POOL_CACHE_TTL;
+      if (q) return Date.now() - q.updatedAt >= POOL_CACHE_TTL;
+      // No stored quota: either never primed, or the last attempt failed. Retry only
+      // once per TTL window so an unreachable or rejecting account cannot turn every
+      // prime trigger into another upstream request.
+      const lastAttempt = poolQuotaPrimeAttemptedAt.get(a.id);
+      if (!lastAttempt) return true;
+      // A newer credential invalidates the previous failure: retry without waiting.
+      if (lastAttempt.generation !== readCodexAccountRecord(a.id)?.generation) return true;
+      return Date.now() - lastAttempt.at >= POOL_CACHE_TTL;
     });
     const primeMain = async () => {
       const mainLease = tryAcquireNativeMainPrimeLease();
@@ -1359,7 +1546,31 @@ export async function primeCodexPoolQuotas(
         primeMain(),
         mapWithConcurrency(stale, POOL_QUOTA_REFRESH_CONCURRENCY, async a => {
           if (!getCodexAccountCredential(a.id)) return;
-          await fetchPoolAccountQuota(a.id, false, a.plan);
+          let result: PoolQuotaResult;
+          try {
+            result = await fetchPoolAccountQuota(a.id, false, a.plan, getValidPoolTokenForPrime);
+          } catch (error) {
+            // Local quota-flight saturation proves no WHAM request existed for this account.
+            // Consume it per item so sibling workers remain inside the shared prime lifetime.
+            if (error instanceof PoolQuotaProbeBusyError) return;
+            throw error;
+          }
+          // Only the data-plane function knows whether upstream dispatch began. Any
+          // cache hit, credential deferral, or local admission failure remains eligible.
+          const attempted = result.quotaProbeAttempted;
+          if (!attempted) return;
+          if (!configuredPoolAccount(getRuntimeConfig(config), a.id)) {
+            poolQuotaPrimeAttemptedAt.delete(a.id);
+            return;
+          }
+          poolQuotaPrimeAttemptedAt.set(a.id, {
+            // getValidCodexToken may rotate the credential before WHAM is sent.
+            // Bind the backoff to the generation that actually made the request;
+            // otherwise the next prime sees a false generation change and retries
+            // the same failed WHAM call immediately.
+            generation: attempted.credentialGeneration,
+            at: attempted.at,
+          });
         }),
       ]);
     } catch {
@@ -1375,6 +1586,15 @@ export async function primeCodexPoolQuotas(
 /** Test-only: drop any in-flight prime pass so a leaked single-flight promise
  * from another suite cannot coalesce into the next prime. */
 export function clearCodexQuotaPrimeState(): void {
+  primeInFlight = null;
+  poolQuotaPrimeAttemptedAt.clear();
+  getValidPoolTokenForPrime = getValidCodexToken;
+}
+
+/** Test-only: drop the shared single-flight promise while keeping the per-account
+ * failure backoff, so a test can trigger a second real prime pass and still observe
+ * the throttle a production caller would see. */
+export function clearCodexQuotaPrimeSingleFlightForTests(): void {
   primeInFlight = null;
 }
 
@@ -1486,10 +1706,7 @@ export async function listCodexAuthAccountsSnapshot(
     hasCredential: hasMainCredential,
     needsReauth: mainNeedsReauth,
     quota: mainInfo.quota ? {
-      ...quotaForPlan({
-        ...mainInfo.quota,
-        updatedAt: getAccountQuota(MAIN_CODEX_ACCOUNT_ID)?.updatedAt ?? Date.now(),
-      }, mainInfo.plan),
+      ...quotaForPlan(mainQuotaWithCarriedResetCredits(mainInfo.quota), mainInfo.plan),
     } : null,
     ...oauthAccountHealthFields("codex", MAIN_CODEX_ACCOUNT_ID, mainHealth),
   };
@@ -2013,7 +2230,15 @@ export async function handleCodexAuthAPI(
   }
 
   if (url.pathname === "/api/codex-auth/login" && req.method === "POST") {
-    const body = (await req.json().catch(() => ({}))) as { id?: string; reauth?: boolean; openBrowser?: unknown };
+    const body = (await req.json().catch(() => ({}))) as {
+      id?: string;
+      reauth?: boolean;
+      openBrowser?: unknown;
+      device?: unknown;
+    };
+    // Device mode: no local browser, no loopback listener. The only way to add
+    // an account to a headless hub (#3366).
+    const useDeviceFlow = body.device === true;
     const requestedAccountId = body.id?.trim();
     const reauth = body.reauth === true;
     if (requestedAccountId && !isValidCodexAccountId(requestedAccountId)) {
@@ -2043,13 +2268,20 @@ export async function handleCodexAuthAPI(
     codexAuthLoginState.set(flowId, loginOwner);
     try {
       const { startLoginFlow, getLoginStatus, publicOAuthAuthenticationErrorMessage } = await import("../oauth");
-      const result = await startLoginFlow("chatgpt", { forceLogin: true });
+      const result = await startLoginFlow("chatgpt", {
+        forceLogin: true,
+        ...(useDeviceFlow ? { flow: "device" as const } : {}),
+      });
 
       // Open the browser server-side (same pattern as /api/oauth/login in management-api.ts).
       // The GUI's window.open is popup-blocked because it runs after an await, not a direct click.
       // Both login routes share one resolver so this surface cannot drift from the other.
       const { shouldOpenBrowserForLogin } = await import("../oauth/open-browser-choice");
-      if (result.url && shouldOpenBrowserForLogin(body.openBrowser, runtimeConfig)) {
+      // A device flow's URL is a verification page the user opens on ANOTHER
+      // machine. Opening it on the hub host is useless at best, and on a
+      // headless host it fails. `deviceCode` is the same signal the generic
+      // OAuth login route uses to make this decision.
+      if (result.url && !result.deviceCode && shouldOpenBrowserForLogin(body.openBrowser, runtimeConfig)) {
         const { openUrl } = await import("../lib/open-url");
         openUrl(result.url);
       }
@@ -2057,7 +2289,14 @@ export async function handleCodexAuthAPI(
       (async () => {
         try {
           let completed = false;
-          for (let i = 0; i < 150; i++) {
+          // The device grant lives 15 minutes and the whole point is that the
+          // user walks to another device to enter the code. A 5-minute server
+          // budget would kill the flow at minute five while the grant is still
+          // valid. The extra 30 attempts past 450 are settlement margin: a user
+          // who authorizes in the final seconds still needs the token exchange
+          // and credential write to land before this loop gives up.
+          const pollAttempts = useDeviceFlow ? 480 : 150;
+          for (let i = 0; i < pollAttempts; i++) {
             await new Promise(r => setTimeout(r, 2000));
             const st = getLoginStatus("chatgpt");
             if (st.done && st.loggedIn) {
@@ -2283,7 +2522,15 @@ export async function handleCodexAuthAPI(
       })();
 
       setCodexLoginState(flowId, { status: "pending" });
-      return jsonResponse({ ok: true, flowId, url: result.url, instructions: result.instructions });
+      return jsonResponse({
+        ok: true,
+        flowId,
+        url: result.url,
+        instructions: result.instructions,
+        // Dropped before #3366: every device-code surface renders this field,
+        // so withholding it left the GUI and CLI with no code to show.
+        ...(result.deviceCode ? { deviceCode: result.deviceCode } : {}),
+      });
     } catch (e) {
       if (codexAuthLoginState.get(flowId) === loginOwner) codexAuthLoginState.delete(flowId);
       const msg = e instanceof Error ? e.message : String(e);

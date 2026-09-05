@@ -35,22 +35,80 @@ export function namespacedToolName(namespace: string | undefined, name: string):
  * Codex unified-exec name normalization.
  *
  * Codex's code-mode shell tool is declared as `exec` (a freeform custom tool whose own
- * description mentions the nested `await tools.exec_command(...)` helper). Routed models —
- * DeepSeek in particular — sometimes echo that helper name as the tool-call name, emitting
- * `exec_command` or `apply_patch` instead of the declared `exec`. Accept these nested helper
- * names only when the request catalog actually declares `exec` and does not itself declare the
- * emitted name (an MCP server may legitimately advertise one under its own namespace).
+ * description mentions the nested `await tools.exec_command(...)` helper). Some routed providers
+ * echo that helper name as the tool-call name, emitting `exec_command`, `write_stdin`, or
+ * `apply_patch` instead of the declared `exec`. Accept these nested helper names only when the
+ * request catalog actually declares `exec` and does not itself declare the emitted name (an MCP
+ * server may legitimately advertise one under its own namespace).
  */
 const LEGACY_SHELL_BRIDGE_TOOL_NAMES = ["exec_command", "shell_command"] as const;
-const CODE_MODE_HELPER_TOOL_NAMES = [...LEGACY_SHELL_BRIDGE_TOOL_NAMES, "apply_patch"] as const;
+const CODE_MODE_HELPER_TOOL_NAMES = [
+  ...LEGACY_SHELL_BRIDGE_TOOL_NAMES,
+  "write_stdin",
+  "apply_patch",
+] as const;
 
 /**
  * The one declared name that turns nested-helper normalization on. Declaring it is not just a
- * name: it also decides whether an emitted `exec_command`/`shell_command`/`apply_patch` is
- * accepted as that shell tool, so callers that build declared-name sets must add it only for a
- * genuine bare declaration.
+ * name: it also decides whether an emitted helper name is accepted as that shell tool, so callers
+ * that build declared-name sets must add it only for a genuine bare declaration.
  */
 export const CODE_MODE_EXEC_TOOL_NAME = "exec";
+
+/**
+ * Collaboration/sub-agent call-shape repair.
+ *
+ * Routed models (Q38-class) frequently emit a Codex tool in a different naming
+ * form than the request declared: the bare name for a namespaced declaration
+ * (spawn_agent for collaboration__spawn_agent), the dotted form
+ * (collaboration.spawn_agent), or a functions__-prefixed form. When exactly one
+ * declared wire name matches the emitted one after flattening, rewrite the call
+ * to that declared name so the turn survives; ambiguous or unmatched names fall
+ * through to the undeclared phantom guard unchanged.
+ */
+export function repairEmittedToolName(name: string, declared: ReadonlySet<string> | undefined): string {
+  if (!declared || declared.size === 0 || declared.has(name)) return name;
+  const candidates: string[] = [];
+  const push = (n: string) => {
+    if (declared.has(n) && !candidates.includes(n)) candidates.push(n);
+  };
+  // functions__exec / functions.exec are the historical ChatGPT prefix for the
+  // built-in surface; the current catalog declares the bare name.
+  if (name.startsWith("functions__")) push(name.slice("functions__".length));
+  if (name.startsWith("functions.")) push(name.slice("functions.".length));
+  // Dotted namespace form: collaboration.spawn_agent -> collaboration__spawn_agent.
+  if (name.includes(".")) push(name.replaceAll(".", "__"));
+  // Bare name: unique declared namespace__name suffix match.
+  if (!name.includes("__") && !name.includes(".")) {
+    const suffix = "__" + name;
+    for (const d of declared) {
+      if (d.length > suffix.length && d.endsWith(suffix)) push(d);
+    }
+  }
+  // Namespaced emission with only the bare name declared: collaboration__update_plan
+  // -> update_plan. Only when the bare form is declared and the full form is not.
+  if (candidates.length === 0 && name.includes("__")) {
+    const bare = name.slice(name.indexOf("__") + 2);
+    if (bare.length > 0) push(bare);
+  }
+  // Sandbox-namespace composition: tools__web_run means the model prefixed the JS
+  // sandbox namespace onto a real tool name. Strip the prefix when the remainder
+  // is declared (the intended call is recoverable), otherwise leave it phantom.
+  if (candidates.length === 0 && (name.startsWith("tools__") || name.startsWith("tools."))) {
+    const stripped = name.startsWith("tools__") ? name.slice("tools__".length) : name.slice("tools.".length);
+    if (stripped.length > 0) {
+      push(stripped);
+      // The model also tends to collapse the namespace separator itself
+      // (tools__web_run -> web_run for declared web__run), so fall back to a
+      // separator-insensitive exact match when the plain strip misses.
+      const squashed = stripped.replaceAll("__", "_");
+      for (const d of declared) {
+        if (d.replaceAll("__", "_") === squashed) push(d);
+      }
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : name;
+}
 
 export function normalizeDeclaredToolName(
   name: string,

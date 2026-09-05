@@ -22,7 +22,7 @@
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { shouldInjectApiAuthHeader } from "../codex/inject";
+import { shouldInjectApiAuthHeader, standaloneCodexRoutingTarget } from "../codex/inject";
 import { FORMAT_MEDIA_TYPE, serializeDocument, type ConfigFormat } from "../integrations/serialize";
 import { providerCodexAccountMode } from "../providers/registry";
 import { canonicalizeReasoningEfforts, sanitizeCodexReasoningEfforts } from "../reasoning-effort";
@@ -301,7 +301,17 @@ export function ompModelsConfigPath(env: OpencodeLaunchEnv = process.env, home: 
 }
 
 /** Compose the OpenAI-compatible proxy base URL from a live probe result. */
-export function opencodeProxyBaseUrl(port: number, hostname?: string): string {
+export function opencodeProxyBaseUrl(
+  port: number,
+  hostname?: string,
+  config?: Pick<OcxConfig, "unauthenticatedLoopbackListener">,
+): string {
+  if (config?.unauthenticatedLoopbackListener?.enabled) {
+    return standaloneCodexRoutingTarget(port, {
+      hostname,
+      unauthenticatedLoopbackListener: config.unauthenticatedLoopbackListener,
+    }).baseUrl;
+  }
   return `http://${probeHostname(hostname)}:${port}/v1`;
 }
 
@@ -1034,8 +1044,13 @@ export interface HermesProviderBlock {
   api_mode: "chat_completions";
   /** We supply the list, so skip their live `/models` probe. */
   discover_models: false;
-  models: string[];
+  models: Record<string, HermesModelEntry>;
   extra_headers?: Record<string, string>;
+}
+
+/** Capability metadata Hermes cannot discover for a custom local provider. */
+export interface HermesModelEntry {
+  supports_vision?: boolean;
 }
 
 export interface HermesGeneratedConfig {
@@ -1311,7 +1326,13 @@ function proxyAdmissionHeaders(config: OcxConfig | undefined, envRef: string): R
 }
 
 function buildHermesClientConfig(ctx: ExportContext): HermesGeneratedConfig {
-  const models = normalizeExportModels(ctx.models).map(model => model.namespaced);
+  const models: Record<string, HermesModelEntry> = {};
+  for (const model of normalizeExportModels(ctx.models)) {
+    const declared = model.inputModalities;
+    models[model.namespaced] = declared && declared.length > 0
+      ? { supports_vision: declared.includes("image") }
+      : {};
+  }
   const headers = proxyAdmissionHeaders(ctx.config, HERMES_API_KEY_ENV_REF);
   return {
     providers: {
@@ -1606,9 +1627,9 @@ function summarizeOmp(document: unknown): { modelCount: number; modelsWithoutLim
 }
 
 function summarizeHermes(document: unknown): { modelCount: number; modelsWithoutLimits: number } {
-  const models = (document as HermesGeneratedConfig | undefined)?.providers?.[OPENCODE_PROVIDER_ID]?.models ?? [];
-  // Hermes carries selectors only; it has no per-model limit to be missing.
-  return { modelCount: models.length, modelsWithoutLimits: 0 };
+  const models = (document as HermesGeneratedConfig | undefined)?.providers?.[OPENCODE_PROVIDER_ID]?.models ?? {};
+  // Hermes carries capability metadata but no per-model limit to be missing.
+  return { modelCount: Object.keys(models).length, modelsWithoutLimits: 0 };
 }
 
 function summarizeOpenclaw(document: unknown): { modelCount: number; modelsWithoutLimits: number } {

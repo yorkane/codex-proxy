@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
@@ -10,6 +10,7 @@ import {
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { SERVER_BUDGET_MS } from "./helpers/test-budget";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 // These cases start a real server and hit /v1/models. Keep the budget at the
 // server class so a slow runner does not turn a discovery probe into a flake.
@@ -51,7 +52,7 @@ afterEach(() => {
   resetCodexModelEntitlementCacheForTests();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  if (testHome) rmSync(testHome, { recursive: true, force: true });
+  if (testHome) removeTreeWithRetry(testHome);
   testHome = "";
 });
 
@@ -122,6 +123,9 @@ describe("raw /v1/models list reasoning-effort advertisement (Grok Build discove
       expect("supports_reasoning_effort" in plain!).toBe(false);
       expect("reasoning_effort" in plain!).toBe(false);
       expect("reasoning_efforts" in plain!).toBe(false);
+      const capabilities = plain!.capabilities as Record<string, unknown>;
+      expect(capabilities.supports_reasoning).toBe(false);
+      expect("reasoning_effort" in capabilities).toBe(false);
     } finally {
       await server.stop(true);
     }

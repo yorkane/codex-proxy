@@ -1717,6 +1717,61 @@ describe("OpenAI Responses passthrough sanitization", () => {
     });
   });
 
+  test("keeps the reserved functions group intact for codex-spark, flattens MCP groups (#3217)", () => {
+    // Codex 0.147+ on Responses Lite ships every ordinary client tool inside the reserved
+    // `functions` namespace group, carried in an `additional_tools` input item. Flattening that
+    // group made the backend answer `custom_tool_call { name: "exec", namespace: "exec" }`,
+    // which codex-rs concatenates into the unroutable `execexec` and loops on.
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const functionsGroup = {
+      type: "namespace",
+      name: "functions",
+      description: "client tools",
+      tools: [
+        { type: "custom", name: "exec", description: "shell" },
+        { type: "function", name: "wait", parameters: { type: "object", properties: {} }, defer_loading: true },
+        { type: "tool_search", name: "tool_search" },
+      ],
+    };
+    const mcpGroup = {
+      type: "namespace",
+      name: "mcp__docs",
+      tools: [{ type: "function", name: "search", parameters: { type: "object", properties: {} } }],
+    };
+    const request = adapter.buildRequest({
+      modelId: "gpt-5.3-codex-spark",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "gpt-5.3-codex-spark",
+        input: [
+          { type: "additional_tools", role: "developer", tools: [functionsGroup, mcpGroup] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "run pwd" }] },
+        ],
+        tools: [functionsGroup, mcpGroup],
+      },
+    }, { headers: new Headers({ authorization: "Bearer token" }) });
+    const body = JSON.parse(request.body) as {
+      tools: Array<Record<string, unknown>>;
+      input: Array<{ type: string; tools?: Array<Record<string, unknown>> }>;
+    };
+    const expectedGroup = {
+      type: "namespace",
+      name: "functions",
+      description: "client tools",
+      tools: [
+        { type: "custom", name: "exec", description: "shell" },
+        { type: "function", name: "wait", parameters: { type: "object", properties: {} } },
+      ],
+    };
+    // The reserved group survives as a group with its custom child; tool_search is still dropped
+    // and defer_loading still stripped inside it. The MCP group is still flattened.
+    expect(body.tools).toEqual([expectedGroup, { type: "function", name: "search", parameters: { type: "object", properties: {} } }]);
+    const additional = body.input.find(item => item.type === "additional_tools");
+    expect(additional?.tools).toEqual([expectedGroup, { type: "function", name: "search", parameters: { type: "object", properties: {} } }]);
+  });
+
   test("strips image_generation hosted tool for codex-spark passthrough", () => {
     const adapter = createResponsesPassthroughAdapter(provider);
     const request = adapter.buildRequest({
@@ -3780,5 +3835,98 @@ describe("reasoning input content channel", () => {
     });
     expect(out.content).toEqual([]);
     expect(out.encrypted_content).toBe("upstream-issued-blob");
+  });
+});
+
+
+describe("raw usage passthrough on the forward path (#41980 parity, #37138 adjacency)", () => {
+  const usageExtras = {
+    input_tokens: 7,
+    output_tokens: 4,
+    total_tokens: 11,
+    subscription: { window: { used_percent: 12 } },
+    future_counter_v2: "wire-value",
+  };
+  const config = {
+    port: 0,
+    defaultProvider: "fixture",
+    providers: {
+      fixture: {
+        adapter: "openai-responses",
+        baseUrl: "https://fixture.test/v1",
+        authMode: "key" as const,
+        apiKey: "fixture-key",
+      },
+    },
+  } as OcxConfig;
+  const requestBody = (stream: boolean) => JSON.stringify({
+    model: "fixture/model",
+    stream,
+    input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+  });
+  const call = (stream: boolean) => handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: requestBody(stream),
+  }), config, { model: "", provider: "" });
+
+  test("streamed response.completed with usage extras reaches the client byte-identical", async () => {
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response([
+      'event: response.completed',
+      `data: ${JSON.stringify({ type: "response.completed", response: {
+        id: "resp_x", status: "completed", output: [
+          { type: "message", status: "completed", content: [{ type: "output_text", text: "hi" }] },
+        ], usage: usageExtras,
+      } })}`,
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n"), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    try {
+      const response = await call(true);
+      const text = await response.text();
+      const completedLine = text.split("\n").find(line => line.startsWith("data:") && line.includes("response.completed"));
+      expect(completedLine).toBeDefined();
+      const payload = JSON.parse(completedLine!.slice(5).trim()) as { response: { usage: unknown } };
+      expect(payload.response.usage).toEqual(usageExtras);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  test("non-streaming forward JSON keeps usage extras", async () => {
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      id: "resp_x",
+      status: "completed",
+      output: [{ type: "message", status: "completed", content: [{ type: "output_text", text: "hi" }] }],
+      usage: usageExtras,
+    }), { headers: { "content-type": "application/json" } })) as typeof fetch;
+    try {
+      const response = await call(false);
+      const json = await response.json() as { usage: unknown };
+      expect(json.usage).toEqual(usageExtras);
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  test("response.completed without usage is accepted (Codex tolerates usage: null, #37138)", async () => {
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response([
+      'data: {"type":"response.completed","response":{"id":"resp_x","status":"completed","output":[{"type":"message","status":"completed","content":[{"type":"output_text","text":"hi"}]}]}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n"), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    try {
+      const response = await call(true);
+      const text = await response.text();
+      expect(text).toContain("response.completed");
+      expect(text).not.toContain('"usage"');
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
   });
 });

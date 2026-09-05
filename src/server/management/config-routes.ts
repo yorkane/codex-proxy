@@ -88,7 +88,7 @@ import {
   type DebugFlag,
 } from "../../lib/debug-settings";
 import type { OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../../types";
-import { shadowCallTargetError } from "./shadow-call-validation";
+import { shadowCallModelMapErrors, shadowCallTargetError } from "./shadow-call-validation";
 import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
@@ -306,6 +306,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Absent means the historical auto-open, so the GUI can render the toggle
       // without having to know that `undefined` and `true` mean the same thing.
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
+      // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
+      codexDesktopAuthless: config.codexDesktopAuthless === true,
+      managementAuthDisabled: config.managementAuthDisabled === true,
+      disableOriginCheck: config.disableOriginCheck === true,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
@@ -392,14 +396,20 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAccountPickerEnabled?: unknown;
       oauthOpenBrowser?: unknown;
       showCodexSparkQuota?: unknown;
+      codexDesktopAuthless?: unknown;
+      managementAuthDisabled?: unknown;
+      disableOriginCheck?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
       && body.appOwnedMemoryBudgetMb === undefined
       && body.codexAccountPickerEnabled === undefined
       && body.oauthOpenBrowser === undefined
-      && body.showCodexSparkQuota === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, or showCodexSparkQuota" }, 400);
+      && body.showCodexSparkQuota === undefined
+      && body.codexDesktopAuthless === undefined
+      && body.managementAuthDisabled === undefined
+      && body.disableOriginCheck === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, showCodexSparkQuota, codexDesktopAuthless, managementAuthDisabled, or disableOriginCheck" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -414,8 +424,17 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && typeof body.codexAccountPickerEnabled !== "boolean") {
       return jsonResponse({ error: "codexAccountPickerEnabled boolean is required" }, 400);
     }
-    if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
-      return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
+   if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
+     return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
+   }
+   if (body.managementAuthDisabled !== undefined && typeof body.managementAuthDisabled !== "boolean") {
+     return jsonResponse({ error: "managementAuthDisabled boolean is required" }, 400);
+   }
+    if (body.disableOriginCheck !== undefined && typeof body.disableOriginCheck !== "boolean") {
+      return jsonResponse({ error: "disableOriginCheck boolean is required" }, 400);
+    }
+    if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
+      return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
     }
     if (body.appOwnedMemoryBudgetMb !== undefined && (
       typeof body.appOwnedMemoryBudgetMb !== "number"
@@ -440,9 +459,12 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
       showCodexSparkQuota: config.showCodexSparkQuota,
       hasShowCodexSparkQuota: Object.hasOwn(config, "showCodexSparkQuota"),
+      codexDesktopAuthless: config.codexDesktopAuthless,
+      hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
     let pickerIsEnabled = pickerWasEnabled;
+    const authlessWasEnabled = config.codexDesktopAuthless === true;
     try {
       if (typeof body.codexAutoStart === "boolean") {
         config.codexAutoStart = body.codexAutoStart;
@@ -466,9 +488,17 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (typeof body.oauthOpenBrowser === "boolean") {
         config.oauthOpenBrowser = body.oauthOpenBrowser;
       }
-      if (typeof body.showCodexSparkQuota === "boolean") {
-        config.showCodexSparkQuota = body.showCodexSparkQuota;
+     if (typeof body.showCodexSparkQuota === "boolean") {
+       config.showCodexSparkQuota = body.showCodexSparkQuota;
+     }
+     if (typeof body.managementAuthDisabled === "boolean") {
+       config.managementAuthDisabled = body.managementAuthDisabled;
+     }
+      if (typeof body.disableOriginCheck === "boolean") {
+        config.disableOriginCheck = body.disableOriginCheck;
       }
+      if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
+      else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       pickerIsEnabled = codexAccountPickerEnabled(config);
       (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
     } catch (error) {
@@ -491,13 +521,19 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasShowCodexSparkQuota) {
         config.showCodexSparkQuota = previousSettings.showCodexSparkQuota;
       } else deleteConfigTopLevelKey(config, "showCodexSparkQuota");
+      if (previousSettings.hasCodexDesktopAuthless) {
+        config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
+      } else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
+    // The authless switch changes the injected config.toml shape, so converge now rather than
+    // waiting for the next start; the injector re-reads config and rewrites the form.
+    const authlessIsEnabled = config.codexDesktopAuthless === true;
+    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
       ? await convergeCodexCatalog()
       : undefined;
     const catalogRefreshPending = catalogRefresh
@@ -513,6 +549,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
       showCodexSparkQuota: config.showCodexSparkQuota === true,
+      codexDesktopAuthless: authlessIsEnabled,
+      managementAuthDisabled: config.managementAuthDisabled === true,
+      disableOriginCheck: config.disableOriginCheck === true,
       startupHealth: await readStartupHealth(config),
     });
   }
@@ -844,47 +883,84 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     });
   }
 
-  if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
-    const sci = config.shadowCallIntercept ?? {};
-    return jsonResponse({
-      enabled: sci.enabled === true,
-      model: sci.model ?? "",
-      sourceModels: shadowSourceModels(sci.sourceModels),
-    });
-  }
+ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
+   const sci = config.shadowCallIntercept ?? {};
+   return jsonResponse({
+     enabled: sci.enabled === true,
+     model: sci.model ?? "",
+      modelMap: sci.modelMap ?? {},
+     sourceModels: shadowSourceModels(sci.sourceModels),
+   });
+ }
 
   if (url.pathname === "/api/shadow-call-settings" && req.method === "PUT") {
     let raw: unknown;
     try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     if (!isPlainRecord(raw)) return jsonResponse({ error: "body must be a JSON object" }, 400);
-    const body = raw as { enabled?: unknown; model?: unknown };
+    const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown };
     if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
       return jsonResponse({ error: "enabled must be a boolean" }, 400);
     }
-    if (body.model !== undefined && typeof body.model !== "string") {
-      return jsonResponse({ error: "model must be a string" }, 400);
+   if (body.model !== undefined && typeof body.model !== "string") {
+     return jsonResponse({ error: "model must be a string" }, 400);
+   }
+    if (body.modelMap !== undefined && (typeof body.modelMap !== "object" || body.modelMap === null || Array.isArray(body.modelMap))) {
+      return jsonResponse({ error: "modelMap must be an object" }, 400);
     }
-    const candidateModel = typeof body.model === "string"
-      ? body.model
-      : body.enabled === true
-        ? config.shadowCallIntercept?.model
-        : undefined;
-    const targetError = shadowCallTargetError(config, candidateModel);
-    if (targetError) return jsonResponse({ error: targetError }, 400);
-    config.shadowCallIntercept = { ...config.shadowCallIntercept };
-    if (typeof body.enabled === "boolean") config.shadowCallIntercept.enabled = body.enabled;
-    if (typeof body.model === "string") {
-      if (body.model === "") delete config.shadowCallIntercept.model;
-      else config.shadowCallIntercept.model = body.model;
+   if (body.modelMap !== undefined) {
+     for (const [k, v] of Object.entries(body.modelMap as Record<string, unknown>)) {
+       if (typeof k !== "string" || k.trim() === "") return jsonResponse({ error: "modelMap keys must be non-empty strings" }, 400);
+       if (typeof v !== "string") return jsonResponse({ error: `modelMap[${k}] must be a string` }, 400);
+     }
+   }
+    if (body.sourceModels !== undefined && (!Array.isArray(body.sourceModels) || body.sourceModels.some(v => typeof v !== "string" || v.trim() === ""))) {
+      return jsonResponse({ error: "sourceModels must be an array of non-empty strings" }, 400);
     }
-    saveConfigPreservingClaudeCode(config);
-    const sci = config.shadowCallIntercept;
-    return jsonResponse({
-      ok: true,
-      enabled: sci.enabled === true,
-      model: sci.model ?? "",
-      sourceModels: shadowSourceModels(sci.sourceModels),
-    });
-  }
+   const candidateModel = typeof body.model === "string"
+     ? body.model
+     : body.enabled === true
+       ? config.shadowCallIntercept?.model
+       : undefined;
+    // Validate every replacement target: the shared `model` fallback and each modelMap value.
+    const candidateModels: string[] = [];
+    if (candidateModel) candidateModels.push(candidateModel);
+    if (body.modelMap && typeof body.modelMap === "object") {
+      for (const v of Object.values(body.modelMap as Record<string, unknown>)) {
+        if (typeof v === "string" && v.trim() !== "") candidateModels.push(v);
+      }
+    }
+   for (const candidate of candidateModels) {
+     const targetError = shadowCallTargetError(config, candidate);
+     if (targetError) return jsonResponse({ error: targetError }, 400);
+   }
+    const modelMapError = shadowCallModelMapErrors(config, body.modelMap as Record<string, string> | undefined);
+    if (modelMapError) return jsonResponse({ error: modelMapError }, 400);
+   config.shadowCallIntercept = { ...config.shadowCallIntercept };
+   if (typeof body.enabled === "boolean") config.shadowCallIntercept.enabled = body.enabled;
+   if (typeof body.model === "string") {
+     if (body.model === "") delete config.shadowCallIntercept.model;
+     else config.shadowCallIntercept.model = body.model;
+   }
+   if (body.modelMap && typeof body.modelMap === "object") {
+     const next: Record<string, string> = {};
+     for (const [k, v] of Object.entries(body.modelMap as Record<string, unknown>)) {
+       if (typeof v === "string" && v.trim() !== "") next[k] = v;
+     }
+     config.shadowCallIntercept.modelMap = Object.keys(next).length > 0 ? next : undefined;
+   }
+    if (Array.isArray(body.sourceModels)) {
+      const cleaned = [...new Set((body.sourceModels as unknown[]).map(v => String(v).trim()).filter(v => v !== ""))];
+      config.shadowCallIntercept.sourceModels = cleaned.length > 0 ? cleaned : undefined;
+    }
+   saveConfigPreservingClaudeCode(config);
+   const sci = config.shadowCallIntercept;
+   return jsonResponse({
+     ok: true,
+     enabled: sci.enabled === true,
+     model: sci.model ?? "",
+      modelMap: sci.modelMap ?? {},
+     sourceModels: shadowSourceModels(sci.sourceModels),
+   });
+ }
   return null;
 }
