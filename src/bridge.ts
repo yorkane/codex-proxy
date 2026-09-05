@@ -17,7 +17,8 @@ import {
 } from "./lib/errors";
 import { redactSecretString } from "./lib/redact";
 import { repairFreeformToolInput } from "./responses/apply-patch-envelope";
-import { EXEC_REPAIR_TOOL_NAME, buildNamespaceLeakFeedback, repairExecEnvelopeLeak } from "./responses/exec-envelope-repair";
+import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "./responses/exec-envelope-repair";
+import { resolveEmittedCall } from "./responses/emitted-call-guard";
 import { encodeCompactionSummary } from "./responses/compaction";
 import { compileCodeModeHelperInput } from "./responses/code-mode-helper-compat";
 import { isTruncatedStopReason, truncationReasonFor } from "./responses/truncated-stop-reason";
@@ -34,7 +35,6 @@ import {
   stripCitationMarkers,
   type CitationMarkerFilter,
 } from "./responses/citation-markers";
-import { normalizeDeclaredToolName, repairEmittedToolName } from "./types";
 import { usageDisplayTotalTokens } from "./usage/totals";
 import { appendSafeWebSearchSource, safeWebSearchSources } from "./web-search/sources";
 import {
@@ -1132,51 +1132,27 @@ export function bridgeToResponsesSSE(
                 rememberReasoningForCall(event.id, rawReasoningForNextToolCall, replayCacheScope);
               }
               if (currentToolCall) closeCurrentToolCall();
-              // Repair known Codex call-shape mistakes (bare spawn_agent, dotted
-              // collaboration.spawn_agent, functions__exec) back to the declared wire
-              // name before the undeclared phantom guard runs.
-              const effectiveName = repairEmittedToolName(
-                normalizeDeclaredToolName(event.name, options?.declaredToolNames),
-                options?.declaredToolNames,
-              );
-              const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
-                ? event.name
-                : undefined;
-              const mapped = toolNsMap?.get(effectiveName);
-              const realName = mapped?.name ?? effectiveName;
-              if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
-                // Per-provider phantom allowlist (undeclaredToolAllowlist): a hallucinated native
-                // tool name this provider is known to replay is dropped whole — no item is ever
-                // opened, so its deltas and terminal close below are no-ops against the null
-                // currentToolCall — and the turn continues without the phantom call.
+              // One decision point for every wrong-name symptom: shape repair,
+              // namespace-leak feedback, phantom drop, or fail closed.
+              const verdict = resolveEmittedCall(event.name, {
+                declaredToolNames: options?.declaredToolNames,
+                freeformToolNames,
+                phantomNames: options?.undeclaredToolPhantomNames,
+              });
+              if (verdict.kind === "drop" && options?.declaredToolNames) {
+                // A known phantom is dropped whole — no item is ever opened, so its
+                // deltas and terminal close below are no-ops against the null
+                // currentToolCall, and the turn continues without it. Anything else
+                // undeclared fails closed instead of reaching the client.
                 if (options.undeclaredToolPhantomNames
-                  && (options.undeclaredToolPhantomNames.has(effectiveName)
+                  && (options.undeclaredToolPhantomNames.has(verdict.name)
                     || options.undeclaredToolPhantomNames.has(event.name))) {
-                  // Namespace leak: the model called the container itself. Emit a
-                  // synthetic exec call whose body throws a directive error, so the
-                  // client runs it and the model receives an actionable correction.
-                  const feedback = buildNamespaceLeakFeedback(effectiveName, options.declaredToolNames, freeformToolNames);
-                  if (feedback !== undefined) {
-                    const fbId = `ctc_${uuid()}`;
-                    emit("response.output_item.added", {
-                      output_index: outputIndex,
-                      item: { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: "", status: "in_progress" },
-                    });
-                    emit("response.custom_tool_call_input.done", {
-                      item_id: fbId, output_index: outputIndex, input: feedback,
-                    });
-                    const fbItem = { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: feedback, status: "completed" };
-                    emit("response.output_item.done", { output_index: outputIndex, item: fbItem });
-                    retainFinishedItem(fbItem as OutputItem);
-                    outputIndex++;
-                    break;
-                  }
                   break;
                 }
                 const failure = responseError(
                   502,
                   "upstream_error",
-                  `routed provider emitted undeclared client tool "${effectiveName}"; only request-declared tools may be called`,
+                  `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
                 );
                 emit("response.failed", {
                   response: {
@@ -1189,6 +1165,30 @@ export function bridgeToResponsesSSE(
                 terminalEvent = true;
                 break;
               }
+              if (verdict.kind === "feedback") {
+                // Namespace leak: the model called the container itself. Emit a
+                // synthetic exec call whose body throws a directive error, so the
+                // client runs it and the model receives an actionable correction.
+                const fbId = `ctc_${uuid()}`;
+                emit("response.output_item.added", {
+                  output_index: outputIndex,
+                  item: { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: "", status: "in_progress" },
+                });
+                emit("response.custom_tool_call_input.done", {
+                  item_id: fbId, output_index: outputIndex, input: verdict.input,
+                });
+                const fbItem = { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: verdict.input, status: "completed" };
+                emit("response.output_item.done", { output_index: outputIndex, item: fbItem });
+                retainFinishedItem(fbItem as OutputItem);
+                outputIndex++;
+                break;
+              }
+              const effectiveName = verdict.name;
+              const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
+                ? event.name
+                : undefined;
+              const mapped = toolNsMap?.get(effectiveName);
+              const realName = mapped?.name ?? effectiveName;
               const ns = mapped?.namespace;
               const toolSearch = toolSearchToolNames?.has(realName) ?? false;
               const freeform = !toolSearch && (mapped
@@ -1957,37 +1957,40 @@ function buildResponseJSONWithBudget(
           rememberReasoningForCall(e.id, rawReasoningForNextToolCall, replayCacheScope);
         }
         flushToolCall();
-        // Same call-shape repair as the streaming twin above.
-        const effectiveName = repairEmittedToolName(
-          normalizeDeclaredToolName(e.name, options?.declaredToolNames),
-          options?.declaredToolNames,
-        );
-        if (options?.declaredToolNames && !options.declaredToolNames.has(effectiveName)) {
-          // Phantom-allowlist drop for the batch path (see the streaming twin above): the call
-          // is never opened — currentToolCallId stays empty, which every downstream flush
-          // keys on — so its deltas and end event are no-ops and no item enters the output.
+        // Same single decision point as the streaming twin above.
+        const verdict = resolveEmittedCall(e.name, {
+          declaredToolNames: options?.declaredToolNames,
+          freeformToolNames: options?.freeformToolNames,
+          phantomNames: options?.undeclaredToolPhantomNames,
+        });
+        if (verdict.kind === "drop" && options?.declaredToolNames) {
+          // Phantom-allowlist drop: the call is never opened — currentToolCallId
+          // stays empty, which every downstream flush keys on — so its deltas and
+          // end event are no-ops and no item enters the output. Anything else
+          // undeclared fails the batch closed.
           if (options.undeclaredToolPhantomNames
-            && (options.undeclaredToolPhantomNames.has(effectiveName)
+            && (options.undeclaredToolPhantomNames.has(verdict.name)
               || options.undeclaredToolPhantomNames.has(e.name))) {
-            // Namespace leak: emit the directive-error exec feedback instead of dropping.
-            const feedback = buildNamespaceLeakFeedback(effectiveName, options.declaredToolNames, options.freeformToolNames);
-            if (feedback !== undefined) {
-              pushOutput({
-                type: "custom_tool_call", id: `ctc_${uuid()}`,
-                call_id: e.id, name: EXEC_REPAIR_TOOL_NAME,
-                input: feedback, status: "completed",
-              });
-            }
             break;
           }
           errorEvent = {
             type: "error",
-            message: `routed provider emitted undeclared client tool "${effectiveName}"; only request-declared tools may be called`,
+            message: `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
             status: 502,
             errorType: "upstream_error",
           };
           break;
         }
+        if (verdict.kind === "feedback") {
+          // Namespace leak: emit the directive-error exec feedback instead of dropping.
+          pushOutput({
+            type: "custom_tool_call", id: `ctc_${uuid()}`,
+            call_id: e.id, name: EXEC_REPAIR_TOOL_NAME,
+            input: verdict.input, status: "completed",
+          });
+          break;
+        }
+        const effectiveName = verdict.name;
         currentToolCallId = e.id;
         budget?.openCall(e.id);
         currentToolCallName = effectiveName;
