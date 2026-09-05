@@ -88,3 +88,59 @@ describe('batch bridge exec repair', () => {
     expect(built.status).toBe('completed');
   });
 });
+
+const leakFeedbackOptions = {
+  declaredToolNames: new Set(['exec', 'web_search', 'collaboration__update_plan']),
+  freeformToolNames: new Set(['exec']),
+  undeclaredToolPhantomNames: new Set(['tools', 'collaboration', 'update_plan']),
+};
+
+function phantomCall(name: string): AsyncGenerator<AdapterEvent> {
+  return (async function* () {
+    yield { type: 'tool_call_start', id: 'call-p', name } as AdapterEvent;
+    yield { type: 'tool_call_delta', id: 'call-p', arguments: '{}' } as AdapterEvent;
+    yield { type: 'tool_call_end', id: 'call-p' } as AdapterEvent;
+    yield { type: 'done' } as AdapterEvent;
+  })();
+}
+
+describe('namespace-leak feedback', () => {
+  test('the sandbox namespace itself is replaced by a directive exec error', async () => {
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('tools'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions));
+    expect(sse).toContain('namespace-leak repair');
+    expect(sse).toContain('response.completed');
+    expect(sse).not.toContain('response.failed');
+    // The feedback rides an exec custom_tool_call, not the phantom name.
+    expect(sse).toContain('custom_tool_call');
+    expect(sse).not.toContain('"name":"tools"');
+  });
+
+  test('a declared-but-collapsed namespace prefix gets the same feedback', async () => {
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('collaboration'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions));
+    expect(sse).toContain('namespace-leak repair');
+    expect(sse).toContain('response.completed');
+  });
+
+  test('a non-namespace phantom still drops silently', async () => {
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('update_plan'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions));
+    expect(sse).not.toContain('namespace-leak repair');
+    expect(sse).not.toContain('undeclared client tool');
+    expect(sse).toContain('response.completed');
+  });
+
+  test('without an exec channel the namespace leak falls back to a silent drop', async () => {
+    const noExec = { ...leakFeedbackOptions, declaredToolNames: new Set(['web_search']), freeformToolNames: new Set<string>() };
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('tools'), 'llm-248/x', undefined, undefined, undefined, undefined, 50_000, noExec));
+    expect(sse).not.toContain('namespace-leak repair');
+    expect(sse).toContain('response.completed');
+  });
+
+  test('batch path replaces the namespace leak with the same feedback', async () => {
+    const events: AdapterEvent[] = [];
+    for await (const e of phantomCall('tools')) events.push(e);
+    const built = buildResponseJSON(events, 'llm-248/x', leakFeedbackOptions);
+    const json = JSON.stringify(built);
+    expect(json).toContain('namespace-leak repair');
+    expect(built.status).toBe('completed');
+  });
+});

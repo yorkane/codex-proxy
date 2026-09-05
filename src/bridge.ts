@@ -17,7 +17,7 @@ import {
 } from "./lib/errors";
 import { redactSecretString } from "./lib/redact";
 import { repairFreeformToolInput } from "./responses/apply-patch-envelope";
-import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "./responses/exec-envelope-repair";
+import { EXEC_REPAIR_TOOL_NAME, buildNamespaceLeakFeedback, repairExecEnvelopeLeak } from "./responses/exec-envelope-repair";
 import { encodeCompactionSummary } from "./responses/compaction";
 import { compileCodeModeHelperInput } from "./responses/code-mode-helper-compat";
 import { isTruncatedStopReason, truncationReasonFor } from "./responses/truncated-stop-reason";
@@ -1146,6 +1146,25 @@ export function bridgeToResponsesSSE(
                 if (options.undeclaredToolPhantomNames
                   && (options.undeclaredToolPhantomNames.has(effectiveName)
                     || options.undeclaredToolPhantomNames.has(event.name))) {
+                  // Namespace leak: the model called the container itself. Emit a
+                  // synthetic exec call whose body throws a directive error, so the
+                  // client runs it and the model receives an actionable correction.
+                  const feedback = buildNamespaceLeakFeedback(effectiveName, options.declaredToolNames, freeformToolNames);
+                  if (feedback !== undefined) {
+                    const fbId = `ctc_${uuid()}`;
+                    emit("response.output_item.added", {
+                      output_index: outputIndex,
+                      item: { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: "", status: "in_progress" },
+                    });
+                    emit("response.custom_tool_call_input.done", {
+                      item_id: fbId, output_index: outputIndex, input: feedback,
+                    });
+                    const fbItem = { type: "custom_tool_call", id: fbId, call_id: event.id, name: EXEC_REPAIR_TOOL_NAME, input: feedback, status: "completed" };
+                    emit("response.output_item.done", { output_index: outputIndex, item: fbItem });
+                    retainFinishedItem(fbItem as OutputItem);
+                    outputIndex++;
+                    break;
+                  }
                   break;
                 }
                 const failure = responseError(
@@ -1940,6 +1959,15 @@ function buildResponseJSONWithBudget(
           if (options.undeclaredToolPhantomNames
             && (options.undeclaredToolPhantomNames.has(effectiveName)
               || options.undeclaredToolPhantomNames.has(e.name))) {
+            // Namespace leak: emit the directive-error exec feedback instead of dropping.
+            const feedback = buildNamespaceLeakFeedback(effectiveName, options.declaredToolNames, options.freeformToolNames);
+            if (feedback !== undefined) {
+              pushOutput({
+                type: "custom_tool_call", id: `ctc_${uuid()}`,
+                call_id: e.id, name: EXEC_REPAIR_TOOL_NAME,
+                input: feedback, status: "completed",
+              });
+            }
             break;
           }
           errorEvent = {
