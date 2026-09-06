@@ -568,6 +568,17 @@ shadowCallIntercept?: {
    * replacement MODEL, so the list follows the shadow intercept, not the provider.
    */
   phantomToolAllowlist?: string[];
+  /**
+   * Directive-error corrections per shadow-intercepted request (default 2; 0 =
+   * off). When the emitted-call guard rejects an undeclared tool call (allowlisted
+   * phantom or fresh hallucination) and the request declared an exec channel, the
+   * rejection comes back to the model as an exec directive listing the declared
+   * catalog instead of a silent drop / fail-closed 502. Each correction consumes
+   * one unit; after the budget is spent, allowlisted names drop silently and
+   * unknown names fail the turn as before. Only allocated while
+   * phantomToolAllowlistEnabled is on: the kill switch keeps pure fail-closed.
+   */
+  phantomToolFeedbackMax?: number;
 };
   /**
    * Optional map of blocked model IDs to their replacement model IDs.

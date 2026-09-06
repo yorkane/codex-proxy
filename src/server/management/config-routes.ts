@@ -894,6 +894,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       phantomToolAllowlistEnabled: sci.phantomToolAllowlistEnabled !== false,
       phantomToolAllowlist: shadowPhantomToolList(sci),
       phantomToolDefaults: [...DEFAULT_PHANTOM_TOOL_ALLOWLIST],
+      phantomToolFeedbackMax: sci.phantomToolFeedbackMax ?? 2,
    });
  }
 
@@ -901,7 +902,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     let raw: unknown;
     try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     if (!isPlainRecord(raw)) return jsonResponse({ error: "body must be a JSON object" }, 400);
-    const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown };
+    const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown };
     if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
       return jsonResponse({ error: "enabled must be a boolean" }, 400);
     }
@@ -925,6 +926,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.phantomToolAllowlistEnabled !== undefined && typeof body.phantomToolAllowlistEnabled !== "boolean") {
       return jsonResponse({ error: "phantomToolAllowlistEnabled must be a boolean" }, 400);
+    }
+    if (body.phantomToolFeedbackMax !== undefined
+      && (typeof body.phantomToolFeedbackMax !== "number" || !Number.isInteger(body.phantomToolFeedbackMax)
+        || body.phantomToolFeedbackMax < 0 || body.phantomToolFeedbackMax > 10)) {
+      return jsonResponse({ error: "phantomToolFeedbackMax must be an integer 0-10" }, 400);
     }
    const candidateModel = typeof body.model === "string"
      ? body.model
@@ -969,6 +975,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // An explicit list (including empty) is stored verbatim; absence keeps the built-in defaults.
       config.shadowCallIntercept.phantomToolAllowlist = [...new Set((body.phantomToolAllowlist as unknown[]).map(v => String(v).trim()).filter(v => v !== ""))];
     }
+    if (typeof body.phantomToolFeedbackMax === "number") {
+      config.shadowCallIntercept.phantomToolFeedbackMax = body.phantomToolFeedbackMax;
+    }
    saveConfigPreservingClaudeCode(config);
    const sci = config.shadowCallIntercept;
    return jsonResponse({
@@ -979,6 +988,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
      sourceModels: shadowSourceModels(sci.sourceModels),
      phantomToolAllowlistEnabled: sci.phantomToolAllowlistEnabled !== false,
      phantomToolAllowlist: shadowPhantomToolList(sci),
+     phantomToolFeedbackMax: sci.phantomToolFeedbackMax ?? 2,
    });
  }
   return null;

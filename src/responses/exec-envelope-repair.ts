@@ -96,3 +96,72 @@ export function buildNamespaceLeakFeedback(
     "JavaScript input. Retry with the correct form.";
   return "throw new Error(" + JSON.stringify(message) + ");";
 }
+
+// ---------------------------------------------------------------------------
+// Undeclared-tool feedback: the model called a name that is simply not part of
+// this request (a replayed native tool, or a fresh hallucination the phantom
+// list has not seen yet). Silently swallowing the call (the allowlist drop)
+// keeps the turn alive but teaches nothing, and failing the turn gives the
+// model no chance to correct. With a declared exec channel we instead run a
+// directive error naming the rejected tool, listing what IS declared, and
+// suggesting the closest declared name, so the next attempt can be right.
+// ---------------------------------------------------------------------------
+
+/** Cap for the declared-name list embedded in feedback; huge catalogs get truncated. */
+const FEEDBACK_NAME_LIST_CAP = 40;
+/** Levenshtein cutoff (inclusive) under which a declared name counts as "closest". */
+const FEEDBACK_SUGGESTION_MAX_DISTANCE = 4;
+
+function editDistanceAtMost(a: string, b: string, max: number): boolean {
+  if (Math.abs(a.length - b.length) > max) return false;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      cur.push(v);
+      if (v < rowMin) rowMin = v;
+    }
+    if (rowMin > max) return false;
+    prev = cur;
+  }
+  return prev[b.length] <= max;
+}
+
+/** Best declared-name candidate for a mis-emitted name, or undefined. */
+export function closestDeclaredToolName(name: string, declaredToolNames: ReadonlySet<string>): string | undefined {
+  const lower = name.toLowerCase();
+  let best: string | undefined;
+  for (const declared of declaredToolNames) {
+    if (editDistanceAtMost(lower, declared.toLowerCase(), FEEDBACK_SUGGESTION_MAX_DISTANCE)) best = declared;
+  }
+  return best;
+}
+
+/**
+ * Directive-error body for an undeclared (possibly allowlisted-phantom) tool
+ * call, or undefined when no exec channel exists to deliver it.
+ */
+export function buildUndeclaredToolFeedback(
+  name: string,
+  declaredToolNames?: ReadonlySet<string>,
+  freeformToolNames?: ReadonlySet<string>,
+): string | undefined {
+  if (!declaredToolNames || !freeformToolNames) return undefined;
+  if (!declaredToolNames.has(EXEC_TOOL_NAME) || !freeformToolNames.has(EXEC_TOOL_NAME)) return undefined;
+  const names = Array.from(declaredToolNames);
+  const listed = names.slice(0, FEEDBACK_NAME_LIST_CAP).join(", ");
+  const more = names.length > FEEDBACK_NAME_LIST_CAP ? ` (+${names.length - FEEDBACK_NAME_LIST_CAP} more)` : "";
+  const closest = closestDeclaredToolName(name, declaredToolNames);
+  const suggestion = closest !== undefined
+    ? ` The closest declared tool is "${closest}"${closest.toLowerCase() === name.toLowerCase() ? " (identical spelling - check the namespace prefix)" : ""}; if that is what you meant, retry with exactly that name.`
+    : " No similar declared tool exists: pick a different declared tool, or complete the task without tool calls.";
+  const message =
+    `opencodex undeclared-tool repair: "${name}" is not a tool declared on this request, so the call ` +
+    `was intercepted and not executed. Declared tools: [${listed}]${more}.` +
+    suggestion +
+    " Emit a retry as its own tool call using one of the declared names above; do not retry this name.";
+  return "throw new Error(" + JSON.stringify(message) + ");";
+}

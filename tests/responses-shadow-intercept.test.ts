@@ -489,6 +489,75 @@ describe("shadow phantom-tool allowlist scoping", () => {
     expect(payload).toContain("failed");
     expect(payload).not.toContain('"name":"update_plan"');
   });
+
+  // Wiring tests for the per-request directive-correction budget allocated in
+  // core.ts (shadowCallIntercept.phantomToolFeedbackMax): rejected calls on
+  // shadow requests with a declared exec channel must reach the model as an
+  // exec directive instead of the silent drop or the fail-closed error.
+  const execDeclaringBody = (model: string) => JSON.stringify({
+    model,
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    tools: [
+      { type: "function", function: { name: "web_search", parameters: {} } },
+      { type: "custom", name: "exec" },
+    ],
+    stream: false,
+  });
+  const phantomFetch = () => {
+    globalThis.fetch = (async () => Response.json({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "all done",
+          tool_calls: [{ id: "call-p", type: "function", function: { name: "update_plan", arguments: "{}" } }],
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })) as typeof fetch;
+  };
+
+  test("a shadow request with a declared exec gets the directive correction, not a silent drop", async () => {
+    phantomFetch();
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: execDeclaringBody("gpt-5.6-luna"),
+    }), interceptConfig(), { model: "", provider: "" });
+    expect(response.status).toBe(200);
+    const payload = JSON.stringify(await response.json());
+    expect(payload).toContain("undeclared-tool repair");
+    expect(payload).toContain("web_search");
+    expect(payload).toContain("completed");
+    expect(payload).not.toContain("undeclared client tool");
+    expect(payload).not.toContain('"name":"update_plan"');
+  });
+
+  test("a NON-shadow request with exec declared still fails closed (no budget)", async () => {
+    phantomFetch();
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: execDeclaringBody("xai/grok-4.5"),
+    }), interceptConfig(), { model: "", provider: "" });
+    const payload = JSON.stringify(await response.json());
+    expect(payload).toContain("undeclared client tool");
+    expect(payload).not.toContain("undeclared-tool repair");
+  });
+
+  test("the kill switch removes the directive path too (pure fail-closed)", async () => {
+    phantomFetch();
+    const config = interceptConfig();
+    config.shadowCallIntercept = { ...config.shadowCallIntercept, phantomToolAllowlistEnabled: false };
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: execDeclaringBody("gpt-5.6-luna"),
+    }), config, { model: "", provider: "" });
+    const payload = JSON.stringify(await response.json());
+    expect(payload).toContain("undeclared client tool");
+    expect(payload).not.toContain("undeclared-tool repair");
+  });
 });
 
 describe("shadow-call settings API phantom allowlist", () => {
@@ -520,6 +589,20 @@ describe("shadow-call settings API phantom allowlist", () => {
       expect((await shadowApiResponse(config, { phantomToolAllowlist: ["ok", ""] })).status).toBe(400);
       expect((await shadowApiResponse(config, { phantomToolAllowlist: "nope" })).status).toBe(400);
       expect((await shadowApiResponse(config, { phantomToolAllowlistEnabled: "yes" })).status).toBe(400);
+    });
+  });
+
+  test("phantomToolFeedbackMax defaults to 2 and round-trips with validation", async () => {
+    await withTempHome(async () => {
+      const config = { port: 0, defaultProvider: "xai", providers: {} } as OcxConfig;
+      const get = await shadowApi(config, "GET");
+      expect(get.phantomToolFeedbackMax).toBe(2);
+      const put = await shadowApi(config, "PUT", { phantomToolFeedbackMax: 0 });
+      expect(put.phantomToolFeedbackMax).toBe(0);
+      expect(config.shadowCallIntercept?.phantomToolFeedbackMax).toBe(0);
+      expect((await shadowApiResponse(config, { phantomToolFeedbackMax: 11 })).status).toBe(400);
+      expect((await shadowApiResponse(config, { phantomToolFeedbackMax: 1.5 })).status).toBe(400);
+      expect((await shadowApiResponse(config, { phantomToolFeedbackMax: "2" })).status).toBe(400);
     });
   });
 });

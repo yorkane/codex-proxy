@@ -78,6 +78,8 @@ export interface ShadowCallData {
   phantomToolAllowlist?: string[];
   /** Built-in default list, for the reset-to-defaults action. */
   phantomToolDefaults?: string[];
+  /** Directive corrections per shadow request before dropping/failing (default 2). */
+  phantomToolFeedbackMax?: number;
 }
 
 export const CAP_OPTIONS = Array.from({ length: 18 }, (_, i) => 100_000 + i * 50_000); // 100k … 950k

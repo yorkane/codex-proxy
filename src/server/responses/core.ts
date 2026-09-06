@@ -3709,6 +3709,15 @@ async function handleResponsesInner(
   const undeclaredPhantomNames: ReadonlySet<string> = parsed._shadowIntercepted === true
     ? shadowPhantomToolNames(config.shadowCallIntercept)
     : new Set<string>();
+  // Per-request directive-correction budget (shadowCallIntercept.phantomToolFeedbackMax,
+  // default 2): rejected undeclared calls come back as an exec directive teaching the model
+  // the declared catalog until the budget runs out. Allocated only for shadow-intercepted
+  // requests with the kill switch on; the bridge translators consume it, the passthrough
+  // guard cannot inject feedback and keeps drop/fail-closed semantics.
+  const undeclaredToolFeedbackBudget: { remaining: number } | undefined =
+    parsed._shadowIntercepted === true && config.shadowCallIntercept?.phantomToolAllowlistEnabled !== false
+      ? { remaining: Math.max(0, Math.min(10, config.shadowCallIntercept?.phantomToolFeedbackMax ?? 2)) }
+      : undefined;
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
     let hostAdmissionLease = pendingHostAdmissionLease;
@@ -5617,6 +5626,7 @@ async function handleResponsesInner(
           hideThinkingSummary: parsed.options.hideThinkingSummary,
           declaredToolNames,
           undeclaredToolPhantomNames: undeclaredPhantomNames,
+          undeclaredToolFeedback: undeclaredToolFeedbackBudget,
           toolParameterSchemas,
           ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
           ...(routedCompaction ? { compaction: true } : {}),
@@ -5691,6 +5701,7 @@ async function handleResponsesInner(
       toolNsMap,
       declaredToolNames,
       undeclaredToolPhantomNames: undeclaredPhantomNames,
+      undeclaredToolFeedback: undeclaredToolFeedbackBudget,
       toolParameterSchemas,
       freeformToolNames,
       toolSearchToolNames,
@@ -6697,6 +6708,7 @@ async function handleResponsesInner(
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         declaredToolNames,
         undeclaredToolPhantomNames: undeclaredPhantomNames,
+        undeclaredToolFeedback: undeclaredToolFeedbackBudget,
       toolParameterSchemas,
         ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
         ...(routedCompaction ? { compaction: true } : {}),
@@ -6776,6 +6788,7 @@ async function handleResponsesInner(
       toolNsMap,
       declaredToolNames,
       undeclaredToolPhantomNames: undeclaredPhantomNames,
+      undeclaredToolFeedback: undeclaredToolFeedbackBudget,
       toolParameterSchemas,
       freeformToolNames,
       toolSearchToolNames,

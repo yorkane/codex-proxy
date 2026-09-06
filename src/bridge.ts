@@ -245,6 +245,13 @@ export function bridgeToResponsesSSE(
      * for names the undeclared guard would otherwise reject.
      */
     undeclaredToolPhantomNames?: ReadonlySet<string>;
+    /**
+     * Mutable per-request directive-correction budget (shadowCallIntercept.phantomToolFeedbackMax,
+     * allocated in core.ts for shadow-intercepted requests). An undeclared call within budget
+     * becomes a synthetic exec call whose body throws a directive listing the declared catalog;
+     * once exhausted the old silent-drop / fail-closed split applies. See emitted-call-guard.
+     */
+    undeclaredToolFeedback?: { remaining: number };
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     /**
@@ -1139,6 +1146,7 @@ export function bridgeToResponsesSSE(
                 declaredToolNames: options?.declaredToolNames,
                 freeformToolNames,
                 phantomNames: options?.undeclaredToolPhantomNames,
+                undeclaredFeedback: options?.undeclaredToolFeedback,
               });
               if (verdict.kind === "drop" && options?.declaredToolNames) {
                 // A known phantom is dropped whole — no item is ever opened, so its
@@ -1617,6 +1625,8 @@ function buildResponseJSONWithBudget(
     declaredToolNames?: ReadonlySet<string>;
     /** Per-provider phantom names dropped instead of failing the turn (see bridgeToResponsesSSE). */
     undeclaredToolPhantomNames?: ReadonlySet<string>;
+    /** Per-request directive-correction budget for undeclared calls (see bridgeToResponsesSSE). */
+    undeclaredToolFeedback?: { remaining: number };
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     freeformToolNames?: Set<string>;
@@ -1963,6 +1973,7 @@ function buildResponseJSONWithBudget(
           declaredToolNames: options?.declaredToolNames,
           freeformToolNames: options?.freeformToolNames,
           phantomNames: options?.undeclaredToolPhantomNames,
+          undeclaredFeedback: options?.undeclaredToolFeedback,
         });
         if (verdict.kind === "drop" && options?.declaredToolNames) {
           // Phantom-allowlist drop: the call is never opened — currentToolCallId

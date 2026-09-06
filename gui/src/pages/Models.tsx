@@ -1717,7 +1717,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         )}
         {shadowCall?.enabled && (
           <div className="models-shadow-row row muted text-control" aria-busy={shadowCallSaving}>
-            <span className="models-shadow-label">Phantom tools <Tooltip content="Tool names the replacement model hallucinates (e.g. update_plan) are dropped instead of failing the turn. Applies only to shadow-replaced requests." side="top" maxWidth={320}><span style={{ cursor: "help" }} aria-label="Phantom tool tolerance">ⓘ</span></Tooltip></span>
+            <span className="models-shadow-label">Phantom tools <Tooltip content="When the replacement model calls a tool the request never declared, the model first gets a directive error teaching it the declared tools (up to the per-request correction limit). After the limit, listed names drop silently and unknown names fail the turn. Applies only to shadow-replaced requests." side="top" maxWidth={320}><span style={{ cursor: "help" }} aria-label="Phantom tool tolerance">ⓘ</span></Tooltip></span>
             <Switch on={shadowCall.phantomToolAllowlistEnabled !== false} onClick={() => void saveShadowCall({ phantomToolAllowlistEnabled: !(shadowCall.phantomToolAllowlistEnabled !== false) })} disabled={!shadowCall || shadowCallSaving} label="Phantom tools" />
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowPhantomList(v => !v)}>{showPhantomList ? "Hide list" : "Edit list"}</button>
           </div>
@@ -1780,6 +1780,25 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
             >
               Reset to defaults
             </button>
+            <label className="row" style={{ gap: "0.35rem", marginLeft: "auto" }}>
+              Corrections/request
+              <input
+                type="number"
+                className="input text-control"
+                style={{ width: "4.5rem" }}
+                min={0}
+                max={10}
+                step={1}
+                value={shadowCall.phantomToolFeedbackMax ?? 2}
+                disabled={shadowCallSaving}
+                onChange={e => {
+                  const value = Number(e.target.value);
+                  if (!shadowCall || !Number.isInteger(value) || value < 0 || value > 10) return;
+                  setShadowCall({ ...shadowCall, phantomToolFeedbackMax: value });
+                  void saveShadowCall({ phantomToolFeedbackMax: value });
+                }}
+              />
+            </label>
           </div>
         )}
 

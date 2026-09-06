@@ -33,6 +33,7 @@
 import { normalizeDeclaredToolName, repairEmittedToolName } from "../types";
 import {
   buildNamespaceLeakFeedback,
+  buildUndeclaredToolFeedback,
   EXEC_REPAIR_TOOL_NAME,
   repairExecEnvelopeLeak,
 } from "./exec-envelope-repair";
@@ -49,7 +50,7 @@ export type EmittedCallVerdict =
    * Replace the call with a directive-error exec body: the client runs it and
    * the thrown message returns to the model as the tool result.
    */
-  | { kind: "feedback"; name: string; input: string };
+  | { kind: "feedback"; name: string; input: string; reason: "namespace-leak" | "undeclared" };
 
 /** Why a verdict was reached - the axis worth alerting on. */
 export type EmittedCallDecision =
@@ -57,7 +58,8 @@ export type EmittedCallDecision =
   | "repaired"
   | "namespace-leak"
   | "phantom-drop"
-  | "undeclared";
+  | "undeclared"
+  | "undeclared-feedback";
 
 export interface EmittedCallGuardOptions {
   /** Wire names the request declared. Absent or empty means no catalog, so nothing is enforced. */
@@ -66,6 +68,15 @@ export interface EmittedCallGuardOptions {
   freeformToolNames?: ReadonlySet<string>;
   /** Allowlisted hallucinated names to drop on sight (shadow-scoped phantomToolAllowlist). */
   phantomNames?: ReadonlySet<string>;
+  /**
+   * Mutable per-request budget for undeclared-tool correction feedback. When
+   * present and positive, an undeclared call (allowlisted phantom or fresh
+   * hallucination) becomes a directive exec error teaching the model the
+   * declared catalog instead of being dropped or failing the turn; each
+   * feedback consumes one unit. Exhausted or absent restores the old behavior
+   * (allowlisted -> silent drop, everything else -> fail closed).
+   */
+  undeclaredFeedback?: { remaining: number };
   /** Observability hook. Never affects the verdict. */
   onDecision?: (info: { emitted: string; effective: string; decision: EmittedCallDecision }) => void;
 }
@@ -102,6 +113,16 @@ export function resolveEmittedCall(
   // have recorded the name in whichever form the model first produced it.
   const isPhantom = phantom !== undefined && (phantom.has(effective) || phantom.has(emitted));
   if (!isPhantom) {
+    // Fresh hallucination outside the allowlist: with a shadow-scoped correction
+    // budget and an exec channel, reject directive-style (listing the declared
+    // catalog) instead of failing the whole turn. Budget exhausted keeps the old
+    // fail-closed verdict, which the caller surfaces as a 502.
+    const freshCorrection = buildUndeclaredToolFeedback(effective, declared, options.freeformToolNames);
+    if (freshCorrection !== undefined && options.undeclaredFeedback && options.undeclaredFeedback.remaining > 0) {
+      options.undeclaredFeedback.remaining -= 1;
+      report("undeclared-feedback");
+      return { kind: "feedback", name: effective, input: freshCorrection, reason: "undeclared" };
+    }
     report("undeclared");
     return { kind: "drop", name: effective };
   }
@@ -109,7 +130,15 @@ export function resolveEmittedCall(
   const feedback = buildNamespaceLeakFeedback(effective, declared, options.freeformToolNames);
   if (feedback !== undefined) {
     report("namespace-leak");
-    return { kind: "feedback", name: effective, input: feedback };
+    return { kind: "feedback", name: effective, input: feedback, reason: "namespace-leak" };
+  }
+  // Allowlisted phantom: silent drop keeps the turn alive but teaches nothing.
+  // Spend one budget unit on a directive rejection instead, when possible.
+  const correction = buildUndeclaredToolFeedback(effective, declared, options.freeformToolNames);
+  if (correction !== undefined && options.undeclaredFeedback && options.undeclaredFeedback.remaining > 0) {
+    options.undeclaredFeedback.remaining -= 1;
+    report("undeclared-feedback");
+    return { kind: "feedback", name: effective, input: correction, reason: "undeclared" };
   }
   report("phantom-drop");
   return { kind: "drop", name: effective };

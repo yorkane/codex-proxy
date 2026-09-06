@@ -216,12 +216,17 @@ a matching request.
 falls back to `model`. Custom source ids must also be listed in `sourceModels`.
 
 Replacement models sometimes replay tool names the request never declared (for example
-`update_plan`), which the undeclared-tool guard would otherwise fail the turn closed over.
-Shadow-routed requests tolerate a built-in list of such phantom names — the call is dropped
-end to end and the turn completes with only the legitimate calls. `phantomToolAllowlistEnabled:
-false` disables the tolerance (everything fails closed again); `phantomToolAllowlist` replaces
-the built-in list with an operator-curated one (an empty array means fail-closed). The list is
-scoped to shadow-replaced requests only: direct routes are unaffected. Edit it in the dashboard
+`update_plan`), or hallucinate fresh ones. Shadow-routed requests get a correction budget
+first: the rejected call is replaced by a directive exec error that tells the model the name
+is undeclared, lists the declared tools, and suggests the closest match, so the model can
+retry correctly. `phantomToolFeedbackMax` sets the per-request budget (default 2, 0 turns
+corrections off). Requests without a declared exec tool cannot carry directives and fall
+back to the list behavior immediately. Once the budget is spent, names on the built-in
+phantom list are dropped end to end (the turn completes with only the legitimate calls) and
+unknown names fail the turn closed. `phantomToolAllowlistEnabled: false` disables the
+tolerance (everything fails closed again); `phantomToolAllowlist` replaces the built-in list
+with an operator-curated one (an empty array means fail-closed). Everything here is scoped
+to shadow-replaced requests only: direct routes are unaffected. Edit it in the dashboard
 under Shadow call intercept.
 
 ## Sidecars

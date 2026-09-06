@@ -108,3 +108,79 @@ describe('resolveEmittedCall observability', () => {
     expect(v.name).toBe('update_plan');
   });
 });
+
+describe('resolveEmittedCall undeclared correction feedback (budget)', () => {
+  const withExec = new Set(['exec', 'web__run', 'collaboration__update_plan']);
+  const freeform = new Set(['exec']);
+
+  test('an allowlisted phantom with budget becomes directive feedback', () => {
+    const budget = { remaining: 2 };
+    // update_goal: not the bare form of any declared name, so shape repair
+    // cannot rescue it and the feedback layer is what answers.
+    const v = resolveEmittedCall('update_goal', {
+      declaredToolNames: withExec,
+      freeformToolNames: freeform,
+      phantomNames: new Set(['update_goal']),
+      undeclaredFeedback: budget,
+    });
+    expect(v.kind).toBe('feedback');
+    if (v.kind !== 'feedback') return;
+    expect(v.reason).toBe('undeclared');
+    expect(v.input).toContain('undeclared-tool repair');
+    expect(v.input).toContain('update_goal');
+    expect(v.input).toContain('collaboration__update_plan');
+    expect(budget.remaining).toBe(1);
+  });
+
+  test('a fresh hallucination with budget is corrected instead of failing closed', () => {
+    const budget = { remaining: 1 };
+    const v = resolveEmittedCall('totally_made_up', {
+      declaredToolNames: withExec,
+      freeformToolNames: freeform,
+      undeclaredFeedback: budget,
+    });
+    expect(v.kind).toBe('feedback');
+    if (v.kind !== 'feedback') return;
+    expect(v.input).toContain('totally_made_up');
+    expect(budget.remaining).toBe(0);
+    const again = resolveEmittedCall('totally_made_up', {
+      declaredToolNames: withExec,
+      freeformToolNames: freeform,
+      undeclaredFeedback: budget,
+    });
+    expect(again).toEqual({ kind: 'drop', name: 'totally_made_up' });
+  });
+
+  test('without an exec channel no budget is spent and old verdicts stand', () => {
+    const budget = { remaining: 2 };
+    const opts = {
+      declaredToolNames: new Set(['web__run']),
+      freeformToolNames: new Set<string>(),
+      phantomNames: new Set(['update_plan']),
+      undeclaredFeedback: budget,
+    };
+    expect(resolveEmittedCall('update_plan', opts)).toEqual({ kind: 'drop', name: 'update_plan' });
+    expect(budget.remaining).toBe(2);
+  });
+
+  test('no budget object keeps the historical drop/fail-closed split', () => {
+    const v = resolveEmittedCall('update_goal', {
+      declaredToolNames: withExec,
+      freeformToolNames: freeform,
+      phantomNames: new Set(['update_goal']),
+    });
+    expect(v).toEqual({ kind: 'drop', name: 'update_goal' });
+  });
+
+  test('the suggestion names the closest declared tool for a near-miss', () => {
+    const v = resolveEmittedCall('collaboration__update_plna', {
+      declaredToolNames: withExec,
+      freeformToolNames: freeform,
+      undeclaredFeedback: { remaining: 1 },
+    });
+    expect(v.kind).toBe('feedback');
+    if (v.kind !== 'feedback') return;
+    // The directive rides inside a thrown string literal, so its quotes are escaped.
+    expect(v.input).toContain('closest declared tool is \\"collaboration__update_plan\\"');
+  });
+});

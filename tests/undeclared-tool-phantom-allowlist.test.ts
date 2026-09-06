@@ -108,6 +108,69 @@ describe("batch bridge phantom drop", () => {
   });
 });
 
+describe("shadow-scoped directive correction through the bridges", () => {
+  // Requests that declare exec get the budget: rejected calls come back as a
+  // directive exec error listing the declared catalog instead of a silent drop.
+  test("streaming: an allowlisted phantom within budget becomes a directive exec call", async () => {
+    const sse = await drain(
+      bridgeToResponsesSSE(
+        phantomTurn("update_plan"), "llm-248/x", undefined, new Set(["exec"]), undefined, undefined, 50_000,
+        {
+          declaredToolNames: new Set(["web_search", "exec"]),
+          undeclaredToolPhantomNames: new Set(["update_plan"]),
+          undeclaredToolFeedback: { remaining: 2 },
+        },
+      ),
+    );
+    expect(sse).toContain("undeclared-tool repair");
+    expect(sse).toContain("custom_tool_call");
+    expect(sse).not.toContain('"name":"update_plan"');
+    expect(sse).toContain("response.completed");
+    expect(sse).not.toContain("response.failed");
+  });
+
+  test("streaming: a fresh hallucination within budget is corrected; after the budget fails closed", async () => {
+    const budget = { remaining: 1 };
+    const first = await drain(
+      bridgeToResponsesSSE(
+        phantomTurn("brand_new_ghost"), "brand_new_ghost-check", undefined, new Set(["exec"]), undefined, undefined, 50_000,
+        {
+          declaredToolNames: new Set(["web_search", "exec"]),
+          undeclaredToolFeedback: budget,
+        },
+      ),
+    );
+    expect(first).toContain("undeclared-tool repair");
+    expect(first).toContain("response.completed");
+    // Same turn shape, spent budget -> the historical fail-closed 502 verdict.
+    const second = await drain(
+      bridgeToResponsesSSE(
+        phantomTurn("brand_new_ghost"), "brand_new_ghost-check", undefined, new Set(["exec"]), undefined, undefined, 50_000,
+        {
+          declaredToolNames: new Set(["web_search", "exec"]),
+          undeclaredToolFeedback: budget,
+        },
+      ),
+    );
+    expect(second).toContain("undeclared client tool");
+    expect(second).toContain("response.failed");
+  });
+
+  test("batch: the directive correction rides an exec custom_tool_call item", async () => {
+    const events: AdapterEvent[] = [];
+    for await (const event of phantomTurn("update_plan")) events.push(event);
+    const built = buildResponseJSON(events, "llm-248/x", {
+      declaredToolNames: new Set(["web_search", "exec"]),
+      freeformToolNames: new Set(["exec"]),
+      undeclaredToolPhantomNames: new Set(["update_plan"]),
+      undeclaredToolFeedback: { remaining: 1 },
+    });
+    const json = JSON.stringify(built);
+    expect(json).toContain("undeclared-tool repair");
+    expect(built.status).toBe("completed");
+  });
+});
+
 function frame(type: string, payload: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...payload })}\n\n`;
 }
