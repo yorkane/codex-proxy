@@ -61,7 +61,7 @@ jobs:
             echo ""
             echo "upstream/main 合入 \`$SYNC_BRANCH\` 时发生冲突，本次未推送。冲突文件："
             echo ""
-            sed "s/^/- \`/" /tmp/conflicts.txt
+            sed "s/.*/- \`&\`/" /tmp/conflicts.txt
             echo ""
             echo "请人工执行 \`git fetch upstream && git merge upstream/main\` 解决后推回该分支。"
           } > /tmp/issue-body.md
