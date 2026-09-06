@@ -1,0 +1,81 @@
+name: Fork release (install artifact)
+
+# 从 fork 补丁分支构建 npm 安装包（含重建的 GUI），发布为 GitHub Release 供直接下载安装。
+# 上游的 release.yml 走 npm 发布，本工作流只维护 fork 私有的 Rolling release。
+on:
+  push:
+    branches: ["codex/shadow-call-per-source-modelmap"]
+    paths-ignore:
+      - "**.md"
+      - ".github/workflows/sync-upstream.yml"
+      - ".github/workflows/fork-release.yml"
+      - "deploy.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.0"
+
+      - name: Build GUI (dist is gitignored; must be rebuilt)
+        run: |
+          cd gui
+          bun install
+          bun run build
+
+      - name: Pack install artifact
+        run: |
+          bun run prepare:package
+          npm pack --pack-destination /tmp/
+          TGZ="$(ls /tmp/*.tgz | head -n1)"
+          VERSION="$(node -p "require('./package.json').version")"
+          SHA="$(git rev-parse --short HEAD)"
+          mv "$TGZ" "/tmp/bitkyc08-opencodex-${VERSION}-fork-${SHA}.tgz"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          echo "TGZ=/tmp/bitkyc08-opencodex-${VERSION}-fork-${SHA}.tgz" >> "$GITHUB_ENV"
+
+      - name: Self-check the artifact
+        run: |
+          set -e
+          test "$(tar xzOf "$TGZ" package/src/server/responses-undeclared-tool-guard.ts | grep -c stripDroppableToolCalls)" = "5"
+          test "$(tar xzOf "$TGZ" package/src/bridge.ts | grep -c repairExecEnvelopeLeak)" -ge "3"
+          tar xzOf "$TGZ" package/src/responses/emitted-call-guard.ts | grep -q resolveEmittedCall
+          test "$(tar --wildcards -xzOf "$TGZ" 'package/gui/dist/assets/index-*.js' | grep -c models-shadow-source-name)" -ge "1"
+
+      - name: Publish rolling GitHub Release
+        run: |
+          NOTE="/tmp/release-notes.md"
+          {
+            echo "fork 构建自 \`codex/shadow-call-per-source-modelmap@$(git rev-parse --short HEAD)\`（上游 v$(node -p "require('./package.json').version")）。"
+            echo ""
+            echo "安装：\`npm install -g --allow-scripts=bun <本文件>\`，配置与运行见仓库根目录 \`deploy.md\`。"
+            echo ""
+            echo "本 fork 定制（相对上游）：影子调用按来源模型映射、管理 API 免认证/免 Origin、"
+            echo "emitted-call-guard 统一错误工具名修复（形态修复/命名空间泄漏反馈/幻影丢弃/fail-closed）。"
+          } > "$NOTE"
+          gh release delete rolling-fork-build --yes --cleanup-tag 2>/dev/null || true
+          gh release create rolling-fork-build "$TGZ" \
+            --title "opencodex ${VERSION}-fork (${SHA})" \
+            --target "$(git rev-parse HEAD)" \
+            --notes-file "$NOTE"
+
+      - name: Keep recent rolling releases tidy
+        run: |
+          gh release list --limit 20 --json tagName --jq '.[].tagName' \
+            | grep -E '^v[0-9]' | tail -n +6 \
+            | while read -r tag; do gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true; done

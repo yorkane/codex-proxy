@@ -1,0 +1,105 @@
+name: Sync upstream (fork)
+
+# 定时把 upstream/main（lidge-jun/opencodex）合并进 fork 补丁分支。
+# 冲突或测试失败时不推送，改为开 issue 报告，由人工处理。
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SYNC_BRANCH: codex/shadow-call-per-source-modelmap
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: codex/shadow-call-per-source-modelmap
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/lidge-jun/opencodex.git
+          git fetch upstream main
+
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "UP_TO_DATE=1" >> "$GITHUB_OUTPUT"
+            echo "upstream/main already merged; nothing to do."
+            exit 0
+          fi
+          if git merge --no-edit --no-ff upstream/main -m "chore(sync): merge upstream/main into fork branch"; then
+            echo "MERGED=1" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt || true
+            git merge --abort || true
+            echo "CONFLICT=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report merge conflicts and stop
+        if: steps.merge.outputs.CONFLICT == 1
+        run: |
+          {
+            echo "## 定时同步失败：合并冲突"
+            echo ""
+            echo "upstream/main 合入 \`$SYNC_BRANCH\` 时发生冲突，本次未推送。冲突文件："
+            echo ""
+            sed "s/^/- \`/" /tmp/conflicts.txt
+            echo ""
+            echo "请人工执行 \`git fetch upstream && git merge upstream/main\` 解决后推回该分支。"
+          } > /tmp/issue-body.md
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title fork sync merge conflicts" --json number -q ".[0].number" || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file /tmp/issue-body.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "fork sync: merge conflicts with upstream/main" --body-file /tmp/issue-body.md
+          fi
+          exit 1
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        if: steps.merge.outputs.MERGED == 1
+        with:
+          bun-version: "1.4.0"
+
+      - name: Focused regression
+        if: steps.merge.outputs.MERGED == 1
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun test ./tests/undeclared-tool-phantom-allowlist.test.ts ./tests/emitted-call-guard.test.ts ./tests/emitted-call-shape-repair.test.ts ./tests/exec-envelope-repair.test.ts ./tests/shadow-call*.test.ts ./tests/auth-cors*.test.ts ./tests/bridge.test.ts
+
+      - name: Report test failure and stop
+        if: failure() && steps.merge.outputs.MERGED == 1
+        run: |
+          {
+            echo "## 定时同步失败：合并后测试不通过"
+            echo ""
+            echo "upstream/main 已合入本地但回归失败，本次未推送。请到 Actions 查看日志，人工复核后合入。"
+          } > /tmp/issue-body.md
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title fork sync tests failed" --json number -q ".[0].number" || true)"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file /tmp/issue-body.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "fork sync: tests failed after merging upstream/main" --body-file /tmp/issue-body.md
+          fi
+
+      - name: Push merged branch
+        if: steps.merge.outputs.MERGED == 1
+        run: git push origin "HEAD:refs/heads/$SYNC_BRANCH"
