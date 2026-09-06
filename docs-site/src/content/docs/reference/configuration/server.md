@@ -204,10 +204,25 @@ a matching request.
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-5.6-luna"],
+    "modelMap": { "gpt-5.6-terra": "myprovider/my-model" },
+    "phantomToolAllowlistEnabled": true,
+    "phantomToolAllowlist": ["update_plan", "web__run"]
   }
 }
 ```
+
+`modelMap` routes each source model to its own replacement id; a source absent from the map
+falls back to `model`. Custom source ids must also be listed in `sourceModels`.
+
+Replacement models sometimes replay tool names the request never declared (for example
+`update_plan`), which the undeclared-tool guard would otherwise fail the turn closed over.
+Shadow-routed requests tolerate a built-in list of such phantom names — the call is dropped
+end to end and the turn completes with only the legitimate calls. `phantomToolAllowlistEnabled:
+false` disables the tolerance (everything fails closed again); `phantomToolAllowlist` replaces
+the built-in list with an operator-curated one (an empty array means fail-closed). The list is
+scoped to shadow-replaced requests only: direct routes are unaffected. Edit it in the dashboard
+under Shadow call intercept.
 
 ## Sidecars
 

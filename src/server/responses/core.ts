@@ -435,7 +435,7 @@ export function sidecarOutcomeRecorder(
 
 
 
-import { isShadowSourceModel, shadowCallReplacementFor, shadowSourceModelPrefix, shouldInterceptShadowCall } from "../../lib/shadow-call";
+import { isShadowSourceModel, shadowCallReplacementFor, shadowPhantomToolNames, shadowSourceModelPrefix, shouldInterceptShadowCall } from "../../lib/shadow-call";
 
 export { DEFAULT_SHADOW_SOURCE_MODELS, isShadowSourceModel, shadowCallReplacementFor, shadowSourceModels } from "../../lib/shadow-call";
 
@@ -2932,10 +2932,14 @@ async function handleResponsesInner(
         logCtx.shadowCallRewrittenFrom = sanitizeLogMetadataString(
           shadowSourceModelPrefix(_sciOriginal, _sci.sourceModels),
         );
-        // Helpers must not resume/append into the parent thread's Cursor conversation.
-        parsed._cursorIsolateConversation = true;
-        shadowRoute = targetRoute;
-        }
+       // Helpers must not resume/append into the parent thread's Cursor conversation.
+       parsed._cursorIsolateConversation = true;
+       shadowRoute = targetRoute;
+        // The phantom-tool tolerance below is scoped to shadow-routed requests:
+        // replayed tool names are a property of the replacement model, not of any
+        // provider, and direct (non-intercepted) traffic keeps fail-closed.
+        parsed._shadowIntercepted = true;
+       }
       }
     }
     if (parsed._compactionRequest === true) parsed._cursorIsolateConversation = true;
@@ -3696,13 +3700,15 @@ async function handleResponsesInner(
   const refreshRoutedNamespaceToolAliases = (builtRequest: AdapterRequest): void => {
     routedNamespaceToolAliases = builtRequest.convertedRoutedNamespaceToolAliases ?? new Map();
   };
-  // Per-provider phantom tool names (undeclaredToolAllowlist): an undeclared call named here is
-  // dropped instead of failing the turn. Computed once per route from the provider config and
-  // consumed by the passthrough guard rewrite, the passthrough terminal checks, and both bridge
-  // translators; empty (the default) leaves every fail-closed path byte-identical.
-  const undeclaredPhantomNames: ReadonlySet<string> = new Set(
-    route.provider.undeclaredToolAllowlist ?? [],
-  );
+  // Shadow-scoped phantom tool names (shadowCallIntercept.phantomToolAllowlist): a replacement
+  // model replaying a native tool name the request never declared is dropped (or answered with
+  // namespace-leak feedback by the emitted-call guard) instead of failing the turn. Only requests
+  // whose model the shadow intercept actually replaced consult the list — direct routes stay
+  // fail-closed. Consumed by the passthrough guard rewrite, the passthrough terminal checks, and
+  // both bridge translators; empty (disabled or non-shadow) leaves every path byte-identical.
+  const undeclaredPhantomNames: ReadonlySet<string> = parsed._shadowIntercepted === true
+    ? shadowPhantomToolNames(config.shadowCallIntercept)
+    : new Set<string>();
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
     let hostAdmissionLease = pendingHostAdmissionLease;

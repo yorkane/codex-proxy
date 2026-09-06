@@ -126,3 +126,61 @@ export function shouldInterceptShadowCall(
   return isShadowSourceModel(modelId, configured)
     && !shadowCallTargetsIntersect(source, target);
 }
+/**
+ * Global phantom-tool allowlist for shadow-intercepted requests.
+ *
+ * A replacement model that was trained on the Codex tool surface replays
+ * native tool names the request never declared (`update_plan`, the
+ * `collaboration__` flattened form, namespace containers like `tools`, and
+ * sandbox-prefixed compositions like `tools__web_run`). This is a property of
+ * THE MODEL, not of the provider hosting it, so the list lives with the shadow
+ * intercept instead of per-provider config: any provider a shadow call is
+ * routed to inherits it, and switching the replacement never requires
+ * re-copying the list. The emitted-call guard consumes it as the drop/feedback
+ * set: a listed name is dropped (or, for namespace leaks, answered with
+ * directive feedback) instead of failing the turn closed with a 502.
+ *
+ * `phantomToolAllowlistEnabled` (default true) is the kill switch; when true
+ * and no explicit list is stored, the built-in defaults below apply. An
+ * explicit empty array is an operator-chosen empty list — every undeclared
+ * call then fails closed. Names are matched after call-shape repair, against
+ * both the repaired name and the raw emission.
+ */
+export const DEFAULT_PHANTOM_TOOL_ALLOWLIST = [
+  "update_plan",
+  "collaboration__update_plan",
+  "web__run",
+  "web__search",
+  "tools",
+  "update_goal",
+  "tools__web_run",
+  "tools__web_search",
+  "tools__apply_patch",
+] as const;
+
+export interface ShadowPhantomConfig {
+  phantomToolAllowlistEnabled?: boolean;
+  phantomToolAllowlist?: unknown;
+}
+
+/** Resolve the effective shadow phantom list (defaults applied, malformed entries dropped). */
+export function shadowPhantomToolNames(sci: ShadowPhantomConfig | undefined): Set<string> {
+  if (sci?.phantomToolAllowlistEnabled === false) return new Set();
+  const configured = Array.isArray(sci?.phantomToolAllowlist)
+    ? (sci!.phantomToolAllowlist as unknown[])
+      .filter((v): v is string => typeof v === "string" && v.trim() !== "")
+      .map(v => v.trim())
+      .sort()
+    : null;
+  return new Set(configured ?? DEFAULT_PHANTOM_TOOL_ALLOWLIST);
+}
+
+
+/**
+ * Stored allowlist for the management API: returns the operator list when one is
+ * persisted, else the defaults — matching what shadowPhantomToolNames() applies at
+ * runtime — so the UI edits real effective values, never an empty box.
+ */
+export function shadowPhantomToolList(sci: ShadowPhantomConfig | undefined): string[] {
+  return Array.from(shadowPhantomToolNames(sci)).sort();
+}

@@ -72,6 +72,12 @@ export interface ShadowCallData {
   modelMap?: Record<string, string>;
  /** Source models the runtime actually intercepts. Older runtimes omit it. */
  sourceModels?: string[];
+  /** Shadow-scoped phantom-tool tolerance kill switch (default on). */
+  phantomToolAllowlistEnabled?: boolean;
+  /** Effective phantom-tool names tolerated for shadow-replaced requests. */
+  phantomToolAllowlist?: string[];
+  /** Built-in default list, for the reset-to-defaults action. */
+  phantomToolDefaults?: string[];
 }
 
 export const CAP_OPTIONS = Array.from({ length: 18 }, (_, i) => 100_000 + i * 50_000); // 100k … 950k

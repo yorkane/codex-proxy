@@ -8,7 +8,7 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, isShadowSourceModel } from "../src/server/responses";
-import { shadowCallReplacementFor, shouldInterceptShadowCall } from "../src/lib/shadow-call";
+import { DEFAULT_PHANTOM_TOOL_ALLOWLIST, shadowCallReplacementFor, shadowPhantomToolNames, shouldInterceptShadowCall } from "../src/lib/shadow-call";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
@@ -394,5 +394,132 @@ describe("shadowCallReplacementFor (Plan B per-source mapping)", () => {
     expect(shadowCallReplacementFor("gpt-5.6-terra", sci)).toBe("xai/grok-4.5");
     expect(shadowCallReplacementFor("gpt-5.5", sci)).toBe("google/gemini-3-pro");
     expect(shadowCallReplacementFor("gpt-5.4-mini", sci)).toBe("ollama/llama3");
+  });
+});
+
+// The phantom-tool tolerance now lives with the shadow intercept (global list, default
+// on) instead of per-provider undeclaredToolAllowlist. These pin the scoping decision:
+// shadow-replaced requests tolerate the listed names, everything else fails closed.
+describe("shadow phantom-tool allowlist scoping", () => {
+  test("shadowPhantomToolNames defaults to the built-in list", () => {
+    const names = shadowPhantomToolNames({});
+    expect(names.has("update_plan")).toBe(true);
+    expect(names.has("web__run")).toBe(true);
+    expect(names.has("tools__apply_patch")).toBe(true);
+    expect(names.size).toBe(DEFAULT_PHANTOM_TOOL_ALLOWLIST.length);
+  });
+
+  test("the kill switch empties the list", () => {
+    expect(shadowPhantomToolNames({ phantomToolAllowlistEnabled: false }).size).toBe(0);
+  });
+
+  test("an explicit operator list replaces the defaults; empty means fail-closed", () => {
+    expect(Array.from(shadowPhantomToolNames({ phantomToolAllowlist: ["web__run"] }))).toEqual(["web__run"]);
+    expect(shadowPhantomToolNames({ phantomToolAllowlist: [] }).size).toBe(0);
+  });
+
+  test("a shadow-replaced request drops an allowlisted phantom and completes", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({
+        choices: [{
+          message: {
+            role: "assistant",
+            content: "all done",
+            tool_calls: [{ id: "call-p", type: "function", function: { name: "update_plan", arguments: "{}" } }],
+          },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    }) as typeof fetch;
+
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        tools: [{ type: "function", function: { name: "web_search", parameters: {} } }],
+        stream: false,
+      }),
+    }), interceptConfig(), { model: "", provider: "" });
+
+    expect(response.status).toBe(200);
+    const payload = JSON.stringify(await response.json());
+    expect(payload).not.toContain("undeclared client tool");
+    expect(payload).not.toContain("update_plan");
+    expect(payload).toContain("all done");
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(String(bodies[0]?.model ?? "")).toContain("grok");
+  });
+
+  test("a NON-shadow request keeps fail-closed behavior for the same name", async () => {
+    globalThis.fetch = (async () => Response.json({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: "all done",
+          tool_calls: [{ id: "call-p", type: "function", function: { name: "update_plan", arguments: "{}" } }],
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })) as typeof fetch;
+
+    // xai/grok-4.5 is a direct routed selection: no shadow intercept, no tolerance.
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "xai/grok-4.5",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        tools: [{ type: "function", function: { name: "web_search", parameters: {} } }],
+        stream: false,
+      }),
+    }), interceptConfig(), { model: "", provider: "" });
+
+    // The batch bridge fails the turn closed: the completion carries status
+    // "failed" with the undeclared-tool error (same shape the allowlist regression
+    // tests pin); the phantom call never reaches the client as an output item.
+    expect(response.status).toBe(200);
+    const payload = JSON.stringify(await response.json());
+    expect(payload).toContain("undeclared client tool");
+    expect(payload).toContain("failed");
+    expect(payload).not.toContain('"name":"update_plan"');
+  });
+});
+
+describe("shadow-call settings API phantom allowlist", () => {
+  test("GET reports effective defaults when nothing was stored", async () => {
+    await withTempHome(async () => {
+      const body = await shadowApi({ port: 0, defaultProvider: "xai", providers: {} } as OcxConfig, "GET");
+      expect(body.phantomToolAllowlistEnabled).toBe(true);
+      expect(body.phantomToolAllowlist).toEqual([...DEFAULT_PHANTOM_TOOL_ALLOWLIST].sort());
+      expect(body.phantomToolDefaults).toEqual([...DEFAULT_PHANTOM_TOOL_ALLOWLIST]);
+    });
+  });
+
+  test("PUT stores an explicit list (deduped, trimmed) and the kill switch round-trips", async () => {
+    await withTempHome(async () => {
+      const config = { port: 0, defaultProvider: "xai", providers: {} } as OcxConfig;
+      const put = await shadowApi(config, "PUT", {
+        phantomToolAllowlist: ["web__run", "web__run", " my_phantom "],
+      });
+      expect(put.phantomToolAllowlist).toEqual(["my_phantom", "web__run"]);
+      expect(config.shadowCallIntercept?.phantomToolAllowlist).toEqual(["web__run", "my_phantom"]);
+      const off = await shadowApi(config, "PUT", { phantomToolAllowlistEnabled: false });
+      expect(off.phantomToolAllowlistEnabled).toBe(false);
+    });
+  });
+
+  test("PUT rejects malformed phantom lists", async () => {
+    await withTempHome(async () => {
+      const config = { port: 0, defaultProvider: "xai", providers: {} } as OcxConfig;
+      expect((await shadowApiResponse(config, { phantomToolAllowlist: ["ok", ""] })).status).toBe(400);
+      expect((await shadowApiResponse(config, { phantomToolAllowlist: "nope" })).status).toBe(400);
+      expect((await shadowApiResponse(config, { phantomToolAllowlistEnabled: "yes" })).status).toBe(400);
+    });
   });
 });

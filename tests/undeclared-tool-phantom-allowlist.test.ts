@@ -1,9 +1,13 @@
 /**
- * Per-provider `undeclaredToolAllowlist`: a routed model's hallucinated native tool names
- * (e.g. `update_plan` / `collaboration__update_plan` replayed by a Q38-family gateway) are
- * dropped silently instead of failing the whole turn with the #1700 undeclared-tool error.
- * These pin every kill path: the streaming bridge, the batch bridge, the passthrough SSE
- * guard rewrite, the passthrough bounded-JSON path, and the guard's fail-closed twin.
+ * Phantom-tool allowlist (shadow-scoped shadowCallIntercept.phantomToolAllowlist): a
+ * replacement model's hallucinated native tool names (e.g. `update_plan` /
+ * `collaboration__update_plan` replayed by a Q38-family gateway) are dropped silently
+ * instead of failing the whole turn with the #1700 undeclared-tool error. The
+ * bridge/guard layer consumes an already-resolved name set; the scoping decision (only
+ * shadow-intercepted requests consult the list) is core.ts wiring, pinned in
+ * responses-shadow-intercept.test.ts. These pin every kill path: the streaming bridge,
+ * the batch bridge, the passthrough SSE guard rewrite, the passthrough bounded-JSON
+ * path, and the guard's fail-closed twin.
  */
 import { describe, expect, test } from "bun:test";
 import { bridgeToResponsesSSE, buildResponseJSON } from "../src/bridge";

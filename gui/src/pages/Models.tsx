@@ -346,6 +346,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [shadowCallSaving, setShadowCallSaving] = useState(false);
   const [customSourceDraft, setCustomSourceDraft] = useState("");
   const [customTargetDraft, setCustomTargetDraft] = useState("");
+  const [phantomNameDraft, setPhantomNameDraft] = useState("");
+  const [showPhantomList, setShowPhantomList] = useState(false);
 
   // App owns the in-session view mode; fallback to persisted mode for isolated renders/tests.
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
@@ -1712,6 +1714,73 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               );
             })}
           </>
+        )}
+        {shadowCall?.enabled && (
+          <div className="models-shadow-row row muted text-control" aria-busy={shadowCallSaving}>
+            <span className="models-shadow-label">Phantom tools <Tooltip content="Tool names the replacement model hallucinates (e.g. update_plan) are dropped instead of failing the turn. Applies only to shadow-replaced requests." side="top" maxWidth={320}><span style={{ cursor: "help" }} aria-label="Phantom tool tolerance">ⓘ</span></Tooltip></span>
+            <Switch on={shadowCall.phantomToolAllowlistEnabled !== false} onClick={() => void saveShadowCall({ phantomToolAllowlistEnabled: !(shadowCall.phantomToolAllowlistEnabled !== false) })} disabled={!shadowCall || shadowCallSaving} label="Phantom tools" />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowPhantomList(v => !v)}>{showPhantomList ? "Hide list" : "Edit list"}</button>
+          </div>
+        )}
+        {shadowCall?.enabled && showPhantomList && shadowCall.phantomToolAllowlistEnabled !== false && (
+          <div className="models-shadow-row row muted text-control" style={{ flexWrap: "wrap", gap: "0.4rem" }}>
+            {(shadowCall.phantomToolAllowlist ?? []).map(name => (
+              <span key={name} className="row" style={{ gap: "0.25rem" }}>
+                <code className="models-shadow-source-name">{name}</code>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={shadowCallSaving}
+                  aria-label={`remove ${name}`}
+                  onClick={() => {
+                    if (!shadowCall) return;
+                    const next = (shadowCall.phantomToolAllowlist ?? []).filter(x => x !== name);
+                    setShadowCall({ ...shadowCall, phantomToolAllowlist: next });
+                    void saveShadowCall({ phantomToolAllowlist: next });
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <input
+              type="text"
+              className="input text-control"
+              style={{ minWidth: "10rem" }}
+              placeholder="tool name"
+              value={phantomNameDraft}
+              onChange={e => setPhantomNameDraft(e.target.value)}
+              disabled={shadowCallSaving}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={!phantomNameDraft.trim() || shadowCallSaving}
+              onClick={() => {
+                const name = phantomNameDraft.trim();
+                if (!name || !shadowCall) return;
+                const next = [...new Set([...(shadowCall.phantomToolAllowlist ?? []), name])];
+                setShadowCall({ ...shadowCall, phantomToolAllowlist: next });
+                setPhantomNameDraft("");
+                void saveShadowCall({ phantomToolAllowlist: next });
+              }}
+            >
+              Add
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={shadowCallSaving}
+              onClick={() => {
+                if (!shadowCall) return;
+                const next = shadowCall.phantomToolDefaults ?? [];
+                setShadowCall({ ...shadowCall, phantomToolAllowlist: next });
+                void saveShadowCall({ phantomToolAllowlist: next });
+              }}
+            >
+              Reset to defaults
+            </button>
+          </div>
         )}
 
         {(v2Loading || v2) && (

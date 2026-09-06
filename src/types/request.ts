@@ -87,6 +87,13 @@ export interface OcxParsedRequest {
    * derived from the parent thread id.
    */
   _cursorIsolateConversation?: boolean;
+  /**
+   * True when the request model was replaced by the shadow-call intercept. Selects
+   * the global phantom-tool allowlist (shadowCallIntercept.phantomToolAllowlist) for
+   * the undeclared-tool guard: the replayed tool names are a property of the
+   * replacement model, so only shadow-routed requests inherit the tolerance.
+   */
+  _shadowIntercepted?: boolean;
   /** Account-scoped, non-secret Kiro request metadata selected with the OAuth access token. */
   _kiroAuthContext?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion" | "authType">;
   /** Provider-private continuation metadata resolved from the Responses previous_response_id chain. */

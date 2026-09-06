@@ -64,7 +64,7 @@ export interface EmittedCallGuardOptions {
   declaredToolNames?: ReadonlySet<string>;
   /** Declared names that take freeform input (exec-style). Drives leak feedback. */
   freeformToolNames?: ReadonlySet<string>;
-  /** Provider-configured hallucinated names (undeclaredToolAllowlist) to drop on sight. */
+  /** Allowlisted hallucinated names to drop on sight (shadow-scoped phantomToolAllowlist). */
   phantomNames?: ReadonlySet<string>;
   /** Observability hook. Never affects the verdict. */
   onDecision?: (info: { emitted: string; effective: string; decision: EmittedCallDecision }) => void;

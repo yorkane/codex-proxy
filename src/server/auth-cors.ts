@@ -864,7 +864,6 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   escapeBuiltinToolNames: "editor",
   anthropicEofTolerance: "editor",
   noVisionModels: "editor",
-  undeclaredToolAllowlist: "editor",
   googleMode: "editor",
   project: "editor",
   location: "editor",

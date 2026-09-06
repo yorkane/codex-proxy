@@ -239,9 +239,10 @@ export function bridgeToResponsesSSE(
     /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
     declaredToolNames?: ReadonlySet<string>;
     /**
-     * Per-provider phantom tool names (undeclaredToolAllowlist): an undeclared call named here is
-     * dropped silently — item, argument deltas, and terminal event never reach the client — instead
-     * of failing the whole turn. Only consulted for names the undeclared guard would otherwise reject.
+     * Shadow-scoped phantom tool names (shadowCallIntercept.phantomToolAllowlist, resolved by
+     * the caller): an undeclared call named here is dropped silently — item, argument deltas, and
+     * terminal event never reach the client — instead of failing the whole turn. Only consulted
+     * for names the undeclared guard would otherwise reject.
      */
     undeclaredToolPhantomNames?: ReadonlySet<string>;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */

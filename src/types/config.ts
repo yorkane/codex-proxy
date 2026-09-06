@@ -553,6 +553,21 @@ shadowCallIntercept?: {
   modelMap?: Record<string, string>;
   /** Optional override of intercepted source-model prefixes (default: gpt-5.4-mini, gpt-5.6-luna). */
   sourceModels?: string[];
+  /**
+   * Kill switch for the shadow phantom-tool allowlist (default true). Replacement
+   * models trained on the Codex tool surface replay native tool names the request
+   * never declared; when enabled, names on the allowlist are dropped by the
+   * emitted-call guard instead of failing the turn closed with a 502.
+   */
+  phantomToolAllowlistEnabled?: boolean;
+  /**
+   * Phantom tool names tolerated on shadow-intercepted requests. Unset = the
+   * built-in defaults (DEFAULT_PHANTOM_TOOL_ALLOWLIST); an explicit empty array
+   * is an operator-chosen empty list (everything else fails closed). Replaces the
+   * removed per-provider undeclaredToolAllowlist: the phantoms belong to the
+   * replacement MODEL, so the list follows the shadow intercept, not the provider.
+   */
+  phantomToolAllowlist?: string[];
 };
   /**
    * Optional map of blocked model IDs to their replacement model IDs.
