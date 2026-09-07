@@ -32,6 +32,7 @@ export const ru: Record<TKey, string> = {
   "nav.startup": "Безопасность запуска",
   "nav.providers": "Провайдеры",
   "nav.models": "Модели",
+  "nav.shadow": "Shadow",
   "nav.combos": "Комбо",
   "nav.subagents": "Подагенты",
 

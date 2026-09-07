@@ -32,6 +32,7 @@ export const de: Record<TKey, string> = {
   "nav.startup": "Startsicherheit",
   "nav.providers": "Anbieter",
   "nav.models": "Modelle",
+  "nav.shadow": "Shadow",
   "nav.combos": "Combos",
   "nav.subagents": "Sub-Agenten",
 

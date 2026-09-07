@@ -15,6 +15,7 @@
 @import "./styles/provider-overview-dashboard.css";
 @import "./styles-combos-workspace.css";
 @import "./styles-models-workspace.css";
+@import "./styles-shadow-workspace.css";
 @import "./styles-dashboard-workspace.css";
 @import "./styles-storage-workspace.css";
 @import "./styles-subagents-workspace.css";

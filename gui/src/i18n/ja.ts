@@ -32,6 +32,7 @@ export const ja: Record<TKey, string> = {
   "nav.startup": "起動安全性",
   "nav.providers": "プロバイダー",
   "nav.models": "モデル",
+  "nav.shadow": "Shadow",
   "nav.combos": "コンボ",
   "nav.subagents": "サブエージェント",
 

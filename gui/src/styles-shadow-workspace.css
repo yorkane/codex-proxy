@@ -1,0 +1,32 @@
+/* Shadow Call Intercept — standalone page (fork-owned, #shadow).
+   The control rows themselves reuse the .models-shadow-* classes from
+   styles-models-workspace.css; this file only owns the page shell. */
+
+.shadow-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4, 16px);
+  max-width: 60rem;
+}
+
+.shadow-page-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  padding: var(--space-3, 12px) var(--space-4, 16px);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.shadow-page-heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+/* The custom-source rows still span full width inside the section's single
+   column; the grid-column rule from the Models two-column grid does not apply
+   here, so the row just stays a normal flex row. */
+.shadow-page .models-shadow-row-full {
+  width: 100%;
+}

@@ -34,6 +34,7 @@ export const en = {
   "nav.startup": "Startup",
   "nav.providers": "Providers",
   "nav.models": "Models",
+  "nav.shadow": "Shadow",
   "nav.combos": "Combos",
   "nav.subagents": "Subagents",
   "nav.logs": "Logs & Debug",

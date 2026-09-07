@@ -32,6 +32,7 @@ export const ko: Record<TKey, string> = {
   "nav.startup": "시작 안전성",
   "nav.providers": "프로바이더",
   "nav.models": "모델",
+  "nav.shadow": "Shadow",
   "nav.combos": "콤보",
   "nav.subagents": "서브에이전트",
 

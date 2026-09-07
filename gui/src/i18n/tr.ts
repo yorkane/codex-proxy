@@ -33,6 +33,7 @@ export const tr: Record<TKey, string> = {
   "nav.startup": "Başlatma Güvenliği",
   "nav.providers": "Sağlayıcılar",
   "nav.models": "Modeller",
+  "nav.shadow": "Shadow",
   "nav.combos": "Kombolar",
   "nav.subagents": "Alt Ajanlar",
   "nav.logs": "Günlükler & Hata Ayıklama",

@@ -169,6 +169,13 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   // untranslated `~$`); the templates are pure placeholders on purpose.
   "logs.cost.approximate",
   "logs.cost.lowerBound",
+  // Fork feature name (Shadow Call Intercept page) kept in English in every locale.
+  "nav.shadow",
+  // Fork-owned management toggles; shipped English across all locales.
+  "dash.managementAuthDisabled",
+  "dash.managementAuthDisabledHint",
+  "dash.disableOriginCheck",
+  "dash.disableOriginCheckHint",
 ]);
 
 test("zh-TW ships no untranslated English placeholders beyond the intentional allowlist", async () => {

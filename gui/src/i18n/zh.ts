@@ -32,6 +32,7 @@ export const zh: Record<TKey, string> = {
   "nav.startup": "启动安全",
   "nav.providers": "提供方",
   "nav.models": "模型",
+  "nav.shadow": "Shadow",
   "nav.combos": "组合",
   "nav.subagents": "子代理",
 

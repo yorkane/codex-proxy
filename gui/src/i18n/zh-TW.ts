@@ -25,6 +25,7 @@ export const zhTW: Record<TKey, string> = {
   "nav.startup": "啟動安全",
   "nav.providers": "供應商",
   "nav.models": "模型",
+  "nav.shadow": "Shadow",
   "nav.combos": "組合",
   "nav.subagents": "子代理",
   "nav.logs": "日誌與除錯",
