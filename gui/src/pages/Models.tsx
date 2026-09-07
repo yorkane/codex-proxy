@@ -1640,7 +1640,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         })}
         {shadowCall?.enabled && (
           <>
-            <div className="models-shadow-row row muted text-control">
+            <div className="models-shadow-row models-shadow-row-full row muted text-control">
               <code className="models-shadow-source-label models-shadow-fallback-label">{t("models.shadowCallCustom")}</code>
               <input
                 type="text"
@@ -1690,7 +1690,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               const mapped = shadowCall?.modelMap?.[src] ?? "";
               const customOptions = shadowCallModelOptions(activeModels, mapped || undefined, [src]);
               return (
-                <div key={src} className="models-shadow-row row muted text-control">
+                <div key={src} className="models-shadow-row models-shadow-row-full row muted text-control">
                   <code className="models-shadow-source-label models-shadow-source-name">{src} →</code>
                   <div className="models-shadow-model-slot">
                     <Select

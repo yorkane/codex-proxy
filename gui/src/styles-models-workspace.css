@@ -172,6 +172,14 @@
   flex-wrap: nowrap;
 }
 
+/* The controls parent is a two-column grid. When the default mapping rows leave
+   an odd trailing cell, auto-placement pushes the custom-source rows into it and
+   the two rows visually overlap (grid align-items center). These rows span both
+   tracks so every custom source mapping owns its own full-width line. */
+.models-shadow-row-full {
+  grid-column: 1 / -1;
+}
+
 .models-shadow-label {
   white-space: nowrap;
 }
