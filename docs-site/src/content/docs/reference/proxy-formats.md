@@ -28,7 +28,7 @@ should select among several targets.
 | OpenAI Chat Completions | `POST /v1/chat/completions` | `chat.completion` JSON | `chat.completion.chunk` SSE ending in `[DONE]` |
 | Anthropic Messages | `POST /v1/messages` | Anthropic `message` JSON | Anthropic Messages SSE |
 | Anthropic token count | `POST /v1/messages/count_tokens` | `{ "input_tokens": number }` | Not applicable |
-| Model discovery | `GET /v1/models` | One of three catalog contracts | Not applicable |
+| Model discovery | `GET /v1/models` | Catalog or explicit Desktop snapshot | Not applicable |
 | Voice and Realtime | `POST /v1/live`, `POST /v1/realtime/calls` | Relayed call-creation response | A separate sideband WebSocket relays frames in both directions |
 | Responses compaction | `POST /v1/responses/compact` | Replacement-history JSON | Not applicable |
 
@@ -60,6 +60,13 @@ Responses shapes. Other Responses destinations preserve them.
 The same canonical boundary removes nested client-only `prompt_cache_breakpoint` markers and drops
 `item_reference` entries only on `store: false` continuations; tool call/result pairing is unchanged.
 
+Image file IDs are provider-scoped references, not portable image bytes. Responses passthrough
+retains them; translating adapters receive an `[image: file_id]` text marker for file-only image
+parts in messages or function/custom tool outputs. Use an image URL or base64 data URL when the
+translated model needs to see the image. Hosted `computer_call_output` items require a Responses
+passthrough route; translated routes return HTTP 400 instead of silently dropping the screenshot.
+For a screenshot observation without hosted computer-tool semantics, use a user `input_image`.
+
 ### JSON and SSE output
 
 With `stream: true`, the response is `text/event-stream`. The bridge emits Responses events such as
@@ -69,6 +76,17 @@ With `stream: true`, the response is `text/event-stream`. The bridge emits Respo
 
 With `stream: false` or no `stream`, the same adapter events are collected into one Responses JSON
 object. Both forms preserve the selected model, output items, terminal status, and usage.
+
+For native HTTP/SSE passthrough, a client cancellation without an observed upstream terminal is
+logged as `499` with `closeReason: "client_cancel"` and does not penalize the account pool.
+This applies to both tee inspection and eager relay, including Windows rewrite traffic,
+even when the upstream read rejects before the response-body cancellation hook runs.
+A terminal captured during the bounded post-disconnect drain retains its actual outcome.
+
+If native passthrough rewriting fails, including when it exceeds the translation
+buffer budget, the relay reports the failure without waiting for upstream inspection
+to finish. It cancels the upstream work and emits `response.failed` followed by
+`data: [DONE]`; a budget overflow uses the `translation_buffer_limit` error code.
 
 Client-facing Responses SSE frames are limited to 4 MiB per frame, measured in raw bytes before the
 SSE block delimiter. On HTTP, an unterminated upstream frame that exceeds the limit fails closed
@@ -99,6 +117,19 @@ identities use HTTP/SSE. The upstream WS adapter keeps the same downstream SSE c
 the raw JSON frame and its SSE envelope at 4 MiB, and closes the upstream when its 8 MiB byte queue
 would overflow. That overflow emits a terminal downstream `response.failed` event followed by
 `[DONE]`.
+
+The upstream WebSocket checks `NO_PROXY`/`no_proxy` first. Otherwise it uses the first non-empty
+`HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, or `all_proxy` value; `HTTP_PROXY` alone does not proxy a
+WSS connection. HTTP and HTTPS proxy URLs are passed to Bun. If the selected value is invalid or
+uses an unsupported protocol, opencodex skips the WebSocket attempt and uses HTTP/SSE instead of
+dialing the upstream directly.
+
+These rules belong to the upstream WebSocket transport, independently of the selected provider
+adapter. HTTP fetch-based Responses requests, including SSE fallback, use Bun's HTTP proxy rules
+and do not use `ALL_PROXY`. `config.proxy` fills missing `HTTP_PROXY`/`HTTPS_PROXY` values; the
+resulting scheme-specific value also takes precedence over an existing `ALL_PROXY` for WebSocket.
+For an HTTPS upstream that requires a proxy, set `HTTPS_PROXY` or `config.proxy`; `HTTP_PROXY`
+alone leaves both WSS and its HTTPS fallback without a scheme-matched proxy.
 
 Every terminal Responses usage object includes both detail objects, even when the provider did not
 report those details:
@@ -191,6 +222,14 @@ non-empty `messages` array. It translates system, user, assistant, and tool mess
 Responses items; translates function tools, tool choice, images, reasoning effort, and supported
 response formats; runs the normal Responses routing pipeline; then translates the result back.
 
+Image URLs and base64 data URLs use Chat `image_url` content parts. Translation preserves
+supported `detail` values (`auto`, `low`, `high`). On translated routes, OpenCodex also accepts
+image-bearing tool-result arrays as a compatibility extension: Responses routes retain structured
+output, while the `openai-chat` adapter sends tool images in a following user message because Chat
+tool content is text-only. Other downstream adapters own provider-specific placement. Plain text
+results remain strings. Native passthrough follows its upstream contract; image support still depends
+on the selected model and provider configuration.
+
 Reasoning is part of that translation. `reasoning_effort` (or `reasoning.effort`) becomes
 internal `reasoning.effort`. Because the Responses parser hides thinking unless
 `reasoning.summary` is set and is not `none`, Chat Completions requests that ask for an
@@ -212,6 +251,23 @@ Non-streaming output has `object: "chat.completion"`. Streaming output uses SSE 
 `data: [DONE]`. Tool-call and usage information are translated back where the source events carry
 them.
 
+If a streaming Chat request receives a complete JSON Responses result upstream, the proxy
+synthesizes SSE from the converted completion. It preserves answer and reasoning content,
+function tool calls (with a separate stream `index` for each call), usage, and the converted
+`finish_reason`, including `tool_calls` and `length`. This fallback delivers the completed result
+in chunks; it cannot provide token-by-token delivery before the upstream JSON response arrives.
+It does not issue an additional inference request. An incomplete response caused by the output
+token limit or content filtering retains `length` or `content_filter`, even if it includes tool
+output. Other incomplete boundaries return an upstream error instead of claiming a normal finish.
+
+Refusal text stays separate from answer text: JSON completions use nullable `message.refusal`,
+and streaming chunks use `delta.refusal`. Native Chat JSON-to-SSE and SSE-to-JSON conversions
+preserve that field; native streaming relay preserves the provider's refusal deltas. On translated
+Responses streams, refusal parts are buffered until the terminal event and emitted once in their
+original output/content order. Compatible repeated or sparse snapshots do not duplicate or erase
+text. Contradictory refusal snapshots and buffer overflow produce a typed error without a successful
+finish or `[DONE]`. This preserves the upstream refusal; it does not introduce a proxy policy decision.
+
 Because the internal execution path is Responses-based, a provider adapter can impose a narrower
 feature set. For example, a request feature that cannot be represented by the selected adapter is
 returned as an error instead of silently changing its meaning.
@@ -221,6 +277,22 @@ returned as an error instead of silently changing its meaning.
 These endpoints speak the Anthropic Messages dialect used by Claude Code and compatible clients.
 Most requests are translated to Responses, routed normally, then translated back to Anthropic JSON
 or Anthropic SSE.
+
+Base64 and URL image sources are translated in user messages and nested tool results. File-backed
+images (`source.type: "file"`) require native Anthropic passthrough; translated routes return a
+fixed HTTP 400 error asking for base64 or URL input. OpenCodex does not resolve another provider's
+file storage or upload the referenced image on the caller's behalf.
+
+When replay history contains an image-bearing tool result without its adjacent call, the
+Anthropic and Command Code adapters retain the image in a provenance-labeled user carrier rather
+than embedding its bytes in prompt text. They do not invent a successful tool call. Results for
+valid pending calls still precede these carriers, preserving the upstream pairing contract.
+
+For Cursor external models, data-URL screenshots in the active trailing tool-result batch are
+attached to the continuation request. The existing 12-image active-attachment limit applies to
+the whole batch. Bounded source labels remain beside the attachments even if older history is
+pruned. Native Composer/MCP handling, historical-image recall, and remote-URL omission policy
+are unchanged; this does not promise every model can see every image source.
 
 Native Anthropic passthrough is eligible only when all of these are true:
 
@@ -247,16 +319,46 @@ documented estimate over system content, messages, and tools and return:
 { "input_tokens": 123 }
 ```
 
+An unresolved date-shaped Desktop ID can also be a genuine native model missing from discovery.
+Messages and count-tokens return HTTP 503 with the fixed `desktop_model_mapping_unavailable` error when the available
+evidence cannot resolve that ID; this does not establish that the model is invalid. Unknown legacy
+hash aliases still return HTTP 400. Neither case strips the date or falls back to another route.
+Known IDs, registered mappings and exact `modelMap` matches keep their existing behavior, including
+recognized real native IDs. Refresh model discovery or reapply the connected hub profile before
+trying again; retrying alone does not guarantee resolution.
+
 ## `GET /v1/models`
 
-The same route serves three clients that expect incompatible catalog envelopes. Anthropic flavor
-wins unless `client_version` is also present.
+Without `format=desktop-config`, the ordinary catalog contracts are:
 
 | Contract | Trigger | Top-level shape | Model-id behavior |
 | --- | --- | --- | --- |
 | Anthropic model list | `anthropic-version` header or `?flavor=anthropic`, without `client_version` | `{ "data": [...] }` with Anthropic model-info entries | Claude Code receives readable ids; Desktop can receive its profile-specific alias family |
 | Codex catalog | `client_version` query parameter | `{ "models": [...] }` | Native and routed entries carry the richer Codex catalog fields, visibility, effort, WebSocket, and multi-agent metadata |
 | Plain OpenAI list | Neither trigger | `{ "object": "list", "data": [...] }` | Visible native ids are bare; routed ids are aliases or `provider/model` |
+
+### Desktop configuration snapshot
+
+`GET /v1/models?ids=desktop&format=desktop-config` explicitly selects the Desktop snapshot,
+independently of user-agent detection. The response is `{ "version": 1, "models": [...] }`
+with `Cache-Control: no-store`. The connected client sends `Accept: application/json`,
+`anthropic-version: 2023-06-01` and its existing data credential; no admin token or profile
+upload is involved. Entries are the hub-issued Desktop configuration models, not Codex catalog rows.
+
+Combining this format with `ids=cli` or any `client_version` returns HTTP 400. Without the
+format selector, the ordinary contracts above remain unchanged. When Claude is disabled,
+the snapshot is `{ "version": 1, "models": [] }`; connected Desktop apply treats this as
+unavailable and does not write a replacement profile. Old hubs returning an ordinary catalog
+instead of version 1 are unsupported; the client does not fall back to locally generated IDs.
+
+The snapshot remains a read-only model-list contract; it is not a key-rotation or profile-upload
+API. Connected Desktop key migration, recovery and disconnect operate through the existing client
+lifecycle. Rotation preserves model entries and selections; CLI `rotation` distinguishes
+`committed` from `rolled_back`. Disconnect restores owned settings or reports a known-legacy
+standard fallback, preserving user fields and later valid selections. Conflicts or incomplete
+recovery prevent a completion claim. Restart Desktop to load disk changes; disconnect does not
+automatically revoke the hub key. See [Claude Desktop lifecycle](/guides/claude-code/).
+Thinking replay and prompt-cache work remain separate in [#3719](https://github.com/lidge-jun/opencodex/issues/3719).
 
 ## `POST /v1/live` and Realtime sideband
 
@@ -307,7 +409,30 @@ default provider is enabled and is not itself an OpenAI-family entry; account-qu
 such as `side/gpt-5.6-sol` still fail closed. The proxy logs one notice per provider when this
 fallback engages. Configurations with an enabled canonical `openai` provider are unchanged.
 
-Native compact responses are buffered with a 32 MiB maximum, including responses whose declared
+Inbound bodies on both `/v1/responses` and `/v1/responses/compact` retain the shared 256 MiB
+wire/decompression admission limit. Application-level size rejection returns HTTP 413 with
+`type` and `code` both `invalid_request_error`. Its message includes a bounded diagnostic suffix,
+for example:
+
+```text
+Decompressed request body exceeds 268435456 bytes [measurement=decoded_lower_bound; bytes=268435457]
+```
+
+| Measurement | Meaning of `bytes` |
+| --- | --- |
+| `declared_wire` | Numeric `Content-Length` declared by the sender; rejected before reading, not a measured decoded size |
+| `observed_wire_lower_bound` | Wire bytes encountered when reading stopped; the complete body may be larger |
+| `decoded_exact` | Exact size of the buffer supplied to the identity decoder or returned by a decoder |
+| `decoded_lower_bound` | Admission limit plus one after inflation aborts; a lower bound, never the exact decoded size |
+
+The suffix contains only a fixed category and a finite numeric byte value. Rejected bodies are
+not read or inflated further, parsed for item counts, or retained for diagnostics. Legacy errors
+without measurement provenance retain the limit-only message. Bun's listener can reject an
+oversized wire body before application diagnostics run, so not every 413 carries this suffix.
+A lower-bound diagnostic cannot establish the complete compact payload size. The admission
+limit and retry behavior are unchanged.
+
+Native compact responses are buffered with a separate 32 MiB maximum, including responses whose declared
 `Content-Length` already exceeds the limit. The compact-specific failures include:
 
 | Status | Type or code | Meaning |
@@ -352,7 +477,7 @@ Errors use the client dialect's envelope where needed, but these status/code mea
 | 401 | `authentication_error` | A required proxy admission credential is missing or invalid |
 | 403 | `origin_rejected` | A Responses/OpenAI data-plane request or WebSocket upgrade came from a disallowed origin |
 | 503 | `combo_unavailable` | Every target in the selected combo is unavailable, in cooldown, disabled, or otherwise ineligible |
-| 400 | `unreadable_encrypted_agent_task` | An encrypted v2 worker task has no eligible native ChatGPT target that can consume it |
+| 400 | `unreadable_encrypted_agent_task` | An encrypted v2 worker task has no eligible canonical ChatGPT target or direct key-auth Responses target explicitly trusted with `allowEncryptedV2AgentTasks: true` that can consume it |
 | 426 | `upgrade_required` | The Responses WebSocket transport is disabled or the upgrade failed; use HTTP |
 
 Anthropic-origin failures are rendered in Anthropic's error envelope, so the origin rejection is a

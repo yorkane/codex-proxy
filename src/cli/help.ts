@@ -66,6 +66,7 @@ Usage:
   ocx alias <sub>             Short names for providers and models (list, set, rm, defaults)
   ocx combo <sub>             Combo routing strategies and failover
   ocx agent <sub>             Subagents, injection, effort caps, and sidecars
+  ocx effort [sub]            Inspect and configure reasoning effort caps and defaults
   ocx observe <sub>           Logs, usage, storage, memory, and debug data
   ocx inspect <sub>           Effective config, catalog, analytics, pacing, client-config
   ocx route <sub>             Routing features (combo, policy)
@@ -76,7 +77,7 @@ Usage:
   ocx memory [--json]         Alias of ocx observe memory
   ocx api-key <sub>           Alias of ocx access key
   ocx access <sub>            External API keys and endpoint information
-  ocx export --client <id>    Print a client config wired to the running proxy (12 clients)
+  ocx export --client <id>    Print a client config wired to the running proxy (13 clients)
   ocx integration client <sub> Enable, disable, inspect or roll back a client integration
   ocx grok <sub>              Grok Build model selection and apply
   ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection

@@ -301,14 +301,24 @@ export interface WebSearchLoopDeps {
   onUsage?: (usage: OcxUsage | undefined) => void;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
+  /** Request-scoped executor retains the core's selection binding across loop retries. */
+  fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof globalThis.fetch;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
   onAttemptSend?: (recovery?: AttemptRecoveryKind) => void;
   /**
    * 429 failover hook: rotate the provider's active credential and return a rebuilt adapter,
    * or null when the pool is exhausted. Async hooks support OAuth refresh; existing synchronous
    * key-pool hooks remain valid.
+   *
+   * `responseHeaders` carries the whole refusal, not just Retry-After, because an Anthropic
+   * 429 states the window's reset epoch even when it omits Retry-After -- and a rotation that
+   * cannot see it cools the drained account for the short default instead of until the window
+   * actually reopens. Optional so existing callers keep compiling.
    */
-  on429?: (retryAfterHeader: string | null) => ProviderAdapter | null | Promise<ProviderAdapter | null>;
+  on429?: (
+    retryAfterHeader: string | null,
+    responseHeaders?: Headers,
+  ) => ProviderAdapter | null | Promise<ProviderAdapter | null>;
   /** Opt-in same-target 429 policy (key-auth providers). When present, 429 replays on the SAME key before on429 rotation. */
   retryOn429Policy?: Required<RateLimitRetryPolicy> | null;
   /** Called only when the final bridged Responses stream reaches completed or incomplete. */
@@ -440,6 +450,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           cachedRequest = request;
           cachedAdapter = requestAdapter;
         }
+        const requestFetch = deps.fetchForRequest?.(request, iterParsed) ?? routedProviderFetch;
         let response: Response;
         try {
           if (requestAdapter.fetchResponse) {
@@ -449,7 +460,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               timeoutMs: connectTimeoutMs,
               returnRawErrors: true,
               stream: true,
-              executor: routedProviderFetch,
+              executor: requestFetch,
             });
           } else {
             response = await fetchWithResetRetry(
@@ -465,7 +476,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                 // so the transport-level `keepalive: false` this helper adds is what actually
                 // opens a new connection. Spending `retryRecovery` on telemetry alone left every
                 // replay on this leg eligible for the same dead socket the reset came from.
-                return routedProviderFetch(request.url, applyUpstreamRecoveryInit({
+                return requestFetch(request.url, applyUpstreamRecoveryInit({
                   method: request.method,
                   headers: h,
                   body: request.body,
@@ -518,7 +529,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       // 429 key-failover parity with the normal routed path: rotate pool keys until one responds
       // or the pool is exhausted (deps.on429 returns null — cooldown map guarantees termination).
       while (prepared.response.status === 429 && deps.on429) {
-        const rotated = await deps.on429(prepared.response.headers.get("retry-after"));
+        const rotated = await deps.on429(prepared.response.headers.get("retry-after"), prepared.response.headers);
         if (!rotated) break;
         // Never let a broken body's cancel promise outlive the cumulative header deadline. Observe
         // it, but proceed immediately to the rotated fetch under the SAME deadline signal.

@@ -46,6 +46,10 @@ import {
   resolveEffectiveUserIdentity,
 } from "../codex/user-identity";
 import { collectProjectCodexConfigWarnings, formatProjectCodexConfigWarningsForDoctor } from "../codex/project-config-warnings";
+import {
+  collectLegacyCodexConfigKeyDiagnostics,
+  formatLegacyCodexConfigKeyDiagnosticsForDoctor,
+} from "../codex/legacy-config-keys";
 import { collectStartupHealth, formatStartupRoutingDetail, startupHealthSummary } from "../codex/autostart-health";
 import {
   displayCodexRuntimePath,
@@ -1153,11 +1157,11 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   // No extra probe -- findLiveProxy already carried the version back.
   {
     const { packageVersion } = await import("./help");
-    const { computeVersionSkew } = await import("./version-skew");
+    const { computeVersionSkew, isConfirmedVersionMatch } = await import("./version-skew");
     const skew = computeVersionSkew(packageVersion(), live?.version);
     if (skew.skewed && skew.warning) {
       console.log(`!! ${skew.warning}`);
-    } else if (skew.proxyVersion !== null) {
+    } else if (isConfirmedVersionMatch(skew)) {
       console.log(`ok ocx ${skew.cliVersion} matches the running proxy`);
     }
   }
@@ -1268,6 +1272,12 @@ export async function runDoctor(args: string[] = []): Promise<void> {
     for (const line of formatProjectCodexConfigWarningsForDoctor(projectWarnings)) {
       console.log(line);
     }
+  }
+
+  console.log("\nCodex config compatibility");
+  const legacyKeyResult = collectLegacyCodexConfigKeyDiagnostics();
+  for (const line of formatLegacyCodexConfigKeyDiagnosticsForDoctor(legacyKeyResult)) {
+    console.log(line);
   }
 
   console.log("\nCodex agent role files");

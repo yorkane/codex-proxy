@@ -229,6 +229,19 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     summary: "Manage routing features; combo is currently the supported routing resource.",
   },
   {
+    name: "effort",
+    usage: "ocx effort [status|<level>|set|clear|model] [--main <level|->] [--subagent <level|->] [--injection <level|->] [--json]",
+    summary: "Inspect and configure reasoning effort caps and defaults.",
+    details: [
+      "With no arguments or `status`, displays effective effort caps, injection effort, and supported rungs.",
+      "`ocx effort <level>` (or `set --main <level>`) sets the global/main-agent reasoning ceiling.",
+      "`--subagent <level>` sets the hard ceiling for delegated sub-agent turns.",
+      "`ocx effort clear` (or `set --main - --subagent -`) removes main and subagent caps but preserves injection effort; use `ocx effort set --injection -` to clear it.",
+      "`ocx effort model <provider/model|model>` inspects a model's configured ladder, disabled status, and wire mappings.",
+      "Works both online (via live proxy API) and offline (modifies persisted config safely with atomic writes).",
+    ],
+  },
+  {
     name: "agent",
     usage: "ocx agent <status|injection|effort|subagents|fallback|sidecar> ...",
     summary: "Manage headless multi-agent, roster, effort, injection, and sidecar settings.",
@@ -274,8 +287,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   { name: "api-key", usage: "ocx api-key <list|create|rotate|remove> ...", summary: "Alias of ocx access key." },
   {
     name: "export",
-    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside> [--json] [--out <path>] [--force]",
-    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside) wired to the running proxy.",
+    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside|raycast> [--json] [--out <path>] [--force]",
+    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast) wired to the running proxy.",
     details: [
       "--json prints the generated document as JSON on stdout; use --out for the client's native format.",
       "--out <path> writes the native config there and refuses to replace an existing file without --force.",
@@ -315,13 +328,14 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   {
     name: "claude",
     usage: "ocx claude [claude args...]",
-    summary: "Launch Claude Code wired to the proxy (env injection + gateway model discovery).",
+    summary: "Launch Claude Code through the proxy, with native fallback when Claude routing is disabled.",
     details: [
       "Ensures the proxy is running, then execs `claude` with ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN,",
       "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 and model slots from config.claudeCode.",
+      "When Claude routing is explicitly disabled, it launches natively after removing proven OpenCodex-owned proxy state.",
       "Routed models appear in the native /model picker with stable claude-opus-4-8-2026MMDD slot aliases (Claude Code >= 2.1.129).",
       "Older versions: pick models via ANTHROPIC_MODEL or /model <id> directly (any string passes through).",
-      "User-exported ANTHROPIC_* variables always take precedence.",
+      "User-exported ANTHROPIC_* variables take precedence for routed launches; native fallback removes only proven OpenCodex-owned proxy values.",
       "",
       "Claude Desktop profile:",
       "  ocx claude desktop [apply]                         Save and apply the four-family profile",

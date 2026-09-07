@@ -4,7 +4,7 @@
  * A separate module rather than exports on Integrations.tsx, because a file that
  * exports both a component and constants breaks React fast refresh
  * (react/only-export-components). These need to be importable: they are the only
- * client lists in the GUI that neither tests/integrations-invariants.test.ts
+ * client lists in the GUI that neither tests/gui/integrations-invariants.test.ts
  * compares nor the compiler forces, so a client added everywhere else still gets
  * no tab and nothing fails. gui/tests/integrations-tab-coverage.test.ts stands in
  * that gap and reads them from here.
@@ -46,6 +46,7 @@ export const TABS: readonly TabDefinition[] = [
   { id: "zcode", hash: "integrations/zcode", labelKey: "integrations.tab.zcode" },
   { id: "prime", hash: "integrations/prime", labelKey: "integrations.tab.prime" },
   { id: "aside", hash: "integrations/aside", labelKey: "integrations.tab.aside" },
+  { id: "raycast", hash: "integrations/raycast", labelKey: "integrations.tab.raycast" },
 ] as const;
 
 export const FILE_CLIENTS = new Set<FileIntegrationClientId>([
@@ -61,4 +62,5 @@ export const FILE_CLIENTS = new Set<FileIntegrationClientId>([
   "zcode",
   "prime",
   "aside",
+  "raycast",
 ]);

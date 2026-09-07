@@ -4,6 +4,7 @@
 export type { OcxTool, OcxToolChoice } from "./types/tools";
 export {
   CODE_MODE_EXEC_TOOL_NAME,
+  dottedToolName,
   namespacedToolName,
   normalizeDeclaredToolName,
   repairEmittedToolName,
@@ -15,6 +16,7 @@ export {
   modelInList,
   isAllowedToolChoice,
   toolChoiceToolPredicate,
+  declaresCodeModeExec,
 } from "./types/tools";
 
 export type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./types/wire";

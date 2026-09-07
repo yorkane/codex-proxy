@@ -13,7 +13,7 @@ description: 供應商設定、憑證、配額與模型目錄指令。
 
 | 子指令 | 支援的旗標 | 動作 |
 | --- | --- | --- |
-| `list` | `--json` | 列出已設定的供應商與剩餘的 registry 項目。 |
+| `list` | `--json`, `--jsonl` | 列出已設定的供應商與剩餘的 registry 項目。 `--jsonl` 為每個已設定的供應商輸出一行 JSON 物件。 |
 | `add <name>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | 新增 registry／自訂供應商。`--force` 覆寫；`--sync` 在人類輸出模式下重新整理執行中的代理。 |
 | `edit <name>` | 供應商欄位旗標, `--json` | 編輯已驗證的即時供應商欄位而不替換金鑰池。 |
 | `test <name>` | `--json` | 探測真實上游模型端點。 |
@@ -27,6 +27,7 @@ description: 供應商設定、憑證、配額與模型目錄指令。
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -34,6 +35,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` 僅輸出已設定的供應商，每行一個 JSON 物件。每個物件的欄位與 `--json` 輸出中 `configured` 陣列的元素相同，不包含 `registryCount` 摘要。指令碼可以逐行處理這些物件。`--json` 與 `--jsonl` 不能同時使用。
 
 ## 認證
 
@@ -94,7 +97,7 @@ Codex 池選擇套用於清除既有親和性後的下一個請求；進行中�
 
 ### `ocx account list [provider] [--json] [--all] [--quota [--refresh]]`
 
-未指定供應商時，列出 Codex 池、OAuth 帳號與已設定的 API-key 池。除非存在 `--all`，否則空的供應商會被跳過。指定供應商時，僅列出該憑證家族。人類輸出使用 `PROVIDER TYPE ID PLAN/LABEL STATUS`；手動選擇的 Codex 列標記為 `selected`。當儲存了兩個以上符合資格的 Kiro 帳號時，預設情況下 429 會自動輪換至另一個帳號，並優先選擇已知剩餘額度最多的帳號；輪換由帳號存在與否驅動，可透過 `oauthAccountFailover.enabled: false` 關閉。`ocx account login kiro` 每次將一個帳號加入池中。空結果仍為成功。`--json` 回傳：
+未指定供應商時，列出 Codex 池、OAuth 帳號與已設定的 API-key 池。除非存在 `--all`，否則空的供應商會被跳過。指定供應商時，僅列出該憑證家族。人類輸出使用 `PROVIDER TYPE ID PLAN/LABEL STATUS`；手動選擇的 Codex 列標記為 `selected`。當儲存了兩個以上符合資格的 Kiro 帳號時，預設情況下 429 會自動輪換至另一個帳號，並優先選擇已知剩餘額度最多的帳號；輪換由帳號存在與否驅動，且無法關閉；`oauthAccountFailover.enabled: false` 拒絕的是送出前的帳號優選，而非 429 復原。`ocx account login kiro` 每次將一個帳號加入池中。空結果仍為成功。`--json` 回傳：
 
 ```text
 { accounts: AccountRow[], notes: string[] }
@@ -129,10 +132,11 @@ Codex 池選擇套用於清除既有親和性後的下一個請求；進行中�
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-僅控制 `openai` Codex 帳號池。`on` 設為 80%，`off` 設為 0%，`status` 讀取目前值，而 `threshold <n>` 接受 0 到 100 的整數。其他供應商與無效值離開 1。`--json` 回傳：
+控制 `openai` Codex 帳戶池閾值，或儲存通用 OAuth 帳戶池閾值。`on` 儲存 80%，`off` 儲存 0%，`threshold <n>` 接受 0–100。通用池的閾值目前不參與執行；儲存閾值不會啟用閾值切換、改變供應商啟用設定或停用 429 錯誤後的輪替。通用池的查詢與修改結果使用伺服器確認值。通用池的 `poolEnabled` 是已儲存的供應商設定，`null` 表示未指定，並不代表繼承後的實際狀態。`inert: true` 表示閾值未套用；能力未知時也不會回報 `enabled: true`。API 金鑰供應商、Anthropic 與無效值會被拒絕。
 
 ```text
-{ provider, autoSwitchThreshold: number, enabled: boolean }
+openai: { provider, autoSwitchThreshold: number, enabled: boolean }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
 ```
 
 ### `ocx account login|reauth|code|cancel ...`

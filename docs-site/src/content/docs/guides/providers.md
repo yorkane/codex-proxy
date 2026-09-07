@@ -24,6 +24,12 @@ Auth page can restore it: absent rows are created from the canonical preset, dis
 rows are re-enabled without replacing saved mode or model settings, and noncanonical `openai`
 rows are not offered that recovery path.
 
+Luna Reserve compatibility is a ChatGPT account capability on the canonical OpenAI forward path,
+not an OpenAI API-key entitlement. Its manual stored-main selector requires effective local authless
+Desktop mode and current credential-bound upstream permission; a catalog entry alone does not
+authorize a request. See [Luna Reserve alongside routed models](/reference/cli/providers-accounts/#luna-reserve-alongside-routed-models)
+for setup, restart order, authorization requirements, and unsupported helpers.
+
 ### Providers overview pool capacity
 
 For Codex login in Pool mode, the Providers overview shows a configured-weight estimate of the
@@ -118,6 +124,9 @@ ocx logout <provider>
 | `google-antigravity` | `google` | `https://daily-cloudcode-pa.googleapis.com` | Google OAuth over the Cloud Code Assist wire. Live discovery uses CCA's authenticated `v1internal:fetchAvailableModels` endpoint and publishes the agent models available to the signed-in account; the maintained catalog remains the fallback. |
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport with an opt-in HTTP/1.1 compatibility path, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
+
+Google Antigravity account and provider quota probes use fixed Google accounting endpoints, including the models fallback. They support transparent Fake-IP DNS for those destinations while retaining TLS verification, redirect rejection and private-address checks. A custom provider base URL changes model requests, not quota destinations; `NO_PROXY` continues to select the direct-route policy.
+
 
 After a terminal Nous refresh failure, run `ocx login nous` to reauthenticate.
 
@@ -358,6 +367,7 @@ free-experimentation model.
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` |
 | Z.AI (GLM Coding) | `https://api.z.ai/api/coding/paas/v4` |
 | Zhipu AI (BigModel) | `https://open.bigmodel.cn/api/paas/v4` |
+| BigModel Coding Plan (Responses, static roster) | `https://open.bigmodel.cn/api/v1` |
 | Qwen Cloud | Token plan (default): `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` · Pay as you go: `https://dashscope.aliyuncs.com/compatible-mode/v1` · or Custom |
 | Tencent Cloud Coding Plan | `https://api.lkeap.cloud.tencent.com/coding/v3` |
 | SiliconFlow | `https://api.siliconflow.cn/v1` |
@@ -458,16 +468,22 @@ material off it. Muse Spark is also reachable through resellers, with a narrower
 `command-code` carries both tiers, while `opencode-go` serves only
 `muse-spark-1.3-contributor`.
 
-**Meta Muse Code (`meta-muse`).** If you already use the Muse Code CLI, this imports the
-API key it stored after `muse login` instead of asking you to provision a second one.
-macOS only — the CLI keeps that key in the macOS Keychain, and no other platform's
-storage has been verified. OpenCodex never launches the CLI: if no credential is present
-it tells you to run `muse login` yourself.
+**Meta Muse Code (`meta-muse`).** On macOS, if you already use the Muse Code CLI, this
+imports the API key it stored after `muse login` instead of asking you to provision a
+second one. OpenCodex never launches the CLI: if no credential is present it tells you to
+run `muse login` yourself.
+
+Elsewhere it asks you to paste the key. Meta ships no native Windows CLI, and on Linux the
+CLI exists but where it stores its credential has not been verified, so OpenCodex refuses
+to guess at a credential store and points you at [dev.meta.ai](https://dev.meta.ai)
+instead, where the same key is visible. A pasted key faces the same format check and the
+same live validation against the Model API as an imported one. See
+[Platform support](/reference/platform-support/) for the full per-platform picture.
 
 **Read this before enabling it.** Meta scopes that credential to the Muse Code CLI, so
 using it here is an *unsupported* path. Meta does not authorize subscription coverage
 outside its own client, how these calls settle is not observable from the API, and you
-should treat every call as billable against your account. The imported key is copied into
+should treat every call as billable against your account. The key, imported or pasted, is copied into
 OpenCodex's auth store (`~/.opencodex/auth.json`, mode 0600) like every other OAuth
 credential. The dashboard shows a Terms-of-Service warning before the first login and
 before any reauthentication — the same treatment Anthropic and Google Antigravity get.
@@ -567,9 +583,43 @@ negative, or internally inconsistent billing totals produce no report rather tha
 > interactive coding tools only. General API automation, custom application backends, and
 > non-interactive batch use are prohibited and may cause the plan key to be suspended.
 
-> **Two GLM routes:** `zai` is the Z.AI international coding-plan subscription; `zhipu-bigmodel`
+> **GLM billing routes:** `zai` is the Z.AI international coding-plan subscription; `zhipu-bigmodel`
 > is Zhipu's domestic BigModel pay-as-you-go endpoint. Different hosts, different keys, different
 > billing — a key issued for one will not authenticate against the other.
+
+### BigModel Coding Plan over Responses
+
+Select **Zhipu AI — BigModel Coding Plan (Responses)** (`zhipu-bigmodel-responses`)
+for the `openai-responses` endpoint `https://open.bigmodel.cn/api/v1`. This is separate
+from `zhipu-bigmodel-coding`, which uses Chat Completions at `/api/coding/paas/v4`.
+
+The preset uses a **static roster** (`liveModels: false`) taken from the
+[official BigModel Codex example](https://docs.bigmodel.cn/cn/coding-plan/tool/codex.md):
+
+| Model | Context tokens | Upstream selectable effort | Default effort | Reasoning summaries |
+| --- | ---: | --- | --- | --- |
+| `glm-5.3` | 1,048,576 | `low`, `high`, `max` | `max` | Supported |
+| `glm-5-turbo` | 204,800 | None (empty list) | `max` | Supported |
+
+Both entries declare upstream text-only input. The Codex catalog advertises text and
+image because opencodex's existing vision sidecar can describe images for text-only
+models. Image handling requires an available, enabled vision sidecar; this does not
+declare native BigModel image support.
+
+The default model is `glm-5.3`; Responses reasoning content is preserved on replay.
+The existing Codex export adds its compatibility
+`ultra` tier to GLM-5.3 and omits Turbo's default-effort field because Turbo has no
+selectable ladder; the provider metadata still records `max` for both models.
+For Turbo, outgoing Responses requests omit `reasoning.effort`, including a caller's
+`max` or `ultra`, while preserving requested reasoning summaries. This leaves effort
+selection to the upstream default; opencodex does not inject a selectable or wire `max`.
+
+The example's `models.json` is a local catalog file, not a documented HTTP model-list
+response. This preset does not perform live model discovery. `glm-5.3-flash` is not
+seeded here because its exact Responses metadata is not verified. An existing custom
+provider with the same name keeps its configured destination and metadata.
+CLI key login also skips the undocumented `/models` probe and reports validation as
+unknown; successful key authentication is established by a subsequent inference request.
 
 ### Multiple API keys
 
@@ -608,6 +658,12 @@ A provider is included when opencodex has a matching wire adapter, **not** based
 (AI Studio, Vertex, and Antigravity/Cloud Code Assist modes), `azure` / `azure-openai`, `kiro`, and
 `cursor`. A proprietary API without one of these implementations, such as native Amazon Bedrock,
 is not supported directly.
+
+Provider configuration selects the adapter; upstream transport selection is separate. Eligible
+Responses traffic can use WSS with [explicit proxy routing](/reference/proxy-formats/#json-and-sse-output).
+Invalid or unsupported WebSocket proxy settings fall back to HTTP/SSE, which uses Bun's HTTP
+proxy rules rather than the WSS-specific `ALL_PROXY` fallback.
+
 **GitHub Copilot** is an OAuth provider (`ocx login github-copilot`) that exchanges a GitHub
 device-flow login for a short-lived Copilot API token — not a pasted API key. **GitLab Duo** remains
 a key/subscription-token gateway on its OpenAI-compatible endpoint. **Cloudflare AI

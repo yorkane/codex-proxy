@@ -8,6 +8,13 @@ import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } 
  */
 export type RefreshPolicy = "proactive" | "lazy-only" | "disabled";
 
+/** Request-owned identity of the configured key, before env/keychain resolution. */
+export interface ProviderApiKeySelection {
+  entryId?: string;
+  reference?: string;
+  revision?: string;
+}
+
 export interface OpenRouterProviderRouting {
   /** OpenRouter provider slugs to try first, in priority order. */
   order?: string[];
@@ -271,6 +278,12 @@ export interface OcxProviderConfig {
    */
   decodesNativeCompactionBlobs?: boolean;
   /**
+   * Trust this direct key-auth Responses provider to consume or relay opaque encrypted
+   * V2 agent tasks. OpenCodex does not decrypt, translate, or recover an eligible task.
+   * Absent or false keeps the existing recovery/fail-closed behavior.
+   */
+  allowEncryptedV2AgentTasks?: boolean;
+  /**
    * Explicit opt-in for non-registry private-network destinations such as localhost, RFC1918,
    * link-local, or unique-local upstreams. Metadata endpoints remain blocked.
    */
@@ -323,6 +336,10 @@ export interface OcxProviderConfig {
    * `apiKey` seeds a one-entry pool on first management touch.
    */
   apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  /** Changes on manual selection (including re-selection) and committed automatic allocation. */
+  apiKeySelectionRevision?: string;
+  /** Runtime only. Never expose in management responses or persist a routed provider. */
+  _apiKeyAttempt?: ProviderApiKeySelection;
   defaultModel?: string;
   models?: string[];
   /**
@@ -339,6 +356,13 @@ export interface OcxProviderConfig {
    * full set so the user can pick). See devlog issue_052_provider-model-allowlist.
    */
   selectedModels?: string[];
+  /** Registration-owned state. Absent means legacy or OAuth-exempt, not uninitialized. */
+  initialModelSelection?: {
+    version: 1;
+    registrationId: string;
+    status: "pending" | "ready" | "all-off";
+    modelCount?: number;
+  };
   /**
    * Per-provider retention allowlist for authoritative live discovery. When non-empty, any
    * model id in this list is preserved in the routed catalog even if the live `/models`
@@ -424,11 +448,13 @@ export interface OcxProviderConfig {
    */
   authMode?: "key" | "forward" | "oauth" | "local";
   /**
-   * Per-provider override for generic OAuth multi-account 429 failover (#2568).
+   * Per-provider override for the generic OAuth PROACTIVE account preference (#2568, #695).
    *
-   * Rotation is presence-driven by default — 2+ logged-in accounts activate it — so this exists
-   * for the operator who accepts rotation on one provider and refuses it on another. An explicit
-   * boolean here beats the global `oauthAccountFailover` and beats presence.
+   * Reactive 429 rotation is presence-driven and cannot be refused here — 2+ logged-in accounts
+   * activate it, and a 429 with an idle second account is a defect rather than a preference.
+   * Proactive exhaustion avoidance requires explicit `true`; a healthy selected account
+   * retains priority. This overrides global `oauthAccountFailover` in either direction.
+   * Reactive 429 rotation remains available even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
     enabled?: boolean;
@@ -506,6 +532,8 @@ export interface OcxProviderConfig {
    * from the web-search sidecar's `search.xSearch` options and never widens caller tool selectors.
    */
   xaiResponsesXSearch?: boolean;
+  /** One-time Grok subscription wire upgrade; later explicit Chat choices remain authoritative. */
+  xaiResponsesDefaultVersion?: number;
   /**
    * Whether the Responses upstream accepts native custom tools and custom_tool_call items.
    * Set false only for a provider whose native contract rejects them; absence preserves
@@ -518,9 +546,21 @@ export interface OcxProviderConfig {
    * SSE/JSON; raw inspection state remains authoritative.
    */
   responsesSnapshotRepair?: boolean;
-  /** Provider-wide mapping from Codex effort labels to upstream `reasoning_effort` values. */
+  /**
+   * Provider-wide mapping from Codex effort labels to upstream `reasoning_effort` values.
+   * Map a label to the reserved value `"__omit__"` to send no reasoning field at all for that
+   * effort, so the upstream model's own default applies. The sentinel is
+   * `REASONING_EFFORT_OMIT_SENTINEL` in `src/reasoning-effort.ts`; it suppresses
+   * `reasoning_effort` on an OpenAI-compatible wire and Ollama's native `think` field on the
+   * Ollama native adapter (#2356).
+   */
   reasoningEffortMap?: Record<string, string>;
-  /** Model-specific mapping from Codex effort labels to upstream `reasoning_effort` values. */
+  /**
+   * Model-specific mapping from Codex effort labels to upstream `reasoning_effort` values.
+   * Map a label to the reserved value `"__omit__"` to send no reasoning field at all for that
+   * effort, so the upstream model's own default applies. Same sentinel as
+   * `reasoningEffortMap`, resolved per model first.
+   */
   modelReasoningEffortMap?: Record<string, Record<string, string>>;
   /** OpenAI-compatible gateway reasoning wire shape. Default sends `reasoning_effort`. */
   reasoningWireFormat?: "gateway-object";
@@ -696,7 +736,7 @@ export interface OcxProviderConfig {
    * headless and cannot control a screen itself; provide commands here only when running on a host
    * that can. With no executor, these tools honestly report "not supported".
    */
-  desktopExecutor?: import("../adapters/cursor/native-exec-desktop").DesktopExecutorConfig;
+  desktopExecutor?: import("../adapters/cursor/desktop-executor-contract").DesktopExecutorConfig;
   /**
    * Cursor adapter only: unsafe opt-in escape hatch for Cursor server-driven built-in local
    * read/write/delete/ls/grep/shell/fetch execution. Prefer `nativeLocalExec: "on"` for new

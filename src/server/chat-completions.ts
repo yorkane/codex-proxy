@@ -22,7 +22,7 @@ import { classifyError, cyberPolicyErrorType, CYBER_POLICY_ERROR_CODE, isCyberPo
 import { redactSecretString } from "../lib/redact";
 import { resolveClientRetryAfter } from "../lib/retry-after";
 import { estimateTokens } from "../lib/token-estimate";
-import { NoEligiblePolicyCandidateError, routeModel } from "../router";
+import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel } from "../router";
 import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import type { OcxConfig } from "../types";
@@ -46,7 +46,11 @@ import {
   type TranslatorBudget,
 } from "../lib/translator-budget";
 import { handleNativeChatCompletions, isNativeChatRouteEligible } from "./chat-native";
+import { jsonCompletionSse } from "./chat-native-sse";
 import { parseRequestEffortRowId } from "./effort-row";
+import { parseSyntheticRowId } from "./fast-row";
+import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
+import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported } from "../codex/loopback-target";
 
 type Rec = Record<string, unknown>;
 
@@ -76,6 +80,14 @@ export async function handleChatCompletions(
     );
   } catch (error) {
     translatorBudget.dispose();
+    if (isTranslatorBudgetExceededError(error)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 502, { closeReason: "non_stream" });
+      return chatCompletionsErrorResponse(502, "upstream translation buffer exceeded the safe limit", "upstream_error", "translation_buffer_limit");
+    }
+    if (isChatCompletionsStreamError(error)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, error.status, { closeReason: "non_stream" });
+      return chatCompletionsErrorResponse(error.status, error.message, error.type, error.code);
+    }
     throw error;
   }
 }
@@ -105,8 +117,15 @@ async function handleChatCompletionsWithBudget(
   }
 
   const requestedModel = chatBody.model as string;
-  const effortRow = parseRequestEffortRowId(requestedModel, config);
+  const { fastRow, effortRow } = parseSyntheticRowId(requestedModel, config);
   if (effortRow) chatBody.model = effortRow.baseId;
+  if (fastRow) {
+    chatBody.model = fastRow.baseId;
+    // A caller intent; decideTier rules on it downstream. Unlike an effort row this does NOT
+    // block the native-chat shortcut below: native chat carries service_tier itself and runs
+    // the same policy, so blocking it would degrade the request for no reason.
+    chatBody.service_tier = "priority";
+  }
   const stream = chatBody.stream === true;
   // Best-effort Grok attribution: the managed fence stamps this header on every model
   // it registers (extra_headers, sent verbatim by upstream Grok). Dashboard usage
@@ -138,6 +157,11 @@ async function handleChatCompletionsWithBudget(
     }
     if (!effortRow && isNativeChatRouteEligible(route, chatBody)) chatNativeRoute = route;
   } catch (err) {
+    if (err instanceof UnknownRoutingPolicyError) {
+      logCtx.requestedModel = requestedModel;
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
+      return chatCompletionsErrorResponse(404, err.message, "invalid_request_error");
+    }
     if (err instanceof NoEligiblePolicyCandidateError) {
       logCtx.routeDecision = err.trace;
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
@@ -205,6 +229,13 @@ async function handleChatCompletionsWithBudget(
     else internalBody.reasoning = next;
   }
 
+  const visionDescribeTerminal = req.headers.get("x-opencodex-vision-describe") === "1";
+  // Concrete helper targets must fail before optional stored-main credential enrichment.
+  // Unresolved combos are checked after their concrete child route is selected in Responses.
+  if (settledRoute && !settledRoute.combo && isCanonicalOpenAiForwardProvider(settledRoute.provider)
+    && isCodexReserveHelperUnsupported(config, settledRoute.modelId, logIds?.admission, visionDescribeTerminal)) {
+    return chatCompletionsErrorResponse(400, CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, "invalid_request_error");
+  }
   const headers = new Headers({ "content-type": "application/json" });
   for (const name of FORWARD_HEADERS) {
     if (name === "authorization" && !directRoute) continue;
@@ -255,7 +286,7 @@ async function handleChatCompletionsWithBudget(
   });
 
   let nativeLogged = false;
-  const finalizeNativeLog = (status: number, meta: { terminalStatus?: RequestLogEntry["terminalStatus"]; closeReason: "terminal" | "client_cancel" }) => {
+  const finalizeNativeLog = (status: number, meta: { terminalStatus?: RequestLogEntry["terminalStatus"]; closeReason: "terminal" | "client_cancel" | "non_stream" }) => {
     if (!logIds || nativeLogged) return;
     nativeLogged = true;
     addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, meta);
@@ -271,7 +302,7 @@ async function handleChatCompletionsWithBudget(
     // Terminal vision-describe marker (roadmap 180): the bridge rebuilds
     // headers from the FORWARD_HEADERS allowlist, which would drop the raw
     // header — so the fact is detected here and carried as an option flag.
-    ...(req.headers.get("x-opencodex-vision-describe") === "1" ? { visionDescribeTerminal: true } : {}),
+    ...(visionDescribeTerminal ? { visionDescribeTerminal: true } : {}),
     translatorBudget,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
@@ -356,11 +387,14 @@ async function handleChatCompletionsWithBudget(
       : rewritten;
   }
 
-  const response = logIds
+  const contentType = upstream.headers.get("content-type") ?? "";
+  // JSON is not complete for the client until its Chat projection succeeds.
+  // Logging the upstream JSON body here would persist 200 before a later
+  // conversion/serialization error, double-counting both the request and usage.
+  const response = logIds && contentType.includes("text/event-stream")
     ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx)
     : upstream;
 
-  const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream") && response.body) {
     const chatSse = responsesSseToChatCompletionsSse(response.body, requestedModel, { translatorBudget });
     if (stream) {
@@ -394,11 +428,15 @@ async function handleChatCompletionsWithBudget(
   }
 
   // Defensive: JSON despite stream:true.
+  const finishJson = (result: Response): Response => {
+    finalizeNativeLog(result.status, { closeReason: "non_stream" });
+    return result;
+  };
   let json: unknown;
   try {
     json = await response.json();
   } catch {
-    return chatCompletionsErrorResponse(502, "internal replay returned a non-JSON response", "server_error");
+    return finishJson(chatCompletionsErrorResponse(502, "internal replay returned a non-JSON response", "server_error"));
   }
   const status = (json as Rec)?.status;
   if (status === "failed") {
@@ -416,44 +454,24 @@ async function handleChatCompletionsWithBudget(
       classified.code = "model_not_found";
       classified.type = "invalid_request_error";
     }
-    return chatCompletionsErrorResponse(
+    return finishJson(chatCompletionsErrorResponse(
       classified.code === "translation_buffer_limit"
         ? 502
         : isCyberPolicyCode(classified.code) ? 400 : 502,
       message,
       classified.type,
       classified.code,
-    );
+    ));
   }
-  const completion = responsesJsonToChatCompletion(json, requestedModel);
-  if (!stream) {
-    return new Response(JSON.stringify(completion), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  // Streaming client + JSON upstream: synthesize a minimal Chat Completions stream.
-  const encoder = new TextEncoder();
-  const id = typeof completion.id === "string" ? completion.id : `chatcmpl-${Date.now()}`;
-  const created = typeof completion.created === "number" ? completion.created : Math.floor(Date.now() / 1000);
-  const message = isRec((completion.choices as Rec[] | undefined)?.[0])
-    ? ((completion.choices as Rec[])[0] as Rec).message as Rec | undefined
-    : undefined;
-  const content = message && typeof message.content === "string" ? message.content : "";
-  const frames = [
-    `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: requestedModel, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`,
-    ...(content
-      ? [`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: requestedModel, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`]
-      : []),
-    `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: requestedModel, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: completion.usage })}\n\n`,
-    "data: [DONE]\n\n",
-  ];
-  return new Response(encoder.encode(frames.join("")), {
+  const completion = responsesJsonToChatCompletion(json, requestedModel, translatorBudget);
+  const body = stream
+    ? jsonCompletionSse(completion, requestedModel, translatorBudget)
+    : JSON.stringify(completion);
+  if (!stream) translatorBudget.chargeRetained(Buffer.byteLength(body) * 2, { kind: "live_transient" });
+  return finishJson(new Response(body, {
     status: 200,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache",
-    },
-  });
+    headers: stream
+      ? { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive" }
+      : { "Content-Type": "application/json" },
+  }));
 }

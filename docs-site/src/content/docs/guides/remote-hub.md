@@ -160,85 +160,119 @@ Never put the OAuth code in shell argv, logs, issue text, screenshots, or deploy
 manual-code route keeps its existing unknown-provider, no-active-flow, invalid-code, and 4096-byte
 input checks.
 
-## Operator-owned Docker recipe
+## Docker Compose
 
-opencodex does not publish or maintain an official container image. The following recipe is an
-operator-owned starting point. Before building, resolve `oven/bun:1.4.0` to a registry digest and
-replace both `REPLACE_WITH_BUN_1_4_0_DIGEST` values. A tag alone is not a production pin.
+opencodex does not publish an official container image. The repository does maintain a source-build
+[`Dockerfile`](https://github.com/lidge-jun/opencodex/blob/main/Dockerfile),
+[`compose.yaml`](https://github.com/lidge-jun/opencodex/blob/main/compose.yaml), and a narrow
+`.dockerignore`. The build pins the multi-platform Bun 1.4.0 image index by digest, runs the proxy as
+the non-root `bun` user, keeps the root filesystem read-only, drops Linux capabilities, and publishes
+only the data listener on the host's `127.0.0.1:10100` by default. The foreground process uses
+`OCX_SERVICE=1`, so stopping or recreating the container preserves routed Codex state instead
+of restoring a native desktop configuration. Docker supplies supervision; no OS service manager
+is installed in the image. Use Compose to restart/recreate the container; this does not extend
+support to every dashboard restart path.
 
-```dockerfile
-# syntax=docker/dockerfile:1
-FROM oven/bun:1.4.0@sha256:REPLACE_WITH_BUN_1_4_0_DIGEST AS build
-WORKDIR /home/bun/app
-COPY --chown=bun:bun package.json bun.lock ./
-RUN bun install --frozen-lockfile
-COPY --chown=bun:bun src ./src
-COPY --chown=bun:bun gui ./gui
-COPY --chown=bun:bun tsconfig.json ./
-RUN cd gui && bun install --frozen-lockfile && bun run build
+The image seeds a first-run `hub` configuration that binds the container listener to `0.0.0.0`.
+Before the first normal start, stream a freshly generated data-plane token into the bootstrap helper.
+The helper accepts at most one 4096-byte line, never prints the token, refuses to replace an existing
+token, and persists it as the canonical owner-only `service-api-token` in the `ocx-state` volume.
 
-FROM oven/bun:1.4.0@sha256:REPLACE_WITH_BUN_1_4_0_DIGEST AS runtime
-WORKDIR /home/bun/app
-ENV OPENCODEX_HOME=/home/bun/.opencodex
-ENV OCX_API_TOKEN_FILE=/run/secrets/ocx_api_token
-COPY --from=build --chown=bun:bun /home/bun/app/package.json ./package.json
-COPY --from=build --chown=bun:bun /home/bun/app/bun.lock ./bun.lock
-COPY --from=build --chown=bun:bun /home/bun/app/node_modules ./node_modules
-COPY --from=build --chown=bun:bun /home/bun/app/src ./src
-COPY --from=build --chown=bun:bun /home/bun/app/gui/dist ./gui/dist
-USER bun
-VOLUME ["/home/bun/.opencodex"]
-EXPOSE 10100
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD ["bun", "-e", "const r=await fetch('http://127.0.0.1:10100/healthz');if(!r.ok)process.exit(1)"]
-CMD ["bun", "run", "src/cli/index.ts", "start", "--port", "10100"]
+The deployment persists two separate homes: `ocx-state` at `/home/bun/.opencodex` for
+OpenCodex configuration, provider credentials and usage, and `codex-state` at
+`/home/bun/.codex` for Codex state and `opencodex-catalog.json`. The image and Compose
+explicitly set `CODEX_HOME=/home/bun/.codex`, so this catalog path remains writable
+with `read_only: true` and survives container recreation. The image creates both
+directories for the non-root `bun` user with mode `0700`; existing volume
+ownership and permissions are not migrated automatically.
+
+Do not combine `CODEX_HOME` and `OPENCODEX_HOME`: both products use an `auth.json`
+filename with different formats. This packaging change adds persistence, not a
+catalog generator. Materialize or import a valid catalog into
+`/home/bun/.codex/opencodex-catalog.json` before the catalog acceptance check below;
+without one, `catalog_not_found` remains the expected response.
+
+Upgrading preserves the existing `ocx-state` volume and adds `codex-state`; no files
+are migrated automatically. If a previous workaround placed a catalog directly
+under `/home/bun/.opencodex`, back it up and deliberately copy only the catalog to
+the new Codex home, preserving owner-only access. Do not copy either product's
+`auth.json` over the other. Deployments with a custom `CODEX_HOME` should retain
+their explicit environment and writable volume mapping until migration is complete.
+When overriding `CODEX_HOME`, mount that exact directory writable and persist the
+default catalog at `${CODEX_HOME}/opencodex-catalog.json`. If `model_catalog_json`
+explicitly selects another file, that resolved path must also be persisted.
+
+Keep the Compose project name stable during upgrades so the same named volumes are reused.
+Mounts with existing foreign ownership, read-only mounts, and mounts using `volume-nocopy`
+are not repaired by the image's directory setup. Persist separately selected catalog or SQLite
+paths separately; an OS credential store is not backed up by these two volumes.
+
+When running without Compose, explicitly supply both named mounts. Dockerfile `VOLUME`
+declarations alone create anonymous volumes that a later `docker run` does not automatically
+reuse. These mount options use standalone example names; to reuse Compose data, substitute
+its actual project-prefixed volume names:
+
+```sh
+--mount type=volume,src=ocx-state,dst=/home/bun/.opencodex \
+--mount type=volume,src=codex-state,dst=/home/bun/.codex
 ```
 
-An example Compose definition keeps mutable state and the token outside the image:
-
-```yaml
-services:
-  hub:
-    build: .
-    read_only: true
-    ports:
-      - "10100:10100"
-    volumes:
-      - ocx-state:/home/bun/.opencodex
-    tmpfs:
-      - /tmp
-    secrets:
-      - source: ocx_api_token
-        target: ocx_api_token
-        uid: "1000"
-        gid: "1000"
-        mode: 0440
-    restart: unless-stopped
-
-volumes:
-  ocx-state:
-
-secrets:
-  ocx_api_token:
-    file: ./secrets/ocx_api_token
-```
-
-Initialize the named volume before the first normal start. Container port publishing requires the
-data listener to bind `0.0.0.0`; the management listener remains fixed to container loopback:
+Install Git and Bun on the host first. Before **every** image build, run the existing canonical
+generator from this Git checkout. It hashes Git-tracked working-tree sources (stage any newly
+added source files first), not an arbitrary directory scan. Do not change source files between
+generation and build. Only its untracked `src/generated/compatibility-version.json` artifact
+enters the image; `.git` remains outside the Docker context. Do not commit or hand-edit the
+manifest. The build rejects stale manifests: it verifies every recorded SHA-256 against the
+read-only build context and again against the copied runtime files. It requires `package.json`,
+`bun.lock`, and `scripts/model-metadata.source.json`; only that exact scripts artifact is
+included, not the rest of `scripts/`. Missing or mismatched files, extra source files absent
+from the manifest, and symlinks (including parent directories) fail the build. The only source
+file exempt from the inventory is the generated manifest itself. If validation fails, reconcile
+the tracked sources, remove unintended source files, and rerun the canonical generator.
 
 ```bash
-docker compose run --rm hub bun run src/cli/index.ts config set runtimeRole hub
-docker compose run --rm hub bun run src/cli/index.ts config set hostname 0.0.0.0
-docker compose run --rm hub bun run src/cli/index.ts config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
-docker compose run --rm hub bun run src/cli/index.ts config set hub.managementIngress '{"enabled":true,"port":10101}'
-docker compose run --rm hub bun run src/cli/index.ts config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+git clone https://github.com/lidge-jun/opencodex.git
+cd opencodex
+bun scripts/generate-compatibility-version.ts
+docker compose build
+openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
 ```
 
-Do not put a token in `ARG`, `ENV`, `COPY`, Compose YAML, image history, or the command line. Do not
-mount the Docker socket, host home, Codex home, SSH agent, or provider-key files. Publish only port
-`10100`. A management ingress bound to `127.0.0.1:10101` inside the container is reachable only by a
-TLS/tailnet frontend in the same network namespace; never publish `10101` as a shortcut.
+Set an alternate host port without changing the container's fixed `10100` listener:
+
+```bash
+OPENCODEX_PORT=10190 docker compose up -d
+```
+
+Remote access is an explicit opt-in. Set `OPENCODEX_BIND_ADDRESS` to the host's LAN or Tailscale
+IP, or use `0.0.0.0` to publish on **all** host interfaces:
+
+```bash
+OPENCODEX_BIND_ADDRESS=0.0.0.0 docker compose up -d
+```
+
+Use a firewall and an authenticated TLS/tailnet frontend before exposing the port. The bind
+override changes only the host publication; the container listener remains `0.0.0.0:10100`.
+Keep the same bind override on subsequent Compose invocations that recreate the hub. To update
+an existing deployment, regenerate the manifest, run `docker compose build`, and recreate the
+hub with `docker compose up -d`; do not repeat the one-time token initialization.
+
+Configure providers with the dashboard through an operator-owned management frontend, or with
+one-shot CLI commands that share the state volume. The commands below show the existing Remote Hub
+settings; replace the example origin and identity before enabling them:
+
+```bash
+docker compose run --rm hub bun run src/cli/index.ts config set hub.managementPublicOrigin '"https://hub-name.tailnet-name.ts.net"'
+docker compose run --rm hub bun run src/cli/index.ts config set hub.managementIngress '{"enabled":true,"port":10101}'
+docker compose run --rm hub bun run src/cli/index.ts config set remoteGui.allowedTailscaleUsers '["operator@example.com"]'
+docker compose restart hub
+```
+
+Do not put a token in `ARG`, `ENV`, `COPY`, Compose YAML, image history, or command arguments. Do not
+mount the Docker socket, the host's home or Codex home, SSH agent, or provider-key files. A management
+ingress bound to `127.0.0.1:10101` inside the container is reachable only by a TLS/tailnet frontend
+in the same network namespace; never publish `10101` as a shortcut.
 
 After the container is healthy, run a separate readiness promotion check:
 
@@ -247,11 +281,21 @@ docker compose exec hub bun -e \
   "const r=await fetch('http://127.0.0.1:10100/readyz');console.log(r.status,await r.text());if(!r.ok)process.exit(1)"
 
 docker compose exec hub bun -e \
-  "const t=(await Bun.file('/run/secrets/ocx_api_token').text()).trim();const r=await fetch('http://127.0.0.1:10100/v1/catalog',{headers:{'x-opencodex-api-key':t}});console.log(r.status);if(!r.ok)process.exit(1)"
+  "const t=(await Bun.file('/home/bun/.opencodex/service-api-token').text()).trim();const r=await fetch('http://127.0.0.1:10100/v1/catalog',{headers:{'x-opencodex-api-key':t}});console.log(r.status);if(!r.ok)process.exit(1)"
 ```
 
 Then send one real authenticated routed response with a configured model. If the secret is absent or
 unreadable, a non-loopback hub must not be accepted as ready. Never treat liveness alone as proof.
+
+`docker compose down` removes the container and network but retains both named volumes. Treat
+`docker compose down --volumes` as destructive: it deletes configuration, OAuth credentials, usage
+history, the data-plane token, and persisted Codex state together.
+
+Cross-platform CI builds the source image and checks startup, data-plane token admission, and
+container recreation using an isolated Compose project with throwaway credentials. It verifies that
+both named volumes and a synthetic catalog survive replacement. This check does not validate a
+real provider account, OAuth callback, custom mount migration, or every CPU architecture; perform
+the authenticated routed-response check above for your deployment.
 
 ## Rollback
 
@@ -265,7 +309,9 @@ ocx config set hub.managementIngress '{"enabled":false}'
 ocx service repair
 ```
 
-For a container rollback, remove or replace the container while retaining the named state volume.
+For a container rollback, retain both named state volumes and their mappings. An older image
+can still use `CODEX_HOME=/home/bun/.codex` when that directory remains mounted; do not revert
+to an older Compose file that drops the Codex mount. Do not merge the homes or rerun token bootstrap.
 For a service rollback, stop the branch service and repair the prior release against the same
 `OPENCODEX_HOME`. Disabling management ingress or Serve does not require changing the data listener.
 

@@ -19,7 +19,7 @@ runs helper features around provider requests.
 | `oauthOpenBrowser?` | `boolean` | `true` | Whether a login may open a browser on the machine running the proxy. Absent and `true` both open, so an existing install is unchanged; only an explicit `false` declines. Decline when you need the authorization link in a different browser profile, or when the dashboard is not on the proxy's machine — the login still starts and the URL is still returned and displayed. `POST /api/oauth/login` and `POST /api/codex-auth/login` accept a per-request `openBrowser` boolean that overrides this, and the dashboard exposes the same choice beside the login button. Device-code flows never open a browser either way. |
 | `connectTimeoutMs?` | `number` | `200000` | Per-attempt DNS/TCP/TLS/final-header deadline; it ends before body generation. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
-| `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. |
+| `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. Complete-input requests may reuse an upstream connection within the same selected credential, account, thread and turn; changed handshake policy or missing identity keeps requests on separate connections. This does not trim HTTP input or create previous-response IDs. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
 | `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Dashboard-managed. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
@@ -49,6 +49,56 @@ If an older development build changed resume-history metadata before backup supp
 `ocx recover-history --legacy-openai --yes` to force native-provider recovery.
 It force-relabels every user-message `opencodex` row, including legitimate dedicated-provider
 history; review the full-scope warning in the lifecycle reference before running it.
+
+## Codex quota network diagnostics
+
+The main Codex account row may include `quotaRefresh` when a quota fetch was
+attempted. This describes that fetch, not remaining quota, model access or
+permission to retry. Cached reads and rows without a fetch may omit it; absence
+does not mean success. A `null` quota value means unavailable, not zero quota.
+
+To request fresh data and display only the diagnostic in PowerShell:
+
+```powershell
+$quotaReport = ocx account list openai --quota --refresh --json | ConvertFrom-Json
+$quotaReport.accounts |
+    ForEach-Object { if ($_.quotaRefresh) { $_.quotaRefresh } } |
+    ConvertTo-Json -Depth 3
+```
+
+If no diagnostic is present, this projection produces no diagnostic object. Share
+only these fields when comparing network modes, rather than the full account list.
+
+| `quotaRefresh.status` | Meaning |
+| --- | --- |
+| `ok` | The fetch completed and a quota object was parsed. |
+| `not_reported` | The response contained no usable quota object. |
+| `http_error` | The upstream returned an HTTP failure; `httpStatus` contains its status code. |
+| `timeout` | The quota fetch timed out. |
+| `network_error` | The request failed before a classified HTTP response. |
+| `invalid_response` | The response was not a usable quota document. |
+| `internal_error` | An internal refresh step failed. |
+
+Only `http_error` includes `httpStatus`. Other statuses do not imply HTTP 0 or an
+account entitlement problem.
+
+### Which proxy path is used?
+
+The running proxy service fetches quota. It uses its own environment, not the
+interactive shell that later runs `ocx account list`. Configure the service's
+proxy setting or environment, then restart it; changing variables in another
+terminal does not update an already running service.
+
+An unset `proxy` leaves inherited proxy variables unchanged. An explicit HTTP(S)
+proxy URL fills `HTTP_PROXY` and `HTTPS_PROXY` only where they are unset.
+`"proxy": "auto"` reads the Windows static WinINET proxy once at startup; existing
+proxy environment variables take precedence. Auto discovery does not resolve
+PAC/WPAD, SOCKS-only settings or live proxy changes. Use a supported static HTTP
+proxy setting or an explicit HTTP(S) proxy URL when needed.
+
+Compare the diagnostic on the same machine and account under the two network
+modes. A successful TUN test alone does not identify why the service's HTTP proxy
+path failed, and does not establish a general fix.
 
 ## Remote access
 
@@ -171,6 +221,94 @@ either `target.reduceToBytes` or `target.removeOldestPercent`. `mode` defaults t
 Configure it on the Storage page or with `GET`/`PUT /api/storage/cleanup-policy`; trigger a manual run
 with `POST /api/storage/cleanup-policy/run`.
 
+## Quota-reset notifications (`quotaResetNotify`)
+
+Off by default. When the section is absent, no detection runs, no timer starts, and no state
+file is written.
+
+Enable it to be told when a usage window resets — both the scheduled rollover you can predict
+and an out-of-band reset you cannot:
+
+```json
+{
+  "quotaResetNotify": {
+    "enabled": true,
+    "webhookUrl": "https://hooks.slack.com/services/...",
+    "kinds": ["scheduled", "surprise"],
+    "pollSeconds": 900
+  }
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Master switch. Also requires at least one sink, below. |
+| `kinds` | both | `scheduled` (the deadline passed) or `surprise` (quota returned early). |
+| `pollSeconds` | `900` | Idle poll interval; floor 600. `0` observes live traffic only. |
+| `webhookUrl` | — | `https` POST target for the event JSON. Treated as a secret. |
+| `allowPrivateNetwork` | `false` | Permit a loopback or private-network webhook target. |
+| `timeoutMs` | `5000` | Webhook timeout. |
+| `command` | — | Argv array run with the event JSON on stdin. |
+
+`enabled: true` with neither `webhookUrl` nor `command` resolves to off: an enabled subsystem
+with nowhere to deliver is a misconfiguration, not a half-on state.
+
+The floor is 600 seconds because a faster poll cannot see anything new: observation is bounded
+by the 10-minute per-account cache, so a shorter interval only adds load to a quota endpoint
+that rate-limits. A configured value is adopted on the next tick without a restart.
+
+Set `pollSeconds` to `0` only if you accept that a reset happening while the proxy is idle is
+noticed on the next request rather than when it happens. The poll exists because the overnight
+case is the one worth knowing about.
+
+### The delivered event
+
+```json
+{
+  "type": "quota_reset",
+  "kind": "surprise",
+  "scope": "codex",
+  "accountTag": "k3f9x2ab",
+  "window": "weekly",
+  "percentBefore": 96,
+  "percentAfter": 4,
+  "previousResetAt": 1772000000000,
+  "resetAt": 1772400000000,
+  "detectedAt": 1771900000000
+}
+```
+
+`accountTag` is a per-install salted hash, not an account identifier: it distinguishes your
+accounts from each other without telling the receiver who they are. No email, token, path, or
+URL is ever included.
+
+`detectedAt` is when the proxy NOTICED, not when the reset happened. Observation is bounded by
+the 5-minute provider cache and the 10-minute per-account cache, so the reset instant can only
+be bracketed between two observations.
+
+### Security notes
+
+`webhookUrl` is a credential — for Slack and Discord, holding the URL is sufficient to post —
+so it is redacted by `ocx config show` and excluded from `ocx config export`.
+
+A webhook target that resolves to a private or loopback address is refused unless you set
+`allowPrivateNetwork: true`. The proxy can reach hosts your browser cannot, including cloud
+metadata endpoints, so the default assumes an external receiver.
+
+`webhookUrl` must use `https`. The payload and the URL itself are both sensitive, and an
+`http` target would put them in cleartext; an `http` value is rejected when the config is
+written rather than downgraded silently.
+
+A redirect is refused rather than followed. The destination check above validates the URL you
+configured, so following a `3xx` would deliver the payload somewhere unvalidated — a public
+endpoint could bounce the POST to loopback or a metadata address. Configure the final URL
+directly; a redirected delivery reports `blocked-destination`.
+
+`command` is an argv array and is never passed through a shell, so its values cannot become a
+shell-injection surface. Delivery is attempted once; there is no retry.
+
+Read recent detections with `ocx provider resets` or `GET /api/quota-resets`.
+
 ## Claude Code (`claudeCode`)
 
 These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx claude` launcher, and the Claude dashboard page.
@@ -179,11 +317,31 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | --- | --- | --- | --- |
 | `claudeCode.bodyStallSec?` | `number` | `90` | Native-passthrough body inactivity budget in seconds while a read is pending, not total duration. Minimum 1; exactly `0` disables. |
 | `claudeCode.bodyMaxBytes?` | `number` | `67108864` | Cumulative native-passthrough body cap for streamed and buffered responses. Exactly `0` disables. |
+| `claudeCode.compatibility?` | `"shadow" \| "enforce"` | unset | Optional compatibility admission for translated `/v1/messages` requests. `shadow` records unsupported features and continues; `enforce` returns an Anthropic-shaped 400 before inference. Native Anthropic passthrough remains unchanged. |
 | `claudeCode.authMode?` | `"proxy" \| "subscription"` | auto | How launch handles `ANTHROPIC_AUTH_TOKEN`. Auto detects auth each launch; an explicit value is never overridden. |
 | `claudeCode.authModeMigratedAt?` | `string` | unset | Internal one-time upgrade marker. Do not set manually. |
 | `claudeCode.classifierModel?` | `string` | unset | Explicit target for Claude Code Auto Mode classifier turns, as a qualified `provider/model` (for example `RelayA/claude-opus-5`). Auto Mode sends bare safety checks such as `claude-opus-5` with no provider, so without this they fall through to `defaultProvider` — which may not speak Anthropic at all. Nothing is inferred automatically: only a target you declare here is used. |
 | `claudeCode.classifierFallbacks?` | `string[]` | unset | Ordered classifier targets used when `classifierModel` is not set. Same qualified `provider/model` form; the first usable entry wins. An explicit `modelMap` entry for the classifier model still outranks both. |
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
+
+The compatibility policy applies to Claude Code, Desktop and other clients using translated
+Messages, including `?beta=true` and non-streaming requests. Every translated target uses the
+same conservative policy, including Anthropic and native Responses adapters. It rejects
+document content, thinking/redacted-thinking replay, hosted search and execution tools,
+tool-search references, active deferred loading, strict tools, non-default caller modes,
+structured-output formats, explicit service-tier intent, MCP connector features, context
+management, containers, inference placement and unsupported protocol fields or blocks.
+
+Unset preserves legacy translation. Cache hints, tool input examples and ordinary
+thinking/effort settings are deliberately admitted with possible degradation: this setting
+does not guarantee cache breakpoints or TTL, retained examples, exact thinking budgets or
+lossless translation. Beta headers alone are not validated for feature support. Shadow
+evidence contains only fixed protocol codes and derived reasons, retained in request logs
+and `usage.jsonl` and restored on restart. An invalid non-unset mode returns a fixed 503
+configuration error on translated Messages. Configure the value in `config.json` and
+restart the proxy to load it; there is no dedicated GUI setter. Count-tokens and direct
+Responses/Chat APIs are outside this policy; successful token counting does not imply
+Messages admission. This setting does not add a global authorization boundary.
 
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
