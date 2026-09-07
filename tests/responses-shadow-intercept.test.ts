@@ -8,7 +8,7 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, isShadowSourceModel } from "../src/server/responses";
-import { DEFAULT_PHANTOM_TOOL_ALLOWLIST, shadowCallReplacementFor, shadowPhantomToolNames, shouldInterceptShadowCall } from "../src/lib/shadow-call";
+import { DEFAULT_PHANTOM_TOOL_ALLOWLIST, shadowCallReplacementFor, shadowPhantomToolNames, shadowSourceModelPrefix, shouldInterceptShadowCall } from "../src/lib/shadow-call";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
@@ -42,9 +42,22 @@ describe("isShadowSourceModel", () => {
     expect(isShadowSourceModel("gpt-5.4")).toBe(false);
   });
 
-  test("hard-excludes slash-prefixed routed ids, even for configured overrides", () => {
+  test("slash request ids only match explicit slash source entries", () => {
+    // An explicit routed selection must never be hijacked by a bare entry.
     expect(isShadowSourceModel("openai/gpt-5.6-luna")).toBe(false);
-    expect(isShadowSourceModel("openai/gpt-5.6-luna", ["openai/gpt-5.6-luna"])).toBe(false);
+    expect(isShadowSourceModel("openai/gpt-5.6-luna", ["gpt-5.6-luna"])).toBe(false);
+    // An operator-configured slash entry is an explicit opt-in and is honored.
+    expect(isShadowSourceModel("openai/gpt-5.4", ["openai/gpt-5.4"])).toBe(true);
+    expect(isShadowSourceModel("gpt-5.4", ["openai/gpt-5.4"])).toBe(false);
+  });
+
+  test("longest configured prefix wins over array order", () => {
+    const configured = ["gpt-5.4", "gpt-5.4-mini"];
+    expect(isShadowSourceModel("gpt-5.4-mini", configured)).toBe(true);
+    expect(shadowSourceModelPrefix("gpt-5.4-mini", configured)).toBe("gpt-5.4-mini");
+    expect(shadowSourceModelPrefix("gpt-5.4-2026-01", configured)).toBe("gpt-5.4");
+    const reversed = ["gpt-5.4-mini", "gpt-5.4"];
+    expect(shadowSourceModelPrefix("gpt-5.4-mini", reversed)).toBe("gpt-5.4-mini");
   });
 
   test("configured sourceModels replace the defaults", () => {

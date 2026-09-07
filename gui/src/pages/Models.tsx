@@ -879,11 +879,19 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     setShadowCallSaving(true);
     setShadowCall({ ...shadowCall, ...patch });
     try {
-      await fetch(`${apiBase}/api/shadow-call-settings`, {
+      const r = await fetch(`${apiBase}/api/shadow-call-settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
+      if (!r.ok) {
+        // Surface the server's reason (e.g. "modelMap[gpt-5.4] must resolve to a
+        // configured provider") instead of silently reverting on the next poll.
+        let msg = t("models.saveFailed");
+        try { const d = await r.json(); if (d && typeof d.error === "string" && d.error) msg = d.error; } catch { /* non-JSON error body */ }
+        publishFeedback(false, msg);
+        void loadShadowCall();
+      }
     } finally {
       setShadowCallSaving(false);
     }
@@ -1656,13 +1664,18 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               <button
                 type="button"
                 className="btn btn-ghost btn-sm"
-                disabled={!customSourceDraft.trim() || !customTargetDraft || shadowCallSaving}
+                disabled={!customSourceDraft.trim() || shadowCallSaving}
                 onClick={() => {
                   const src = customSourceDraft.trim();
-                  if (!src || !customTargetDraft || !shadowCall) return;
+                  if (!src || !shadowCall) return;
                   if (DEFAULT_SOURCE_MODELS.includes(src)) return;
-                  const nextMap = { ...(shadowCall.modelMap ?? {}), [src]: customTargetDraft };
-                  const customs = Object.keys(nextMap).filter(k => !DEFAULT_SOURCE_MODELS.includes(k));
+                  const nextMap = { ...(shadowCall.modelMap ?? {}) };
+                  if (customTargetDraft) nextMap[src] = customTargetDraft;
+                  else delete nextMap[src];
+                  // A source without a target uses the shared fallback model, so it
+                  // still has to land in sourceModels even when modelMap stays unchanged.
+                  const knownCustoms = (shadowCall.sourceModels ?? DEFAULT_SOURCE_MODELS).filter(s => !DEFAULT_SOURCE_MODELS.includes(s));
+                  const customs = Array.from(new Set([...knownCustoms, ...Object.keys(nextMap).filter(k => !DEFAULT_SOURCE_MODELS.includes(k)), ...(!customTargetDraft ? [src] : [])]));
                   const nextSources = [...DEFAULT_SOURCE_MODELS, ...customs];
                   setShadowCall({ ...shadowCall, modelMap: nextMap, sourceModels: nextSources });
                   setCustomSourceDraft("");
@@ -1673,7 +1686,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                 {t("models.shadowCallAdd")}
               </button>
             </div>
-            {Object.keys(shadowCall?.modelMap ?? {}).filter(k => !DEFAULT_SOURCE_MODELS.includes(k)).map(src => {
+            {(shadowCall?.sourceModels ?? []).filter(s => !DEFAULT_SOURCE_MODELS.includes(s)).map(src => {
               const mapped = shadowCall?.modelMap?.[src] ?? "";
               const customOptions = shadowCallModelOptions(activeModels, mapped || undefined, [src]);
               return (

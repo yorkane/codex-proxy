@@ -44,11 +44,12 @@ export function shadowSourceModels(configured?: unknown): string[] {
 
 /**
  * True when `modelId` is one of Codex's helper/shadow source models.
- * Routed ids (`provider/model`) are hard-excluded: a shadow call is always a
- * bare native slug, and an explicit routed selection must never be hijacked.
+ * Entries are operator-configured, so slash-form entries (`openai/gpt-5.4`)
+ * are honored as explicit opt-ins; a slash-free request id still has to be a
+ * plain slug (an explicit routed selection is never hijacked by a bare entry).
  */
 export function isShadowSourceModel(modelId: string, configured?: unknown): boolean {
-  if (modelId.includes("/")) return false;
+  if (modelId.includes("/")) return !!shadowSourceModelPrefix(modelId, configured);
   return shadowSourceModels(configured).some(prefix => modelId.startsWith(prefix));
 }
 
@@ -63,8 +64,14 @@ export function isShadowSourceModel(modelId: string, configured?: unknown): bool
  * field inside a set the operator chose, so no caller string is ever persisted.
  */
 export function shadowSourceModelPrefix(modelId: string, configured?: unknown): string | undefined {
-  if (modelId.includes("/")) return undefined;
-  return shadowSourceModels(configured).find(prefix => modelId.startsWith(prefix));
+  const sources = shadowSourceModels(configured);
+  // Longest prefix wins: `gpt-5.4` must not shadow `gpt-5.4-mini` when both
+  // are configured (array order is user-editable, so order can't decide).
+  let best: string | undefined;
+  for (const prefix of sources) {
+    if (modelId.startsWith(prefix) && (!best || prefix.length > best.length)) best = prefix;
+  }
+  return best;
 }
 
 /**
