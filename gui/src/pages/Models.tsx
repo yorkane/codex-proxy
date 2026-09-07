@@ -1729,14 +1729,14 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           </>
         )}
         {shadowCall?.enabled && (
-          <div className="models-shadow-row row muted text-control" aria-busy={shadowCallSaving}>
-            <span className="models-shadow-label">Phantom tools <Tooltip content="When the replacement model calls a tool the request never declared, the model first gets a directive error teaching it the declared tools (up to the per-request correction limit). After the limit, listed names drop silently and unknown names fail the turn. Applies only to shadow-replaced requests." side="top" maxWidth={320}><span style={{ cursor: "help" }} aria-label="Phantom tool tolerance">ⓘ</span></Tooltip></span>
-            <Switch on={shadowCall.phantomToolAllowlistEnabled !== false} onClick={() => void saveShadowCall({ phantomToolAllowlistEnabled: !(shadowCall.phantomToolAllowlistEnabled !== false) })} disabled={!shadowCall || shadowCallSaving} label="Phantom tools" />
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowPhantomList(v => !v)}>{showPhantomList ? "Hide list" : "Edit list"}</button>
-          </div>
-        )}
-        {shadowCall?.enabled && showPhantomList && shadowCall.phantomToolAllowlistEnabled !== false && (
-          <div className="models-shadow-row row muted text-control" style={{ flexWrap: "wrap", gap: "0.4rem" }}>
+          <div className="models-phantom-section" aria-busy={shadowCallSaving}>
+            <div className="models-shadow-row row muted text-control">
+              <span className="models-shadow-label">Phantom tools <Tooltip content="When the replacement model calls a tool the request never declared, the model first gets a directive error teaching it the declared tools (up to the per-request correction limit). After the limit, listed names drop silently and unknown names fail the turn. Applies only to shadow-replaced requests." side="top" maxWidth={320}><span style={{ cursor: "help" }} aria-label="Phantom tool tolerance">ⓘ</span></Tooltip></span>
+              <Switch on={shadowCall.phantomToolAllowlistEnabled !== false} onClick={() => void saveShadowCall({ phantomToolAllowlistEnabled: !(shadowCall.phantomToolAllowlistEnabled !== false) })} disabled={!shadowCall || shadowCallSaving} label="Phantom tools" />
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowPhantomList(v => !v)}>{showPhantomList ? "Hide list" : "Edit list"}</button>
+            </div>
+            {showPhantomList && shadowCall.phantomToolAllowlistEnabled !== false && (
+              <div className="models-shadow-row row muted text-control" style={{ flexWrap: "wrap", gap: "0.4rem" }}>
             {(shadowCall.phantomToolAllowlist ?? []).map(name => (
               <span key={name} className="row" style={{ gap: "0.25rem" }}>
                 <code className="models-shadow-source-name">{name}</code>
@@ -1812,6 +1812,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                 }}
               />
             </label>
+            </div>
+            )}
           </div>
         )}
 
