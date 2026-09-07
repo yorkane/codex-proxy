@@ -458,7 +458,8 @@ export function sidecarOutcomeRecorder(
 
 
 
-import { isShadowSourceModel, shadowCallReplacementFor, shadowPhantomToolNames, shadowSourceModelPrefix, shouldInterceptShadowCall } from "../../lib/shadow-call";
+import { isShadowSourceModel, shadowCallReplacementFor } from "../../lib/shadow-call";
+import { resolveShadowRoute, shadowPhantomScope } from "./shadow-call-route";
 
 export { DEFAULT_SHADOW_SOURCE_MODELS, isShadowSourceModel, shadowCallReplacementFor, shadowSourceModels } from "../../lib/shadow-call";
 
@@ -3265,43 +3266,9 @@ async function handleResponsesInner(
       : parsed._compactionRequest === true
         ? routeCompactionModel(config, modelId, evidenceFromBody(parsed._rawBody))
         : routeModel(config, modelId, evidenceFromBody(parsed._rawBody));
-    const _sci = config.shadowCallIntercept;
-    let shadowRoute: RouteResult | undefined;
-    if (_sci?.enabled && isShadowSourceModel(parsed.modelId, _sci.sourceModels)) {
-      const sourcePrefix = shadowSourceModelPrefix(parsed.modelId, _sci.sourceModels)!;
-      // Plan B: each source model resolves its own replacement; no replacement => left native.
-      const replacement = shadowCallReplacementFor(parsed.modelId, _sci);
-      if (replacement) {
-        let sourceIdentity = { providerName: OPENAI_CODEX_PROVIDER_ID, modelId: sourcePrefix };
-        try {
-          const resolvedSource = routeConcreteModel(config, parsed.modelId);
-          sourceIdentity = { providerName: resolvedSource.providerName, modelId: sourcePrefix };
-        } catch { /* Native Codex helper calls remain OpenAI-owned without an enabled OpenAI route. */ }
-        const targetRoute = resolveRoute(replacement);
-        if (shouldInterceptShadowCall(parsed.modelId, _sci.sourceModels, sourceIdentity, targetRoute)) {
-          const _sciOriginal = parsed.modelId;
-          parsed.modelId = replacement;
-          if (parsed._rawBody && typeof parsed._rawBody === "object") {
-            (parsed._rawBody as { model?: string }).model = replacement;
-          }
-        // Record the operator-configured prefix that matched, NOT the caller's raw model string.
-        // Matching is by prefix, so a caller can append arbitrary text and still intercept; that
-        // raw value would then land in usage.jsonl and /api/logs behind a pattern-based redactor
-        // that does not recognize every credential family. The prefix is a value the operator
-        // configured, so no caller-controlled string is persisted.
-        logCtx.shadowCallRewrittenFrom = sanitizeLogMetadataString(
-          shadowSourceModelPrefix(_sciOriginal, _sci.sourceModels),
-        );
-       // Helpers must not resume/append into the parent thread's Cursor conversation.
-       parsed._cursorIsolateConversation = true;
-       shadowRoute = targetRoute;
-        // The phantom-tool tolerance below is scoped to shadow-routed requests:
-        // replayed tool names are a property of the replacement model, not of any
-        // provider, and direct (non-intercepted) traffic keeps fail-closed.
-        parsed._shadowIntercepted = true;
-       }
-      }
-    }
+    // Fork: shadow intercept (per-source replacement + phantom scope) lives in
+    // shadow-call-route.ts to keep this file's diff against upstream minimal.
+    const shadowRoute = resolveShadowRoute({ parsed, config, logCtx, options, resolveRoute });
     if (parsed._compactionRequest === true) parsed._cursorIsolateConversation = true;
     route = shadowRoute ?? resolveRoute(parsed.modelId);
     logCtx.routeDecision = route.routeDecision;
@@ -4355,24 +4322,8 @@ async function handleResponsesInner(
   const refreshRoutedNamespaceToolAliases = (builtRequest: AdapterRequest): void => {
     routedNamespaceToolAliases = builtRequest.convertedRoutedNamespaceToolAliases ?? new Map();
   };
-  // Shadow-scoped phantom tool names (shadowCallIntercept.phantomToolAllowlist): a replacement
-  // model replaying a native tool name the request never declared is dropped (or answered with
-  // namespace-leak feedback by the emitted-call guard) instead of failing the turn. Only requests
-  // whose model the shadow intercept actually replaced consult the list — direct routes stay
-  // fail-closed. Consumed by the passthrough guard rewrite, the passthrough terminal checks, and
-  // both bridge translators; empty (disabled or non-shadow) leaves every path byte-identical.
-  const undeclaredPhantomNames: ReadonlySet<string> = parsed._shadowIntercepted === true
-    ? shadowPhantomToolNames(config.shadowCallIntercept)
-    : new Set<string>();
-  // Per-request directive-correction budget (shadowCallIntercept.phantomToolFeedbackMax,
-  // default 2): rejected undeclared calls come back as an exec directive teaching the model
-  // the declared catalog until the budget runs out. Allocated only for shadow-intercepted
-  // requests with the kill switch on; the bridge translators consume it, the passthrough
-  // guard cannot inject feedback and keeps drop/fail-closed semantics.
-  const undeclaredToolFeedbackBudget: { remaining: number } | undefined =
-    parsed._shadowIntercepted === true && config.shadowCallIntercept?.phantomToolAllowlistEnabled !== false
-      ? { remaining: Math.max(0, Math.min(10, config.shadowCallIntercept?.phantomToolFeedbackMax ?? 2)) }
-      : undefined;
+  // Fork: phantom scope + per-request correction budget (see shadow-call-route.ts).
+  const { undeclaredPhantomNames, undeclaredToolFeedbackBudget } = shadowPhantomScope(parsed, config);
 
   if ("passthrough" in adapter && adapter.passthrough && !routedCompaction) {
     let hostAdmissionLease = pendingHostAdmissionLease;
