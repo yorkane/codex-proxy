@@ -23,6 +23,12 @@ import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
 import { buildRouteDecisionTrace } from "../../src/routing/trace";
+import { createAnthropicAdapter } from "../../src/adapters/anthropic";
+import { buildResponseJSON } from "../../src/bridge";
+import { formatUsageReport } from "../../src/cli/usage-report";
+import { addFinalRequestLog, clearRequestLogsForTests, type RequestLogContext } from "../../src/server/request-log";
+import type { AdapterEvent } from "../../src/types";
+import { withTestTranslatorBudget } from "../helpers/translator-budget";
 
 const NOW = Date.parse("2026-09-01T10:00:00.000Z");
 
@@ -62,6 +68,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearRequestLogsForTests();
   resetUsageAggregateCacheForTests();
   resetUsageReadCacheForTests();
   resetAppOwnedMemoryForTests();
@@ -72,6 +79,105 @@ afterEach(() => {
 });
 
 describe("retained usage aggregate cache", () => {
+  test.each(["message_start", "message_delta"].flatMap(phase =>
+    ["bad", [], null, false, 7, { output_tokens: "bad" }].map(usage => ({ phase, usage })),
+  ))("malformed streamed usage at $phase stays unreported after a valid update: $usage", async ({ phase, usage }) => {
+    const adapter = withTestTranslatorBudget(createAnthropicAdapter({
+      adapter: "anthropic", baseUrl: "https://api.anthropic.com", apiKey: "test-key",
+    }));
+    const frames = [
+      { type: "message_start", message: { usage: phase === "message_start" ? usage : { input_tokens: 10 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      ...(phase === "message_delta" ? [{ type: "message_delta", delta: {}, usage }] : []),
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 4 } },
+      { type: "message_stop" },
+    ].map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join("");
+    const events: AdapterEvent[] = [];
+    for await (const event of adapter.parseStream(new Response(frames))) events.push(event);
+    const logCtx: RequestLogContext = { provider: "anthropic", model: "claude-test" };
+    const result = buildResponseJSON(events, "anthropic/claude-test", { onUsage: observed => { logCtx.usage = observed; } });
+    expect(result.status).toBe("completed");
+    expect(JSON.stringify(result.output)).toContain("ok");
+    addFinalRequestLog("malformed-stream-usage", Date.now(), logCtx, 200, { closeReason: "non_stream" });
+    const persisted = JSON.parse(readFileSync(join(testDir, "usage.jsonl"), "utf8").trim());
+    expect(persisted.usageStatus).toBe("unreported");
+    expect(persisted.usage).toBeUndefined();
+    const report = (await getUsageAggregate()).accumulator.summarize("all", Date.now());
+    expect(report.summary.requests).toBe(1);
+    expect(report.summary.unmeteredRequests).toBe(1);
+  });
+
+  test("malformed Anthropic usage stays unmetered through the real ledger and human report", async () => {
+    const adapter = withTestTranslatorBudget(createAnthropicAdapter({
+      adapter: "anthropic", baseUrl: "https://api.anthropic.com", apiKey: "test-key",
+    }));
+    const response = Response.json({
+      content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+      usage: { input_tokens: 10, output_tokens: "\x1b[2J" },
+    });
+    const events = await adapter.parseResponse!(response) as AdapterEvent[];
+    const logCtx: RequestLogContext = { provider: "anthropic", model: "claude-test" };
+    buildResponseJSON(events, "anthropic/claude-test", { onUsage: usage => { logCtx.usage = usage; } });
+    addFinalRequestLog("malformed-usage", Date.now(), logCtx, 200, { closeReason: "non_stream" });
+    const persisted = JSON.parse(readFileSync(join(testDir, "usage.jsonl"), "utf8").trim());
+    const report = (await getUsageAggregate()).accumulator.summarize("all", Date.now());
+    expect(report.summary.requests).toBe(1);
+    expect(formatUsageReport(report).every(line => !/[\x00-\x1f\x7f-\x9f]/.test(line))).toBe(true);
+    expect(persisted.usageStatus).toBe("unreported");
+    expect(persisted.usage).toBeUndefined();
+    expect(report.summary.unmeteredRequests).toBe(1);
+  });
+
+  test("custom cache keys isolate both endpoints and never poison preset aggregates", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const rows = [NOW - 2_000, NOW - 1_000, NOW].map((timestamp, index) => ({ ...entry(String(index)), timestamp }));
+    writeFileSync(path, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const base = await getUsageAggregate();
+    const firstWindow = { since: NOW - 2_000, until: NOW - 1_000 };
+    const first = await getFilteredUsageAggregate({}, firstWindow);
+    const same = await getFilteredUsageAggregate({}, { ...firstWindow });
+    const differentStart = await getFilteredUsageAggregate({}, { since: NOW - 1_000, until: NOW - 1_000 });
+    const differentEnd = await getFilteredUsageAggregate({}, { since: NOW - 2_000, until: NOW });
+    expect(same.accumulator).toBe(first.accumulator);
+    expect(same.update).toBe("unchanged");
+    expect(requests(first)).toBe(2);
+    expect(requests(differentStart)).toBe(1);
+    expect(requests(differentEnd)).toBe(3);
+    expect((await getUsageAggregate()).accumulator).toBe(base.accumulator);
+    expect(requests(base)).toBe(3);
+    expect(base.accumulator.summarize("all", NOW).customWindow).toBeUndefined();
+    for (let index = 1; index <= 7; index++) {
+      await getFilteredUsageAggregate({}, { since: NOW, until: NOW + index });
+    }
+    expect(usageAggregateRetainedStats().count).toBe(5); // base plus four filtered windows
+  });
+
+  test("custom incremental clones filter appended rows and rebuild with changed prices", async () => {
+    const path = join(testDir, "usage.jsonl");
+    const window = { since: NOW - 1_000, until: NOW };
+    writeFileSync(path, line("one"));
+    const original = await getFilteredUsageAggregate({}, window);
+    appendFileSync(path, [
+      { ...entry("inside"), timestamp: NOW },
+      { ...entry("outside"), timestamp: NOW + 1 },
+    ].map(row => JSON.stringify(row)).join("\n") + "\n");
+    const appended = await getFilteredUsageAggregate({}, window);
+    expect(appended.update).toBe("append");
+    expect(requests(original)).toBe(1);
+    expect(requests(appended)).toBe(2);
+    expect(appended.accumulator.snapshotWindow.end).toBe(NOW + 1);
+    refreshUserCostOverlays({ providers: { openai: { modelCosts: {
+      "gpt-5.5": { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+    } } } } as unknown as OcxConfig);
+    const rebuilt = await getFilteredUsageAggregate({}, window);
+    expect(rebuilt.update).toBe("rebuild");
+    expect(rebuilt.accumulator.summarize("today", NOW)).toMatchObject({
+      customWindow: true, ...window, summary: { requests: 2 },
+    });
+    expect(rebuilt.accumulator.summarize("all", NOW).summary.estimatedCostUsd).toBeCloseTo(0.000006, 10);
+  });
+
   test("append and rebuild preserve unresolved attribution and restricted pricing without ledger changes", async () => {
     const path = join(testDir, "usage.jsonl");
     writeFileSync(path, line("ordinary"));

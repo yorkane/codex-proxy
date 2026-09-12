@@ -51,6 +51,7 @@ import {
   usageLogRevisionKey,
 } from "../../usage/log";
 import { getUsageDebugLogEntries } from "../../usage/debug";
+import { parseUsageTimeWindow, type UsageTimeWindow } from "../../usage/time-range";
 import { USAGE_RANGES, USAGE_SURFACES, parseRange, parseUsageSurface, rangeWindow, type UsageRange, type UsageSummary, type UsageSurface } from "../../usage/summary";
 import { stripCodexRuntimeProviderFields } from "../../codex/auth-context";
 import { getProviderRegistryEntry } from "../../providers/registry";
@@ -114,7 +115,10 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     }
     const all = getRequestLogEntries();
     const total = filteredRequestLogCount(all, url.searchParams);
-    const logs = filterRequestLogs(all, url.searchParams).map(requestLogDto);
+    // Not point-free: requestLogDto takes an options object second, and Array.map would pass the
+    // element INDEX into it. An explicit arrow keeps the default (decode rate included) and is
+    // what /api/logs wants; /api/request-history opts out at its own call sites.
+    const logs = filterRequestLogs(all, url.searchParams).map(entry => requestLogDto(entry));
     const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -177,6 +181,12 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
   if (url.pathname === "/api/usage" && req.method === "GET") {
     const range = parseRange(url.searchParams.get("range"));
     const surface = parseUsageSurface(url.searchParams.get("surface"));
+    let window: UsageTimeWindow | undefined;
+    try {
+      window = parseUsageTimeWindow(url.searchParams.get("since"), url.searchParams.get("until"));
+    } catch (error) {
+      return jsonResponse({ error: error instanceof Error ? error.message : "invalid usage time window" }, 400);
+    }
     // A filtered summary must never reach the cache or the warm loop below:
     // the key is `range:surface`, so a filtered entry stored under it would be
     // served to the next unfiltered caller, dashboard included.
@@ -185,7 +195,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       model: url.searchParams.get("model"),
       apiKeyId: url.searchParams.get("apiKeyId"),
     };
-    const filterRequested = [filter.provider, filter.model, filter.apiKeyId]
+    const filterRequested = window !== undefined || [filter.provider, filter.model, filter.apiKeyId]
       .some(value => typeof value === "string" && value.trim() !== "");
     const now = Date.now();
     try {
@@ -211,7 +221,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       }
       if (cached && !filterRequested) discardUsageSummaryCacheEntry(cacheKey);
       if (filterRequested) {
-        const filteredAggregate = await getFilteredUsageAggregate(filter);
+        const filteredAggregate = await getFilteredUsageAggregate(filter, window);
         const accumulator = filteredAggregate.accumulator;
         return jsonResponse({
           ...accumulator.summarize(range, now, surface),
@@ -289,7 +299,8 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       return jsonResponse({
         range,
         surface,
-        since: null,
+        since: window?.since ?? null,
+        ...(window ? { customWindow: true, until: window.until } : {}),
         generatedAt: now,
         summary: {
           requests: 0,
@@ -417,6 +428,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         bytes: result.bytes,
         ...(result.trashDir ? { trashDir: result.trashDir } : {}),
         removedPaths: result.removedPaths,
+        ...(result.skippedReferencedPaths?.length ? { skippedReferencedPaths: result.skippedReferencedPaths } : {}),
       });
     } catch {
       return jsonResponse({

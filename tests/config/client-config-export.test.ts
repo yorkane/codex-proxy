@@ -11,6 +11,7 @@ import {
   LOOPBACK_API_KEY_PLACEHOLDER,
   SCHEMA_REQUIRED_OUTPUT_BUDGET,
   buildClientConfig,
+  buildClientContribution,
   buildClientConfigText,
   isExportClientId,
   normalizeExportModels,
@@ -119,7 +120,7 @@ describe("split config-export public facade", () => {
       ["omp", ["providers", "opencodex"], '{"providers":{"opencodex":{"baseUrl":"http://127.0.0.1:10100/v1","api":"openai-completions","apiKey":"opencodex-loopback","models":[{"id":"test/known","name":"known (test)","input":["text","image"],"contextWindow":8192,"maxTokens":8192,"reasoning":true,"thinking":{"mode":"effort","efforts":["high"]}}]}}}'],
       ["dsh", ["llm-pi-ai", "providers", "opencodex"], '{"llm-pi-ai":{"providers":{"opencodex":{"displayName":"OpenCodex","api":"openai-responses","baseURL":"http://127.0.0.1:10100/v1","headers":{"Authorization":"Bearer ocx_data_dsh"},"models":[{"id":"test/known","name":"known (test)","input":["text","image"],"contextWindow":8192,"reasoningEfforts":{"high":"high"}}]}}}}'],
       ["mcode", ["custom_provider", "opencodex"], '{"custom_provider":{"opencodex":{"name":"OpenCodex","kind":"custom","enabled":true,"api":"anthropic-messages","options":{"apiKey":"opencodex-loopback","baseURL":"http://127.0.0.1:10100","authMode":"api-key"},"models":{"test/known":{"limit":{"context":8192},"thinking":{"effortOptions":["high"]}}}}}}'],
-      ["zcode", ["provider", "opencodex"], '{"provider":{"opencodex":{"name":"OpenCodex","kind":"openai-compatible","enabled":true,"source":"custom","options":{"apiKey":"opencodex-loopback","baseURL":"http://127.0.0.1:10100/v1","apiKeyRequired":true},"models":{"test/known":{"name":"known (test)","modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":8192}}}}}}'],
+      ["zcode", ["provider", "opencodex"], '{"provider":{"opencodex":{"name":"OpenCodex","kind":"openai-compatible","enabled":true,"source":"custom","options":{"apiKey":"opencodex-loopback","baseURL":"http://127.0.0.1:10100/v1","apiKeyRequired":true},"models":{"test/known":{"name":"known (test)","modalities":{"input":["text","image"],"output":["text"]},"limit":{"context":8192},"reasoning":{"enabled":true,"variants":["high"]}}}}}}'],
     ] as const;
     for (const [id, path, expectedBytes] of cases) {
       const built = buildClientConfigText(id, context);
@@ -315,6 +316,8 @@ describe("Pi serializer (accept criterion 2)", () => {
     expect(provider.baseUrl).toBe(BASE_URL);
     expect(provider.api).toBe("openai-completions");
     expect(provider.apiKey).toBe(LOOPBACK_API_KEY_PLACEHOLDER);
+    expect(provider.compat?.sendSessionAffinityHeaders).toBe(true);
+    expect(buildClientContribution("pi", ctx()).fragments[0]!.value).toEqual(provider);
   });
 
   test("cost is omitted on every entry — zeros would assert routed models are free", () => {
@@ -899,7 +902,7 @@ describe("EXPORT_CLIENTS registry", () => {
 `);
   });
 
-  test("pi bytes are unchanged, to the last newline", () => {
+  test("pi bytes include session affinity, to the last newline", () => {
     const built = buildClientConfigText("pi", ctx({ config: cfg() }));
     expect(built.format).toBe("json");
     expect(built.text).toBe(`{
@@ -908,6 +911,9 @@ describe("EXPORT_CLIENTS registry", () => {
       "baseUrl": "http://127.0.0.1:10100/v1",
       "api": "openai-completions",
       "apiKey": "opencodex-loopback",
+      "compat": {
+        "sendSessionAffinityHeaders": true
+      },
       "models": [
         {
           "id": "anthropic/claude-opus-5",

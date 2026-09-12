@@ -250,6 +250,20 @@ Zen может отвечать общими 429 без заголовков `Re
 в ошибку клиента и синтетический `Retry-After`; при наличии upstream `Retry-After` он имеет
 приоритет. Повтор с тем же ключом по-прежнему включается через [`retryOn429`](/ru/reference/configuration/).
 
+**Бесключевой уровень `opencode-free` сейчас закрыт для сторонних клиентов.** Zen отклоняет любой
+запрос без заголовка `x-opencode-session`, возвращая тип ошибки `MissingSessionID` и сообщение
+«OpenCode's free tier can only be used in OpenCode». Проверяется только наличие заголовка, поэтому
+прокси мог бы пройти её, выдумав значение, — opencodex так не делает. Подделать идентификатор сессии
+и версионный User-Agent `opencode/<version>` значит объявить себя клиентом OpenCode, а OpenCode не
+публикует договор о стороннем подключении к этому бесключевому уровню; полученный так HTTP 200 —
+это обойдённая проверка допуска, а не разрешение. Поэтому opencodex сообщает об ограничении вместо
+обхода: запрос к `opencode-free` возвращает ошибку с объяснением.
+
+Поддерживаемый путь к тем же моделям — провайдер **`opencode-zen`** с ключом OpenCode Zen API,
+полученным на [opencode.ai/auth](https://opencode.ai/auth). Если OpenCode позже опубликует сторонний
+путь для бесключевого уровня, opencodex сможет его использовать; до тех пор пресет документирует
+ограничение. Условия вышестоящего сервиса: [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
+
 Большинство использует адаптер `openai-chat` с bearer-ключом; немногие провайдеры, предоставляющие
 только Anthropic-совместимую конечную точку (например, **Xiaomi MiMo**), используют адаптер
 `anthropic` (`x-api-key`).
@@ -416,9 +430,9 @@ Assist), `azure` / `azure-openai`, `kiro` и `cursor`. Проприетарны�
 **GitLab Duo** остаётся шлюзом с ключом/токеном подписки на своей OpenAI-совместимой конечной
 точке. **Cloudflare AI Gateway** требует подставить в URL id аккаунта и шлюза.
 
-Copilot предоставляет каталог со смешанными проводами: его семейство GPT-5 (`gpt-5.3-codex`,
-`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`)
-отклоняет `/chat/completions` для агентного трафика, поэтому opencodex по умолчанию
+Copilot предоставляет каталог со смешанными проводами: модели (`gpt-5.3-codex`,
+`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`)
+отклоняют `/chat/completions` для агентного трафика, поэтому opencodex по умолчанию
 маршрутизирует эти модели через Responses API, а все остальные модели Copilot остаются на
 chat completions. Приоритет: жёсткий wire-пин → явная запись
 [`modelAdapters`](/ru/reference/configuration/providers/) → дефолт реестра → adapter всего

@@ -62,14 +62,22 @@ One caveat specific to Aside: the running app rewrites `models.json` itself, so
 fully quit and reopen Aside after applying, the same way Claude Desktop needs a
 restart. Aside's block is loopback-only and never carries a real credential.
 
-Raycast has two prerequisites. Custom Providers is a **Raycast Pro** feature: on a
-free plan the file is still written, but `ocx integration client status --client
-raycast` and the Integrations page report a warning, because Raycast will not
-read it. And Raycast only creates its `ai` folder when you open Raycast →
-Settings → AI → **Reveal Providers Config** once; opencodex uses that folder as
-the install signal and reports the client as not installed until then. Raycast
-reads `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike and does
-not honor `XDG_CONFIG_HOME`, so that path is not relocatable.
+The managed Raycast integration supports **macOS and Windows**. Custom Providers
+is a **Raycast Pro** feature: on a free plan the file is still written, but
+`ocx integration client status --client raycast` and the Integrations page report
+a warning, because Raycast will not read it. On macOS or Windows, open Raycast →
+Settings → AI → **Reveal Providers Config** once so the `ai` folder exists.
+On these supported platforms, opencodex uses that folder as its install signal
+and reports the client as not installed until it exists. Linux is unsupported,
+even if the folder exists.
+
+The status field `aiDirPresent` reports only whether `~/.config/raycast/ai` exists,
+independently of whether the Raycast app is installed or the platform is supported.
+It does not prove that Raycast is installed or usable. The CLI prints `plan` on a
+separate line and adds the macOS/Windows setup instruction when `aiDirPresent` is
+false; `--json` preserves the raw status, including the nested `raycast` block.
+Raycast reads `~/.config/raycast/ai/providers.yaml` on macOS and Windows alike and
+does not honor `XDG_CONFIG_HOME`, so that path is not relocatable.
 
 The managed block is one element, `id: opencodex`, in the file's `providers`
 sequence: `name: OpenCodex`, `base_url: http://<host>:<port>/v1`, and every
@@ -164,11 +172,11 @@ normalized. The exception is something JSON cannot rewrite exactly — a non-fin
 number like `1e999`, a number a rewrite would round (a very large integer, or one
 so small it collapses to zero), `-0`, the same key written twice in one object, or nesting deeper
 than 1000 levels — which locks the switch instead, so nothing is silently changed or dropped.
-**OMP** is unaffected by sibling edits too, for a different reason: its writer
-patches only its own `providers.opencodex` range byte-wise, so the rest of the
+**OMP, DSH and Hermes** are unaffected by sibling edits too, for a different reason: their writers
+patch only their own managed provider ranges byte-wise, so the rest of the
 file is never rewritten. For the remaining formats that can carry comments
-(Hermes, OpenClaw, Kimi Code, Gajae Code, MiniMax Code, Raycast — YAML, JSON5 and TOML
-written as whole documents), or
+(OpenClaw, Kimi Code, Gajae Code, MiniMax Code, Raycast — JSON5 and TOML
+written as whole documents, or generic YAML without source preservation), or
 whenever our own entries were edited, the switch locks and disable refuses rather
 than guessing which edits were yours.
 
@@ -184,7 +192,7 @@ parse, or one whose structure we cannot reason about, still refuses.
 
 **Formatting is generally not preserved.** Applying parses a config and writes it back
 out, so JSON, JSON5 and TOML may be reformatted and comments in JSON5 or TOML are lost.
-OMP and DSH are the exceptions: their YAML writers patch only `providers.opencodex` and
+OMP, DSH and Hermes are the exceptions: their YAML writers patch only `providers.opencodex` and
 `llm-pi-ai.providers.opencodex`, respectively, preserving
 unrelated provider comments and formatting byte-for-byte. If that exact source range
 cannot be identified safely, the operation refuses instead. For other clients, use

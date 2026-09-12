@@ -6,6 +6,7 @@ import {
   codexAutoStartEnabled,
   modelPreferHostedToolsConfigError,
   providerModelCostsConfigError,
+  providerWebSearchBridgeConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
   sanitizeModelCostsForDisplay,
@@ -13,6 +14,7 @@ import {
 import {
   apiKeyTransportConfigError,
   booleanRecordConfigError,
+  providerReasoningPinsConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
@@ -441,6 +443,11 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   // /v1/models and for the same reason — it forwards no caller credential upstream — so a
   // remote client no longer needs an admin token just to read the model catalog.
   { endpoint: "/v1/catalog", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  // #4236: the hub-state read a connected client uses instead of reporting its own empty
+  // credential store. Same admission set and the same justification as the two rows above —
+  // it forwards no caller credential upstream and its body is booleans plus model ids — and it
+  // 404s on any host whose runtimeRole is not "hub", so no standalone install gains a surface.
+  { endpoint: "/v1/hub-state", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -585,6 +592,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     return "provider must be a plain object";
   }
   const raw = provider as Record<string, unknown>;
+  const pinsError = providerReasoningPinsConfigError(raw);
+  if (pinsError) return pinsError;
   for (const field of FORBIDDEN_PROVIDER_RUNTIME_FIELDS) {
     if (Object.hasOwn(raw, field)) return `provider ${name} must not include runtime field "${field}"`;
   }
@@ -598,6 +607,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     }
     if (seed) seed.codexAccountMode = raw.codexAccountMode;
     const canonicalCandidate = { ...raw };
+    // Validated operator overlays do not change the canonical auth/transport seed.
+    delete canonicalCandidate.pinnedReasoningEffort;
+    delete canonicalCandidate.modelPinnedReasoningEfforts;
     delete canonicalCandidate.responsesSnapshotRepair;
     // modelCosts is a user-owned display overlay, not part of the canonical
     // forward seed; it is validated separately below (providerModelCostsConfigError).
@@ -647,6 +659,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
+  }
+  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge);
+  if (webSearchBridgeError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${webSearchBridgeError}`;
   }
   const upstreamHttpVersionError = upstreamHttpVersionConfigError(raw.upstreamHttpVersion);
   if (upstreamHttpVersionError) {
@@ -833,6 +849,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   reasoningEfforts: "editor",
   modelReasoningEfforts: "editor",
   modelDefaultReasoningEfforts: "editor",
+  pinnedReasoningEffort: "editor",
+  modelPinnedReasoningEfforts: "editor",
   modelSupportsReasoningSummaries: "editor",
   modelSupportsVerbosity: "editor",
   supportsVerbosity: "editor",
@@ -843,6 +861,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   xaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
   responsesSnapshotRepair: "editor",
+  webSearchBridge: "editor",
   reasoningEffortMap: "editor",
   modelReasoningEffortMap: "editor",
   reasoningWireFormat: "editor",

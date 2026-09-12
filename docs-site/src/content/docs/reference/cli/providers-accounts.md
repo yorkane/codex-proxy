@@ -88,8 +88,9 @@ files or a raw network capture.
 
 ### `ocx login <provider>`
 
-Start the provider's registered login flow. OAuth providers open a browser and store auto-refreshed
-credentials under `~/.opencodex/`; API-key login providers open their key dashboard, prompt for the
+Start the provider's registered login flow. OAuth-style account providers open a browser and store
+credentials under `~/.opencodex/` (refreshable tokens rotate automatically; durable key grants such
+as OrcaRouter are reused until the provider revokes them); API-key login providers open their key dashboard, prompt for the
 key, validate it when possible, and save the resulting provider config. The command prints the
 currently accepted OAuth and API-key provider ids when the name is missing or unknown.
 
@@ -101,6 +102,8 @@ account pool (Reauthenticate) or the headless `ocx account reauth` flow instead.
 ```bash
 ocx login xai
 ocx login anthropic
+ocx login orcarouter-oauth # browser consent + S256 PKCE
+ocx login orcarouter       # paste an existing API key
 ```
 
 OAuth reauthentication preserves operator settings such as model selections, pricing overrides,
@@ -150,6 +153,12 @@ The persisted option is `"codexMainAccountHardLock": true` in OpenCodex's `confi
 by default. This protects new requests using the identified main account, not the last 1% itself:
 already-running requests, unmatched caller-owned keyring credentials, and traffic outside the
 proxy can still spend quota. Added accounts and other providers remain available.
+
+With protection enabled, an owned startup restores the main credential's in-memory identity
+binding after native-profile recovery and cleanup, so a persisted 99% block survives a restart.
+Caller-owned Direct, exact-main, main-fallback, and main-pin requests can briefly receive 503
+while that binding is pending; healthy stored Pool accounts stay eligible throughout. No
+credential is read from a foreign or unconfirmed service home for this initialization.
 
 While this policy blocks main, Luna Reserve on that account is blocked too. Staying below ordinary
 quota exhaustion may prevent Reserve activation. Disabling the switch restores normal local
@@ -437,6 +446,14 @@ security find-generic-password -w openrouter | ocx account add-key openrouter --
 Inspect Codex reset credits for an account. Consuming a credit is destructive and requires both
 `--consume` and `--yes`.
 
+After a confirmed `reset`, fresh usage can recover the same account's eligible existing
+shared reset-derived cooldown. Paused accounts, accounts needing reauthentication and
+cooldowns owned by an in-flight probe remain excluded from this recovery. A failed or busy
+usage refresh after confirmed consumption does not require another credit: check usage
+again instead of repeating `--consume`. Consume success does not guarantee routability;
+see the [management API recovery contract](/reference/management-api/#codex-authentication-delegation)
+for reset/replay, freshness and scope limits.
+
 ### `ocx account main <subcommand>`
 
 Manage named native Codex main-login profiles without changing OpenCodex account-pool routing:
@@ -508,6 +525,8 @@ proxy to be running (`ocx start`, or an installed service).
 | --- | --- | --- |
 | `list` (default) | `--provider <name>`, `--json` | List models seeded in configured providers. |
 | `live` | `--provider <name>`, `--json` | Read the running catalog, including models discovered at runtime. Rows are flagged `native`/`routed`, `custom`, and `enabled`/`disabled`. |
+| `price <provider/model>` | `--json` | Read the model's saved manual price override; no override means automatic pricing. |
+| `set-price <provider/model>` | `--input <rate>`, `--output <rate>`, `--cache-read <rate>`, `--cache-write <rate>`, `--auto`, `--json` | Set display prices in USD per 1M tokens. Input/output are required when setting; omitted cache rates become zero. `--auto` removes only this model's override. |
 | `add <provider> <modelId>` | `--display-name <name>`, `--context-window <tokens>`, `--modalities <text,image,audio>` | Register a model the provider catalog does not advertise. |
 | `edit <custom-id>` | `--model-id <id>`, `--display-name <name\|->`, `--context-window <tokens\|0>`, `--modalities <text,image,audio\|->`, `--json` | Edit a custom model. `-` clears a field; `0` clears the context window. |
 | `remove <custom-id\|provider/modelId>` | `--yes` | Delete a custom model. Requires `--yes` when stdin is not an interactive terminal. |

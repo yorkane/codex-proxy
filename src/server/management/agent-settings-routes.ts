@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, filterCatalogVisibleModels, invalidateCodexModelsCache, nativeContextLimits, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import { mergeModelPinnedEfforts, modelPinnedEffortsConfigError } from "../../config/provider-validation";
 import { captureConfigTopLevelRollback, parsedConfigRebaseDeletionKeys, projectConfigRebaseProvenance } from "../../config/rebase-provenance";
 import {
   DEFAULT_SUBAGENT_MODELS,
@@ -16,6 +17,7 @@ import {
   providerHeadersConfigError,
   saveConfigPreservingClaudeCode,
   subagentDefaultSyncEffective,
+  validateConfigCandidate,
 } from "../../config";
 import {
   clearLoginState,
@@ -38,6 +40,7 @@ import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
+import { MULTI_AGENT_MODE_HINT_RECOMMENDATION } from "../../codex/multi-agent-mode-policy";
 import { readUsageEntries } from "../../usage/log";
 import { getUsageDebugLogEntries } from "../../usage/debug";
 import { parseRange, parseUsageSurface, summarizeUsage } from "../../usage/summary";
@@ -246,6 +249,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       agentsMaxDepth: getAgentsMaxDepth(),
       subagentDeveloperInstructions: getSubagentDeveloperInstructions(),
       multiAgentModeHintText: getMultiAgentModeHintText(),
+      multiAgentModeHintRecommendation: MULTI_AGENT_MODE_HINT_RECOMMENDATION,
       // max_depth is V1-only upstream; this is the global-flag statement, derived
       // server-side so no client can present it as an effective V2 limit.
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
@@ -419,6 +423,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       agentsMaxDepth: getAgentsMaxDepth(),
       subagentDeveloperInstructions: getSubagentDeveloperInstructions(),
       multiAgentModeHintText: getMultiAgentModeHintText(),
+      multiAgentModeHintRecommendation: MULTI_AGENT_MODE_HINT_RECOMMENDATION,
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
       warnings,
       catalogRefresh,
@@ -603,24 +608,63 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     return jsonResponse({
       effortCap: config.effortCap ?? null,
       subagentEffortCap: config.subagentEffortCap ?? null,
+      modelPinnedEfforts: config.modelPinnedEfforts ?? {},
       efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
     });
   }
   if (url.pathname === "/api/effort-caps" && req.method === "PUT") {
-    let body: { effortCap?: unknown; subagentEffortCap?: unknown };
+    let body: unknown;
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
-    const { isCodexReasoningEffort } = await import("../../reasoning-effort");
-    for (const key of ["effortCap", "subagentEffortCap"] as const) {
-      if (!(key in body)) continue;
-      const value = body[key];
-      if (value === null || value === "") { deleteConfigTopLevelKey(config, key); continue; }
-      if (typeof value !== "string" || !isCodexReasoningEffort(value)) {
-        return jsonResponse({ error: `unknown reasoning effort "${String(value)}"` }, 400);
-      }
-      config[key] = value;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return jsonResponse({ error: "effort caps body must be a plain object" }, 400);
     }
-    saveConfigPreservingClaudeCode(config);
-    return jsonResponse({ ok: true, effortCap: config.effortCap ?? null, subagentEffortCap: config.subagentEffortCap ?? null });
+    const patch = body as Record<string, unknown>;
+    const { isCodexReasoningEffort } = await import("../../reasoning-effort");
+    const draft = { ...projectConfigRebaseProvenance(config) };
+    const touched: (keyof OcxConfig)[] = [];
+    for (const key of ["effortCap", "subagentEffortCap"] as const) {
+      if (!Object.hasOwn(patch, key)) continue;
+      const value = patch[key];
+      if (value === null || value === "") deleteConfigTopLevelKey(draft, key);
+      else if (typeof value === "string" && isCodexReasoningEffort(value)) draft[key] = value;
+      else return jsonResponse({ error: "caps must be valid reasoning efforts or null" }, 400);
+      touched.push(key);
+    }
+    if (Object.hasOwn(patch, "modelPinnedEfforts")) {
+      const error = modelPinnedEffortsConfigError(patch.modelPinnedEfforts, "modelPinnedEfforts", true);
+      if (error) return jsonResponse({ error }, 400);
+      const pins = mergeModelPinnedEfforts(config.modelPinnedEfforts, patch.modelPinnedEfforts);
+      if (pins) draft.modelPinnedEfforts = pins;
+      else deleteConfigTopLevelKey(draft, "modelPinnedEfforts");
+      touched.push("modelPinnedEfforts");
+    }
+    const validation = validateConfigCandidate(draft);
+    if (!validation.ok) return jsonResponse({ error: validation.error }, 400);
+    if (touched.some(key => !Object.hasOwn(draft, key)) && config.configRebaseProvenance !== undefined
+      && parsedConfigRebaseDeletionKeys(config) === null) {
+      return jsonResponse({ error: "unsupported config deletion provenance" }, 409);
+    }
+    const projected = projectConfigRebaseProvenance(draft);
+    touched.push("configRebaseProvenance");
+    const rollback = captureConfigTopLevelRollback(config, touched);
+    try {
+      for (const key of touched) {
+        if (Object.hasOwn(projected, key)) Object.defineProperty(config, key, {
+          value: projected[key], writable: true, enumerable: true, configurable: true,
+        });
+        else deleteConfigTopLevelKey(config, key);
+      }
+      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+    } catch (error) {
+      rollback();
+      throw error;
+    }
+    return jsonResponse({
+      ok: true,
+      effortCap: config.effortCap ?? null,
+      subagentEffortCap: config.subagentEffortCap ?? null,
+      ...(config.modelPinnedEfforts ? { modelPinnedEfforts: config.modelPinnedEfforts } : {}),
+    });
   }
 
   // Featured roster and saved picker order are separate settings. Native Codex advertises

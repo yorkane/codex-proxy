@@ -182,7 +182,7 @@ by the current window size.
 | `GET /api/debug/usage-logs` | Read bounded usage-debug entries | — |
 | `GET /api/debug/injection-logs` | Read bounded guidance-injection debug entries | — |
 | `GET /api/claude/inbound-debug` | Read Claude inbound debug state and entries | — |
-| `GET /api/usage` | Stream the complete usage ledger into compact aggregates, then incrementally fold verified appends; summarize by range and client surface, with a Codex `accounts` breakdown keyed by stable non-PII log labels | Returns an `error: "read_failed"` summary if storage cannot be read |
+| `GET /api/usage` | Stream the complete usage ledger into compact aggregates, then incrementally fold verified appends; summarize by preset or inclusive custom window and client surface, with a Codex `accounts` breakdown keyed by stable non-PII log labels | 400 invalid custom bounds; returns an `error: "read_failed"` summary if storage cannot be read |
 | `GET /api/storage` | Scan Codex storage usage by bucket | Returns an `error: "scan_failed"` payload on scan failure |
 | `POST /api/storage/cleanup/preview` | Preview archived-session cleanup and return a binding digest | 400 `invalid_json` or `invalid_percent` |
 | `POST /api/storage/cleanup` | Quarantine or permanently remove the previewed archived set | 400 invalid input; 409 stale/busy/referenced state; 500 filesystem/database failure |
@@ -210,6 +210,23 @@ an earlier file prefix from 7-day, 30-day, or all-history totals. `managementUsa
 accepted for compatibility with bounded legacy readers, but changing it no longer expands or reduces
 the history summarized by this endpoint.
 
+Pass both `since` and `until` to select an inclusive custom interval. Each accepts integer Unix
+epoch **milliseconds**, or a full ISO datetime with an explicit timezone. Invalid dates, negative
+or out-of-range values, reversed bounds, and a single bound are rejected. Custom bounds override
+`range`; the response keeps the preset `range` field for compatibility and adds `customWindow: true`,
+the exact `since`, and `until`. `generatedAt` remains the time the report was produced.
+
+Custom windows filter individual ledger entries before daily aggregation, including partial first
+and last days. They preserve `surface`, `provider`, `model`, and `apiKeyId` filtering and never reuse
+or overwrite unfiltered preset summaries. The daily chart remains capped at 366 local calendar days;
+totals cover the full requested interval. Snapshot-window fields describe the scanned ledger before
+the time filter, so they can extend beyond the requested bounds.
+
+The Usage page accepts local date/time inputs. Its selected ending minute includes the entire
+minute through `:59.999`. Choosing a preset or clearing the custom window restores preset behavior.
+This adds exact range selection and existing cost estimates; it does not add hourly chart buckets
+or offline reporting.
+
 The runtime ledger is append-only. Replacing or truncating it, or changing local pricing/time-zone
 inputs, triggers a complete rebuild. If you manually edit an older row in place while the proxy is
 running, restart the proxy (or replace the file) before relying on the new total; incremental refreshes
@@ -227,6 +244,29 @@ overlays take priority over bundled verified catalog and price fallbacks, and hi
 re-estimated from the pricing active when the summary is read. This is an API-equivalent estimate,
 not a subscription charge. New main-pool requests use the reserved `main` label; legacy bare
 `openai` rows remain in an ambiguous bucket instead of being reassigned from current configuration.
+
+Manual model prices can also be edited from **Models → Price**. A manual-pricing badge survives
+catalog reloads. Prices are stored in `providers.<name>.modelCosts` and survive catalog sync.
+Explicit all-zero user rates mean a known-zero estimate; **Reset to automatic** removes the
+override and restores the usual catalog fallback. These remain display estimates, not bills.
+
+`GET /api/providers/{provider}/model-costs` returns `{ provider, modelCosts }`, with sanitized
+four-rate entries keyed by exact upstream model ID. `PUT` on the same route accepts
+`{ modelId, cost }`, where `cost` is `{ input, output, cacheRead, cacheWrite }` or `null` to reset.
+All four rates must be finite numbers from 0 through 1,000,000, in USD per 1M tokens.
+Unknown fields and malformed rates are rejected. A write preserves other models' overrides
+and returns `{ ok: true, provider, modelId, cost }`; reset returns `cost: null`.
+
+```bash
+ocx models price ollama/custom-model --json
+ocx models set-price ollama/custom-model --input 0.50 --output 1.50
+ocx models set-price ollama/custom-model --input 0 --output 0
+ocx models set-price ollama/custom-model --auto
+```
+
+Omitted CLI cache-read/cache-write rates default to zero. Use `--cache-read` and `--cache-write`
+to set them explicitly. A provider name remains an exact configuration identity; account display
+labels are not editable provider names.
 
 Rows in `models`, `providers`, and `days[].models` also carry `cacheHitRate`: the share of input
 tokens served from the provider's prompt cache, clamped to `[0, 1]`. It is `null` — never `0` —
@@ -349,7 +389,7 @@ whether to star the repository.
 | --- | --- | --- |
 | `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps. `spillLastWriteFailureOrigin` is `retry_returned_timeout`, `timeout_memo_refusal`, or null; cumulative `spillAclRetryReturnedTimeouts` and `spillAclTimeoutMemoRefusals` count terminal failed publications. See [Windows spill diagnostics](/troubleshooting/windows-memory/) for process-local semantics. Raw errors and paths are never returned. | — |
 | `POST /api/system/restart` | Begin a drain-aware process restart without removing client injection | Returns 202; repeated calls report the existing drain |
-| `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
+| `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 `self_unload_service` when this proxy is running as the installed launchd/systemd service, because stopping the manager from inside it would end the process before native Codex is restored — run `ocx stop` instead (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
 | `GET /api/system/codex-app-server` | Report whether running Codex app-servers predate the current model catalog | — |
 | `POST /api/system/codex-restart` | Refresh the catalog, then ask stale Codex app-servers to exit so the model picker reloads | Returns 200 with `code: partially_stopped` when a target survives |
 
@@ -386,6 +426,31 @@ manager. Its routes are:
 | `POST /api/codex-auth/login/code` | Submit a manual code for a Codex login flow | 400 invalid flow/code |
 | `POST /api/codex-auth/login/cancel` | Cancel a Codex login flow | — |
 | `GET /api/codex-auth/login-status` | Poll a flow or account login state. A completed new-account flow includes `catalogRefreshPending: true` only when recovery is needed. | Unknown flows report `expired`; no active flow reports `idle` |
+
+For reset-credit consumption, a different `operationId` supplied while the same physical
+account has an unfinished operation joins that operation as an alias. Its retry uses the
+original upstream request ID and records the outcome under that same identity, so later
+requests with the original ID or a known alias replay the stored result without another
+consume request. A previously unseen ID supplied after settlement starts a new explicit
+redemption; clients retrying an existing action should keep its ID.
+
+After a confirmed manual `reset`, OpenCodex checks fresh usage for that same account
+and can reconcile its eligible pre-existing shared reset-derived cooldown immediately.
+Paused accounts, accounts requiring reauthentication and cooldowns already owned by an
+in-flight probe remain excluded from this recovery; their cooldowns are retained. Usage
+started before the reset, incomplete or exhausted usage, a changed account, and a newer
+quota failure do not qualify. Older main-account usage responses cannot replace a newer
+published observation. If usage needs credential refresh, recovery requires that refresh's
+confirmed lineage; an externally replaced credential does not qualify merely because it
+belongs to the same account. Explicit `Retry-After`, Spark/Reserve cooldowns, pause
+settings, pins and the selected account are preserved. `already_redeemed` and durable
+replay do not prove a new reset and do not gain this recovery behavior.
+
+A failed or busy usage refresh after a confirmed `reset` or `already_redeemed` does not
+turn the completed consumption into an error: the response remains HTTP 200 with its
+consume `code`, omitting `remaining` when no fresh count was obtained. This response
+confirms the consume outcome, not that the account is now routable. Refresh usage to
+check availability; do not consume another credit to retry a failed usage refresh.
 
 If a new account config row is saved but credential setup cannot finish, OAuth `login-status` reports
 `status: "error"` with

@@ -3,7 +3,7 @@ import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
 import { openaiResponsesUrl } from "../../src/adapters/openai-responses-url";
 import { normalizeResponsesCodeMode } from "../../src/adapters/responses-code-mode";
-import { CODE_MODE_RESULT_ECHO_SENTENCE, EMPTY_EXEC_OUTPUT_MESSAGE, FAILED_EXEC_OUTPUT_MESSAGE } from "../../src/adapters/exec-tool-result-normalize";
+import { CODE_MODE_HOST_CONTRACT_SENTENCE, CODE_MODE_RESULT_ECHO_SENTENCE, EMPTY_EXEC_OUTPUT_MESSAGE, FAILED_EXEC_OUTPUT_MESSAGE } from "../../src/adapters/exec-tool-result-normalize";
 import { chatCompletionsToResponsesBody } from "../../src/chat/inbound";
 import { anthropicToResponsesBody } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
@@ -51,7 +51,7 @@ describe("native routed code-mode result visibility", () => {
     const before = JSON.stringify(body);
     const request = createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body));
     const wire = JSON.parse(request.body);
-    expect(wire.instructions).toBe(`Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}`);
+    expect(wire.instructions).toBe(`Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}\n\n${CODE_MODE_HOST_CONTRACT_SENTENCE}`);
     expect(wire.tools.find((tool: { name: string }) => tool.name === "exec").parameters.properties.input.description)
       .toContain(CODE_MODE_RESULT_ECHO_SENTENCE);
     expect(JSON.stringify(body)).toBe(before);
@@ -103,6 +103,31 @@ describe("native routed code-mode result visibility", () => {
     expect(second.instructions).toBe(first.instructions);
   });
 
+  test("annotates a paired exec result that carries a host failure string without touching the program", () => {
+    const failure = "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\ntool `apply_patch` expects a string input";
+    const body = raw(failure);
+    const wire = JSON.parse(createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body)).body);
+    expect(wire.input[1].output).toBe(`${failure}\n[recovery: tools.apply_patch takes exactly one string argument; pass the patch text itself, not an object such as {input: ...}.]`);
+    expect(JSON.parse(wire.input[0].arguments).input).toBe(body.input[0].input);
+    // Replayed history already carrying the hint is not annotated twice: the output item and the
+    // program keep their identity, and a second pass over the normalized body is a deep no-op.
+    const replayed = raw(wire.input[1].output);
+    const once = normalizeResponsesCodeMode(replayed, parseRequest(replayed), routed) as typeof replayed;
+    expect(once.input[1]).toBe(replayed.input[1]);
+    expect(once.input[0]).toBe(replayed.input[0]);
+    expect(normalizeResponsesCodeMode(once, parseRequest(once), routed)).toEqual(once);
+  });
+
+  test("a replayed body that already carries the echo rule gains only the missing contract sentence", () => {
+    const body = { ...raw(), instructions: `Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}` };
+    const parsed = parseRequest(body);
+    const first = normalizeResponsesCodeMode(body, parsed, routed) as typeof body;
+    expect(first.instructions).toBe(`${body.instructions}\n\n${CODE_MODE_HOST_CONTRACT_SENTENCE}`);
+    expect(first.instructions.split(CODE_MODE_RESULT_ECHO_SENTENCE).length).toBe(2);
+    const second = normalizeResponsesCodeMode(first, parsed, routed) as typeof body;
+    expect(second.instructions).toBe(first.instructions);
+  });
+
   test("official OpenAI and non-code-mode catalogs remain untouched", () => {
     const body = raw();
     for (const native of [provider, { ...routed, baseUrl: "https://api.openai.com/v1" }]) {
@@ -110,6 +135,7 @@ describe("native routed code-mode result visibility", () => {
       const wire = JSON.parse(createResponsesPassthroughAdapter(native).buildRequest(parseRequest(body)).body);
       expect(wire.instructions).toBe(body.instructions);
       expect(JSON.stringify(wire.tools)).not.toContain(CODE_MODE_RESULT_ECHO_SENTENCE);
+      expect(JSON.stringify(wire)).not.toContain("Host contract for the nested helpers");
     }
     for (const tools of [
       [{ type: "function", name: "exec", parameters: { type: "object" } }],
@@ -1433,6 +1459,106 @@ describe("OpenAI Responses passthrough sanitization", () => {
     };
 
     expect(body.tools[0]?.parameters).toEqual({ ...parameters, type: "object" });
+  });
+
+  test("drops unicode property-escape patterns on the codex forward path", () => {
+    // Claude Code 2.1.265 puts `\p{Cc}` in the `pattern` of its built-in Artifact tool. The
+    // ChatGPT backend compiles `pattern` with Python `re`, which has no property escapes, and
+    // answers "Invalid schema for function 'Artifact': … is not a 'regex'" — so every request
+    // from such a client fails, whether or not the tool is ever called.
+    const field = '^(?!__.*__$)[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}"\\\\./[\\]]{1,200}$';
+    const collection = "^(?!\\.\\.?(?:/|$))[A-Za-z0-9_\\-.~:@+]{1,200}$";
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "test-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "test-model",
+        input: [],
+        tools: [{
+          type: "function",
+          name: "Artifact",
+          parameters: {
+            type: "object",
+            properties: {
+              field: { type: "string", pattern: field },
+              collection: { type: "string", pattern: collection },
+            },
+          },
+        }],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as {
+      tools: Array<{ name: string; parameters: { properties: Record<string, Record<string, unknown>> } }>;
+    };
+    const properties = body.tools[0]?.parameters.properties;
+
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0]?.name).toBe("Artifact");
+    expect(properties.field.pattern).toBeUndefined();
+    expect(properties.field.type).toBe("string");
+    // Lookaheads compile under Python `re`, so only the incompatible pattern is dropped.
+    expect(properties.collection.pattern).toBe(collection);
+  });
+
+  test("leaves a closed regex-keyed object alone on the codex forward path", () => {
+    // Dropping this matcher would leave `additionalProperties: false` forbidding every key it
+    // covered, and `minProperties: 1` would make the object admit nothing — a dictionary tool
+    // silently reduced to an empty-object-only tool. The schema goes out as written instead, so
+    // a destination that compiles ECMA regexes still works and one that cannot names the regex.
+    const parameters = {
+      type: "object",
+      patternProperties: { "^\\p{L}+$": { type: "string" } },
+      additionalProperties: false,
+      minProperties: 1,
+    };
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "test-model",
+      context: { messages: [] },
+      stream: true,
+      options: {},
+      _rawBody: {
+        model: "test-model",
+        input: [],
+        tools: [{ type: "function", name: "Label", parameters }],
+      },
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body) as {
+      tools: Array<{ name: string; parameters: unknown }>;
+    };
+
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0]?.parameters).toEqual(parameters);
+  });
+
+
+  test.each(["allOf", "not", "oneOf"] as const)("Responses wire preserves composed %s argument constraints", kind => {
+    const matcher = "^\\p{L}+$";
+    const parameters = kind === "allOf" ? {
+      type: "object", minProperties: 1, unevaluatedProperties: false,
+      allOf: [{ patternProperties: { [matcher]: { type: "string" } } }],
+    } : kind === "not" ? {
+      type: "object", required: ["value"],
+      properties: { value: { not: { type: "string", pattern: matcher } } },
+    } : {
+      type: "object", required: ["value"],
+      properties: { value: { oneOf: [{ type: "string", pattern: matcher }, { const: "123" }] } },
+    };
+    const original = JSON.stringify(parameters);
+    // Witnesses are accepted before normalization: {name:"ok"} evaluates its sole key in
+    // allOf; {value:"123"} fails the letter pattern, satisfying not or exactly one branch.
+    expect(new RegExp(matcher, "u").test("name")).toBe(true);
+    expect(new RegExp(matcher, "u").test("123")).toBe(false);
+
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "test-model", context: { messages: [] }, stream: true, options: {},
+      _rawBody: { model: "test-model", input: [], tools: [{ type: "function", name: "Composed", parameters }] },
+    }, { headers: new Headers() });
+    const wire = JSON.parse(request.body) as { tools: Array<{ parameters: unknown }> };
+    expect(wire.tools).toHaveLength(1);
+    expect(wire.tools[0].parameters).toEqual(JSON.parse(original));
+    expect(JSON.stringify(parameters)).toBe(original);
   });
 
   test("model reasoning-summary opt-out strips unsupported delivery fields (#323)", () => {

@@ -31,8 +31,8 @@ describe("Codex config injection", () => {
   });
 
   describe("authless Codex Desktop opt-in (#1107)", () => {
-    test("default target on loopback stays Design B and byte-identical", () => {
-      const target = standaloneCodexRoutingTarget(10100, {});
+    test.each([undefined, false])("disabled preference %s on loopback stays Design B and byte-identical", (codexDesktopAuthless) => {
+      const target = standaloneCodexRoutingTarget(10100, { codexDesktopAuthless });
       expect(target.desktopAuthless).toBeUndefined();
       expect(buildProfileFile(target, null)).toBe(buildProfileFile(10100, null));
       expect(buildProviderTableBlock(target)).toContain("requires_openai_auth = true");
@@ -67,6 +67,56 @@ describe("Codex config injection", () => {
         unauthenticatedLoopbackListener: { enabled: true, port: 10199 },
       });
       expect(target).toMatchObject({ baseUrl: "http://127.0.0.1:10199/v1", desktopAuthless: true });
+    });
+  });
+
+  describe("Codex client compaction opt-in (#3978)", () => {
+    test.each([undefined, false])("disabled preference %s keeps authenticated loopback on Design B", (codexClientCompaction) => {
+      const target = standaloneCodexRoutingTarget(10100, { codexClientCompaction });
+      expect(target.clientCompaction).toBeUndefined();
+      expect(buildProfileFile(target, null)).toBe(buildProfileFile(10100, null));
+    });
+
+    test("loopback opt-in selects the dedicated provider without disabling ChatGPT auth", () => {
+      const target = standaloneCodexRoutingTarget(10100, { codexClientCompaction: true });
+      expect(target).toMatchObject({
+        requiresAdmissionToken: false,
+        clientCompaction: true,
+      });
+      expect(target.desktopAuthless).toBeUndefined();
+
+      const profile = buildProfileFile(target, "/tmp/opencodex-catalog.json");
+      expect(profile).toContain('model_provider = "opencodex"');
+      expect(profile).toContain("requires_openai_auth = true");
+      // The reference profile documents the provider table only. The root override that keeps
+      // existing `openai`-tagged threads on the proxy is a config.toml global, not a profile
+      // key, so the injected config carries it and this file does not.
+      expect(profile).not.toContain("openai_base_url");
+      // The dedicated provider-table form cannot carry the realtime voice
+      // sideband (it needs the admission-token header): opting in must not
+      // inject experimental_realtime_ws_base_url.
+      expect(profile).not.toContain("experimental_realtime_ws_base_url");
+    });
+
+    test("authless remains the stronger provider-table policy when both preferences are enabled", () => {
+      const target = standaloneCodexRoutingTarget(10100, {
+        codexClientCompaction: true,
+        codexDesktopAuthless: true,
+      });
+      const profile = buildProfileFile(target, null);
+      expect(profile).toContain('model_provider = "opencodex"');
+      expect(profile).toContain("requires_openai_auth = false");
+    });
+
+    test("non-loopback admission remains token-protected", () => {
+      const target = standaloneCodexRoutingTarget(10100, {
+        hostname: "192.168.1.20",
+        codexClientCompaction: true,
+      });
+      expect(target.requiresAdmissionToken).toBe(true);
+      const profile = buildProfileFile(target, null);
+      expect(profile).toContain('env_key = "OPENCODEX_API_AUTH_TOKEN"');
+      expect(profile).toContain("requires_openai_auth = true");
     });
   });
 

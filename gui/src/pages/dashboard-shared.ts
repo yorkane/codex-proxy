@@ -48,6 +48,9 @@ export interface ProviderInfo { name: string; adapter: string; baseUrl: string; 
 export interface ModelInfo { id: string; provider: string; namespaced: string; owned_by?: string; reasoningEfforts?: string[] }
 export interface SettingsData {
   codexAutoStart: boolean;
+  codexDesktopAuthless?: boolean;
+  codexClientCompaction?: boolean;
+  catalogRefreshPending?: boolean;
   /** Whether a login may open a browser on the machine running the proxy. */
  oauthOpenBrowser?: boolean;
   /** Whether admin-token auth on /api/* is disabled (loopback only). */
@@ -130,6 +133,7 @@ export type Installer = "npm" | "bun" | "source";
 export type UpdateJobStatus = "running" | "restarting" | "succeeded" | "failed";
 export interface SyncResult {
   ok: boolean;
+  status?: "applied" | "skipped" | "catalog-only" | "refused";
   added: number;
   catalogPath: string | null;
   catalogExists: boolean;

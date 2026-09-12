@@ -33,6 +33,27 @@ ocx agent sidecar web --list
 ocx agent sidecar web --model gpt-5.6-luna
 ```
 
+### `ocx effort [status|set|clear]`
+
+Inspect or change main and subagent reasoning-effort caps through the live proxy, or the local
+configuration when no proxy is available. Cap values are `low`, `medium`, `high`, `xhigh`, `max`,
+and `ultra`; `-` clears the selected cap. `none` and `minimal` are not cap levels and are rejected
+before probing the proxy or submitting an update, including when another option in the same command is valid.
+They remain valid for `--injection`, which sets the separate injection effort rather than a cap.
+
+```bash
+ocx effort status --json
+ocx effort set --main high --subagent low
+ocx effort set --subagent -
+```
+
+Status preserves existing stored/runtime cap values and reports unsupported values in `warnings`
+(an empty array when none are unsupported). The same warnings appear in human output and name the
+field that is ignored with a correction command. Status never repairs or rewrites those values.
+An ignored subagent field does not remove a valid main cap. `ocx effort clear` clears both caps
+while retaining the separate injection-effort setting. See [Sub-agent surfaces](/guides/sub-agent-surface/)
+for the request surfaces where caps apply.
+
 ### `ocx v2 <status|on|off|mode <v1|default|v2>|keep-native-v1 <on|off>|threads <n>|mode-hint <text|--clear>>`
 
 Manage the Codex `multi_agent_v2` feature flag and the three-state multi-agent surface mode.
@@ -111,13 +132,20 @@ Inspect proxy requests, usage, storage, memory, and debug data. The direct alias
 | Alias | Equivalent resource |
 | --- | --- |
 | `ocx logs [filters] [--follow] [--json|--jsonl]` | `ocx observe logs` |
-| `ocx usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>] [--provider <name>] [--model <id>] [--json]` | `ocx observe usage` |
+| `ocx usage [--range <today|1d|7d|30d|all>] [--since <timestamp> --until <timestamp>] [--surface <all|codex|claude|grok>] [--provider <name>] [--model <id>] [--json]` | `ocx observe usage` |
 | `ocx storage [--json]` | `ocx observe storage` |
 | `ocx memory [--json]` | `ocx observe memory` |
 
 ```bash
 ocx observe usage --range 30d --json
+ocx usage --since 2026-09-01T09:00:00Z --until 2026-09-01T10:59:59.999Z --json
 ```
+
+`--since` and `--until` must be supplied together. They accept integer epoch milliseconds or
+full ISO datetimes with an explicit timezone, include both endpoints, and override `--range`.
+Invalid or reversed bounds fail before the request. Human output prints the requested interval;
+`--json` includes `customWindow`, `since`, and `until`. Existing surface/provider/model filters
+still apply. These commands query the running proxy; they do not provide offline reports.
 
 `--range today` (alias `1d`) reports the current local day. `--provider` and
 `--model` narrow the report to one upstream target — distinct from

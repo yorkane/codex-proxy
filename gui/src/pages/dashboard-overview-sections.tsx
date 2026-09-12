@@ -163,7 +163,7 @@ export function DashboardInjectionPanel({ d }: { apiBase: string; d: Dash }) {
 
 export function DashboardMaintenancePanel({ d }: { d: Dash }) {
   const {
-    t, runSync, syncing, updateTriggerRef, openUpdateDialog, updateLoading, updateOpen,
+    t, runSync, syncing, settingsSaving, updateTriggerRef, openUpdateDialog, updateLoading, updateOpen,
     syncResult, syncError, updateJob, reconnecting, clearSyncFeedback,
   } = d;
   const syncHoldsWarning = !!syncResult && (
@@ -211,7 +211,7 @@ export function DashboardMaintenancePanel({ d }: { d: Dash }) {
             <div className="muted text-control dash-sync-hint">{t("dash.syncModelsHint")}</div>
           </div>
           <div className="maintenance-actions">
-            <button type="button" className="btn btn-ghost btn-sm" onClick={handleRunSync} disabled={syncing}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={handleRunSync} disabled={syncing || settingsSaving}>
               <IconRefresh className={syncing ? "spin-icon" : undefined} /> {syncing ? t("dash.syncing") : t("dash.syncRun")}
             </button>
             <button
@@ -438,7 +438,8 @@ function VisionAdvancedPopover({ t, open, triggerRef, onClose, maxValue, maxInva
 
 export function DashboardSidecarPanels({ d }: { d: Dash }) {
   const {
-   t, settings, settingsSaving, toggleCodexAutoStart,
+    t, settings, settingsSaving, syncing, toggleCodexAutoStart, toggleCodexDesktopAuthless,
+    toggleCodexClientCompaction,
     toggleManagementAuth,
     toggleDisableOriginCheck,
     sidecar, sidecarSaving, sidecarModels, visionModels, models, saveSidecar,
@@ -498,7 +499,7 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
             type="button"
             className={`switch ${settings?.codexAutoStart ?? true ? "on" : ""}`}
             onClick={toggleCodexAutoStart}
-            disabled={!settings || settingsSaving}
+            disabled={!settings || settingsSaving || syncing}
             aria-label={t("dash.codexAutoStart")}
             aria-pressed={settings?.codexAutoStart ?? true}
          >
@@ -537,6 +538,46 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
             disabled={!settings || settingsSaving}
             aria-label={t("dash.disableOriginCheck")}
             aria-pressed={!!settings?.disableOriginCheck}
+          >
+            <span className="knob" />
+          </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="spread">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="font-semibold">{t("dash.codexDesktopAuthless")}</div>
+            <div className="muted setting-hint">{t("dash.codexDesktopAuthlessHint")}</div>
+            {settings?.catalogRefreshPending && <div className="muted setting-hint" role="status">{t("codexAuth.catalogRefreshPending")}</div>}
+          </div>
+          <button
+            type="button"
+            className={`switch ${settings?.codexDesktopAuthless ?? false ? "on" : ""}`}
+            onClick={toggleCodexDesktopAuthless}
+            disabled={!settings || settingsSaving || syncing}
+            aria-label={t("dash.codexDesktopAuthless")}
+            aria-pressed={settings?.codexDesktopAuthless ?? false}
+          >
+            <span className="knob" />
+          </button>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="spread">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="font-semibold">{t("dash.codexClientCompaction")}</div>
+            <div className="muted setting-hint">{t("dash.codexClientCompactionHint")}</div>
+            {settings?.catalogRefreshPending && <div className="muted setting-hint" role="status">{t("codexAuth.catalogRefreshPending")}</div>}
+          </div>
+          <button
+            type="button"
+            className={`switch ${settings?.codexClientCompaction ?? false ? "on" : ""}`}
+            onClick={toggleCodexClientCompaction}
+            disabled={!settings || settingsSaving || syncing}
+            aria-label={t("dash.codexClientCompaction")}
+            aria-pressed={settings?.codexClientCompaction ?? false}
           >
             <span className="knob" />
           </button>

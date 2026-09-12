@@ -335,6 +335,21 @@ des indications propres au fournisseur ainsi qu'un `Retry-After` synthétique ; 
 reste prioritaire. L'attente et la nouvelle tentative avec la même clé restent facultatives et s'activent avec
 [`retryOn429`](/fr/reference/configuration/).
 
+**Le niveau sans clé `opencode-free` est actuellement fermé aux clients tiers.** Zen refuse toute requête
+qui arrive sans en-tête `x-opencode-session` et répond avec le type d'erreur `MissingSessionID` et le message
+« OpenCode's free tier can only be used in OpenCode ». Le contrôle porte uniquement sur la présence de
+l'en-tête : un proxy pourrait donc le franchir en inventant une valeur, ce que opencodex ne fait pas.
+Fabriquer un identifiant de session et un User-Agent versionné `opencode/<version>` revient à se déclarer
+client OpenCode, alors qu'OpenCode ne publie aucun contrat d'intégration tierce pour ce niveau sans clé ;
+une réponse HTTP 200 obtenue ainsi est un contrôle d'admission contourné, pas une autorisation. opencodex
+signale donc la restriction au lieu de la contourner : une requête vers `opencode-free` renvoie une erreur
+qui explique le blocage en amont.
+
+La voie prise en charge vers les mêmes modèles est le fournisseur **`opencode-zen`** avec une clé d'API
+OpenCode Zen obtenue sur [opencode.ai/auth](https://opencode.ai/auth). Si OpenCode publie plus tard un accès
+tiers pour le niveau sans clé, opencodex pourra le suivre ; d'ici là, le préréglage sert à documenter la
+restriction. Conditions en amont : [opencode.ai/docs/zen](https://opencode.ai/docs/zen/).
+
 La plupart utilisent l'adaptateur `openai-chat` avec une clé Bearer ; quelques fournisseurs qui n'exposent
 qu'un point de terminaison compatible Anthropic, comme **Xiaomi MiMo**, emploient l'adaptateur `anthropic`
 (`x-api-key`). Volcengine Agent Plan utilise son point de terminaison Responses natif par `openai-responses`.
@@ -543,8 +558,8 @@ flux d'appareil contre un jeton d'API Copilot de courte durée, et non contre un
 reste une passerelle à clé ou jeton d'abonnement sur son point de terminaison compatible OpenAI.
 **Cloudflare AI Gateway** exige que les identifiants de votre compte et de votre passerelle figurent dans l'URL.
 
-Copilot présente un catalogue qui utilise plusieurs protocoles : sa famille GPT-5 (`gpt-5.3-codex`, `gpt-5.4`,
-`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) rejette
+Copilot présente un catalogue qui utilise plusieurs protocoles : ces modèles (`gpt-5.3-codex`, `gpt-5.4`,
+`gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) rejettent
 `/chat/completions` pour le trafic d'agent. opencodex route donc ces modèles sur l'API Responses par défaut,
 tandis que tous les autres modèles Copilot restent sur Chat Completions. L'ordre de priorité est le suivant :
 verrouillage explicite du protocole → entrée [`modelAdapters`](/fr/reference/configuration/providers/) définie

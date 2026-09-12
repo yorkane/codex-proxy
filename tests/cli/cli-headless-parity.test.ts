@@ -13,11 +13,29 @@ import { handleProviderRuntimeCommand } from "../../src/cli/provider-runtime";
 import { providerQuotaLine } from "../../src/cli/account-extended";
 import { formatAccountTable } from "../../src/cli/account";
 import { handleConnectCommand } from "../../src/cli/connect";
+import { handleSystemCommand } from "../../src/cli/system-command";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 
 type Recorded = { path: string; method: string; body: unknown };
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+
+describe("ocx system settings client compaction", () => {
+  test("persists the explicit boolean through the shared settings endpoint", async () => {
+    const { requests, deps } = fakeRuntime((_req, body) => ({ ok: true, ...body }));
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(await handleSystemCommand(["settings", "--client-compaction", "on"], deps)).toBe(0);
+      expect(requests).toEqual([{
+        path: "/api/settings",
+        method: "PUT",
+        body: { codexClientCompaction: true },
+      }]);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
 
 describe("ocx agent sidecar --list (#2188)", () => {
   test("web --list prints the server's webSearchModels — the GUI's exact list", async () => {
@@ -608,6 +626,45 @@ describe("headless GUI parity CLI", () => {
     expect(await handleGrokCommand(["include", "a", "--json"], runtime.deps)).toBe(0);
     expect(runtime.requests[1]).toEqual({ path: "/api/grok/selection", method: "PUT", body: { excluded: ["b"] } });
   });
+
+  for (const plan of ["pro", "free", "unknown"] as const) {
+    for (const aiDirPresent of [true, false]) {
+      test(`Raycast status keeps plan ${plan} separate with aiDirPresent=${aiDirPresent}`, async () => {
+        const payload = {
+          clientId: "raycast",
+          installed: aiDirPresent,
+          raycast: { plan, aiDirPresent },
+        };
+        const runtime = fakeRuntime(() => payload);
+        const logSpy = spyOn(console, "log").mockImplementation(() => {});
+        try {
+          expect(await handleClientIntegrationCommand(["status", "--client", "raycast"], runtime.deps)).toBe(0);
+          const out = logSpy.mock.calls.map(call => String(call[0])).join("\n");
+          const lines = out.split("\n");
+          expect(lines.filter(line => line.startsWith("plan:"))).toEqual([`plan: ${plan}`]);
+          expect(out).not.toContain("raycast.");
+          if (aiDirPresent) {
+            expect(out).not.toContain("Reveal Providers Config");
+          } else {
+            expect(lines).toContain('On macOS or Windows, open Raycast → Settings → AI → "Reveal Providers Config" once so the ai folder exists.');
+          }
+
+          logSpy.mockClear();
+          expect(await handleClientIntegrationCommand(["status", "--client", "raycast", "--json"], runtime.deps)).toBe(0);
+          expect(logSpy.mock.calls).toHaveLength(1);
+          const jsonOut = String(logSpy.mock.calls[0]![0]);
+          expect(JSON.parse(jsonOut)).toEqual(payload);
+          expect(jsonOut).not.toContain("Reveal Providers Config");
+          expect(runtime.requests).toEqual([
+            { path: "/api/client-integrations/raycast", method: "GET", body: null },
+            { path: "/api/client-integrations/raycast", method: "GET", body: null },
+          ]);
+        } finally {
+          logSpy.mockRestore();
+        }
+      });
+    }
+  }
 
   test("client integration toggles hit the exact management routes", async () => {
     const runtime = fakeRuntime();

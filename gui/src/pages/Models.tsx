@@ -1,9 +1,11 @@
 import { CodexStaleBanner } from "../components/codex-stale-banner";
+import ModelPickerOrderEditor from "../components/ModelPickerOrderEditor";
 import ModelDisplayNameDialog from "../components/ModelDisplayNameDialog";
+import ModelPriceDialog from "../components/ModelPriceDialog";
 import { fetchCodexAppServerState } from "../codex-app-server-state";
 import type { AppServerStateOutcome } from "../codex-app-server-state";
 import { useCodexRestart } from "../use-codex-restart";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Switch, Notice, EmptyState, Select, Tooltip } from "../ui";
 import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil } from "../icons";
 import { useT } from "../i18n/shared";
@@ -17,7 +19,7 @@ import { setClientResourceData } from "../client-resource";
 import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
 import {
   isModelPickerUsage, isPickerOrderSaved, isPickerOrderSettings, modelPickerOrder, modelPickerOrderMode,
-  type ModelPickerOrderMode, type PickerOrderSettings, type ModelPickerUsage,
+  type ModelPickerOrderMode, type PickerOrderSettings, type PickerOrderSaved, type ModelPickerUsage,
 } from "../model-picker-order";
 import { startVisibilityPoll } from "../visibility-poll";
 import { useDataSurface } from "../data-surface";
@@ -64,12 +66,15 @@ import {
   THREAD_OPTIONS,
   writeCollapsedProviders,
   discoveryFailureLabel,
+  filterFreeModelRows,
+  freeOnlyInForce,
+  modelPricingKnown,
   REASONING_EFFORT_LEVELS,
   type ModelRow,
   type ProviderContextCapsResponse,
   type V2Status,
 } from "./models-shared";
-import { EmptyProviderHint } from "./models-provider-hints";
+import { DiscoveryDependencyHint, EmptyProviderHint } from "./models-provider-hints";
 
 type CachedModelsPage = {
   models: ModelRow[];
@@ -236,6 +241,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [disabled, setDisabled] = useState<Set<string>>(() => new Set(cached?.disabled ?? []));
   const [selectedModels, setSelectedModels] = useState<ProviderModelMap | null>(() => cached?.selectedModels ?? null);
   const [search, setSearch] = useState<Record<string, string>>({});
+  // Per-provider Free-only narrowing (#3666). Session UX, not persisted config: it answers
+  // "what can I run for nothing right now", which is a question about this sitting, and the
+  // provider list it applies to changes underneath a stored value.
+  const [freeOnly, setFreeOnly] = useState<Record<string, boolean>>({});
   const [limit, setLimit] = useState<Record<string, number>>({});
   const [contextCaps, setContextCaps] = useState<Record<string, number>>(() => cached?.contextCaps ?? {});
   const [contextCapValues, setContextCapValues] = useState<Record<string, number>>(() => cached?.contextCapValues ?? {});
@@ -248,6 +257,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [pickerDraft, setPickerDraft] = useState<ModelPickerOrderMode | null>(null);
   const [pickerBusy, setPickerBusy] = useState(false);
   const pickerFlight = useRef<BoundedFetch | null>(null);
+  const pickerGeneration = useRef(0);
   const pickerResource = useDataSurface<PickerOrderSettings>(
     pickerCacheKey, [apiBase],
     useCallback(async (signal: AbortSignal) => {
@@ -264,16 +274,22 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const pickerMode = pickerDraft ?? modelPickerOrderMode(
     pickerSettings?.pickerAvailable ?? [], pickerSettings?.pickerOrder ?? [], pickerSettings?.pickerOrderMode,
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
+    pickerGeneration.current++;
     setPickerDraft(null);
     setPickerBusy(false);
     return () => {
+      pickerGeneration.current++;
       pickerFlight.current?.controller.abort();
       pickerFlight.current?.clear();
       pickerFlight.current = null;
       cancelAppServerRead();
     };
   }, [apiBase, catalogActive, cancelAppServerRead]);
+  useLayoutEffect(() => {
+    // Pin inferred Custom before any late GET can switch mode and unmount its draft.
+    if (catalogActive && pickerDraft === null && pickerMode === "custom") setPickerDraft("custom");
+  }, [catalogActive, pickerDraft, pickerMode]);
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [providerCapCustomOpen, setProviderCapCustomOpen] = useState<Record<string, boolean>>({});
@@ -289,11 +305,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   // second identical value bails out of React's state diff, so the old timer would dismiss
   // the new toast early. Every publish bumps the generation.
   const [feedbackGen, setFeedbackGen] = useState(0);
-  const publishFeedback = (nextOk: boolean, message: string) => {
+  const publishFeedback = useCallback((nextOk: boolean, message: string) => {
     setOk(nextOk);
     setStatus(message);
     setFeedbackGen(g => g + 1);
-  };
+  }, []);
   // Transient action feedback as a fixed toast: appearing or auto-clearing it never shifts
   // the workspace below (the old inline Notice pushed the whole model grid down by its
   // height on every apply). The timer itself just clears the status again.
@@ -326,6 +342,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [v2HelpOpen, setV2HelpOpen] = useState(false);
   const [customModalOpen, setCustomModalOpen] = useState(false);
   const [displayNameModel, setDisplayNameModel] = useState<ModelRow | null>(null);
+  const [priceModel, setPriceModel] = useState<ModelRow | null>(null);
+  const priceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [displayNameSaving, setDisplayNameSaving] = useState(false);
   const [displayNameRequestError, setDisplayNameRequestError] = useState<string | null>(null);
   const [displayNameRecovery, setDisplayNameRecovery] = useState<{
@@ -655,7 +673,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         setDisplayNameSaving(false);
       }
     }
-  }, [apiBase, displayNameModel, displayNameRecovery, finishDisplayNameEdit, load, t]);
+  }, [apiBase, displayNameModel, displayNameRecovery, finishDisplayNameEdit, load, publishFeedback, t]);
 
   // V2 controls must not wait on the models catalog (live discovery can be slow).
   // (Shadow call intercept moved to the standalone #shadow page.)
@@ -1341,7 +1359,26 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       model.native === true,
       disabled.has(model.namespaced),
     );
-    const activeCount = rows.filter(isVisible).length;
+    const freeOnlyOn = freeOnly[provider] === true;
+    // The control is offered only where the provider actually published per-token prices.
+    // A provider whose rows are all unclassified — Ollama, a static catalog, anything with no
+    // pricing in /models — would otherwise get a switch whose only possible effect is to empty
+    // the list, which reads as a bug rather than as "this provider does not say".
+    const pricingKnown = modelPricingKnown(rows);
+    // Free-only narrows BEFORE the header counts, search, the enabled-first sort, and the PAGE
+    // slice below. Filtering after the slice would leave free models stranded behind Show more
+    // on a 200-row OpenRouter list, which is the exact case the issue reports.
+    //
+    // `scoped` is the set every count and bulk action reads. Search is deliberately NOT part of
+    // it: the search box has always been a transient find-as-you-type that leaves the counts
+    // alone, while Free only is a narrowing the user holds on, so a header still reading the
+    // whole provider would claim more models than the list under it shows.
+    // Gated on `pricingKnown` through `freeOnlyInForce`: the switch below is hidden when the
+    // provider stops publishing prices, so a narrowing left on from an earlier render must lapse
+    // with it rather than empty the list behind a control that is no longer there.
+    const freeOnlyActive = freeOnlyInForce(freeOnlyOn, rows);
+    const scoped = filterFreeModelRows(rows, freeOnlyActive);
+    const activeCount = scoped.filter(isVisible).length;
     const recentForProvider = modelDiscovery?.recentArrivals[provider] ?? [];
     const recentIds = new Set(recentForProvider.map(row => row.id));
     const capOn = contextCaps[provider] !== undefined;
@@ -1354,7 +1391,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const capOptionSet = group.nativeProviderGroup ? NATIVE_CAP_OPTION_SET : CAP_OPTION_SET;
     const discoveryFailure = liveModels && discovery?.status === "failed" ? discovery : undefined;
     const q = (search[provider] ?? "").trim().toLowerCase();
-    const filtered = q ? rows.filter(m => m.id.toLowerCase().includes(q)) : rows;
+    const filtered = q ? scoped.filter(m => m.id.toLowerCase().includes(q)) : scoped;
     // Display-only: enabled models float to the top of each provider group so they
     // stay findable in long lists. The sort is stable, so the server order is kept
     // inside each partition, and this does not affect the picker order above
@@ -1365,16 +1402,20 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const remaining = filtered.length - visible.length;
      // An empty provider has nothing to send: keep both bulk buttons inert so we never PUT an
      // empty target list (the management API rejects it with 400).
-     const hasRows = rows.length > 0;
+     // Bulk follows the same scoped set as the counts it sits beside: with Free only on, an
+     // "All on" that enabled the 197 paid rows the header is not counting would be the exact
+     // surprise the header fix exists to prevent. Pending stays keyed to the whole provider,
+     // because initial discovery is a provider state that no display filter can clear.
+     const hasRows = scoped.length > 0;
      const selectionPending = rows.some(model => model.initialSelectionPending);
-     const allOn = !hasRows || rows.every(isVisible);
-     const allOff = !hasRows || rows.every(m => !isVisible(m));
+     const allOn = !hasRows || scoped.every(isVisible);
+     const allOff = !hasRows || scoped.every(m => !isVisible(m));
      const bulkToggle = (enable: boolean) => {
        if (!hasRows || selectionPending) return;
        void applyVisibility(
          "provider",
          provider,
-         rows.map(m => ({ id: m.id, native: m.native === true })),
+         scoped.map(m => ({ id: m.id, native: m.native === true })),
          enable,
        );
      };
@@ -1401,7 +1442,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              {t("models.discoveryFailedBadge")}
            </span>
          )}
-          <span className="muted mono text-label">{t("models.active", { active: activeCount, total: rows.length })}</span>
+          <span className="muted mono text-label">{t("models.active", { active: activeCount, total: scoped.length })}</span>
           {recentForProvider.length > 0 && <span className="models-chip mono text-caption">{t("models.newCount", { count: recentForProvider.length })}</span>}
           </button>
            <div className="row models-provider-actions">
@@ -1595,6 +1636,25 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
             {rows.length === 0 && (
               <EmptyProviderHint liveModels={liveModels} discovery={discovery} showFailureBadge={false} />
             )}
+            {/* A group WITH rows and a failed fetch got the amber header badge and nothing that
+                explains the dependency; #4075 is the reporter having to discover on their own
+                that turning discovery off is what makes a manually added model usable. */}
+            {rows.length > 0 && discoveryFailure && <DiscoveryDependencyHint />}
+            {pricingKnown && (
+              <div className="row models-provider-hint">
+                <Switch
+                  on={freeOnlyOn}
+                  onClick={() => setFreeOnly(prev => ({ ...prev, [provider]: !freeOnlyOn }))}
+                  label={t("models.freeOnly")}
+                  showLabel
+                />
+              </div>
+            )}
+            {/* Reads `scoped`, not `filtered`: with a search term that matches nothing, the
+                honest message is the search one, not "this provider has no free models". */}
+            {freeOnlyActive && scoped.length === 0 && rows.length > 0 && (
+              <p className="muted text-label" role="status">{t("models.noFreeMatch")}</p>
+            )}
             {rows.length > PAGE / 2 && (
               <input
                 className="input"
@@ -1620,7 +1680,15 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                  >
                    <div className="row models-model-row">
                      <Switch on={!off} onClick={() => void applyVisibility("models", provider, [{ id: m.id, native: m.native === true }], off)} disabled={busy || m.initialSelectionPending} label={m.native ? m.id : m.namespaced} />
-                     {m.initialSelectionPending && <span className="models-chip muted" role="status">{t("models.initialSelectionPending")}</span>}
+                    {m.initialSelectionPending && <span className="models-chip muted" role="status">{t("models.initialSelectionPending")}</span>}
+                    {/* #1711: listed and selectable, but every usable target is out of credit.
+                        Not a visibility change and not the operator's disable flag — the row is
+                        still offered, which is what the issue asks for. */}
+                    {m.quotaInactiveReason === "no_credit" && (
+                      <span className="models-chip muted" role="status" title={t("models.inactiveNoCreditHint")}>
+                        {t("models.inactiveNoCredit")}
+                      </span>
+                    )}
                      {aliases.models[provider]?.[m.id] && <strong className="mono text-control">{aliases.models[provider][m.id].alias}</strong>}
                      <span className="models-model-identity">
                        <code className="mono text-control" style={{ color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{m.native ? modelLabel(m.id) : m.namespaced}</code>
@@ -1651,6 +1719,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                        <span className="models-chip muted mono text-caption">
                          {t("models.customBadge")}
                        </span>
+                     )}
+                     {!m.native && m.provider !== "combo" && (
+                       <>
+                         {m.manualPricing === true && <span className="models-chip muted text-caption">{t("pricing.override.badge")}</span>}
+                         <button
+                           type="button"
+                           className="btn btn-ghost btn-sm text-caption models-display-name-trigger"
+                           aria-haspopup="dialog"
+                           aria-label={t("pricing.override.actionLabel", { model: m.namespaced })}
+                           onClick={event => {
+                             priceTriggerRef.current = event.currentTarget;
+                             setPriceModel(m);
+                           }}
+                         >
+                           {t("pricing.override.action")}
+                         </button>
+                       </>
                      )}
                      {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
                      {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
@@ -1761,49 +1846,61 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     ? groups.filter(group => group.provider === selectedProvider)
     : groups;
 
+  const acceptPickerOrder = (data: PickerOrderSaved & { catalogRefresh?: unknown }, custom = false) => {
+    // A receipt proves only the saved fields. No old chosen/available snapshot is promoted.
+    const next: PickerOrderSettings = { pickerOrder: data.pickerOrder, pickerOrderMode: data.pickerOrderMode, pickerAvailable: [] };
+    setClientResourceData(pickerCacheKey, next);
+    writeSessionListCache(pickerCacheKey, next);
+    if (custom) setPickerDraft("custom");
+    pickerResource.refresh();
+    const refresh = data.catalogRefresh;
+    const converged = refresh !== null && typeof refresh === "object"
+      && "status" in refresh && refresh.status === "committed"
+      && "degraded" in refresh && refresh.degraded === false;
+    publishFeedback(converged, t(converged ? "models.pickerOrder.saved" : "models.pickerOrder.pending"));
+    void reloadAppServerState();
+  };
+
   const savePickerOrder = async () => {
     if (pickerFlight.current || !pickerSettings || pickerResource.state.showError || pickerMode === "custom") return;
+    const owner = pickerGeneration.current;
     const mode = pickerMode;
     const available = pickerSettings.pickerAvailable;
     const bounded = createBoundedFetch(15_000);
     pickerFlight.current = bounded;
     setPickerBusy(true);
+    const owns = () => pickerGeneration.current === owner && pickerFlight.current === bounded;
+    const current = () => owns() && !bounded.signal.aborted;
     try {
       let usage: ModelPickerUsage[] = [];
       if (mode === "most-used") {
         const response = await fetch(`${apiBase}/api/usage?range=all&surface=all`, { signal: bounded.signal });
+        if (!current()) return;
         const payload = await readJsonOrThrow<{ models?: unknown }>(response, t("models.pickerOrder.usageFailed"));
+        if (!current()) return;
         if (!isModelPickerUsage(payload?.models)) throw new Error(t("models.pickerOrder.usageFailed"));
         usage = payload.models;
       }
+      if (!current()) return;
       const order = modelPickerOrder(mode, available, usage, models);
       const response = await fetch(`${apiBase}/api/subagent-models`, {
         method: "PUT", headers: { "Content-Type": "application/json" }, signal: bounded.signal,
         body: JSON.stringify({ pickerOrder: order, pickerOrderMode: mode === "default" ? null : mode }),
       });
+      if (!current()) return;
       const data = await readJsonOrThrow<unknown>(response, t("models.saveFailed"));
       if (!isPickerOrderSaved(data) || !("ok" in data) || data.ok !== true) throw new Error(t("models.saveFailed"));
-      if (bounded.signal.aborted || pickerFlight.current !== bounded) return;
-      const next = { ...pickerSettings, pickerOrder: data.pickerOrder, pickerOrderMode: data.pickerOrderMode };
-      // This aborts an older GET and advances the shared resource generation.
-      setClientResourceData(pickerCacheKey, next);
-      writeSessionListCache(pickerCacheKey, next);
+      if (!current()) return;
+      acceptPickerOrder({ pickerOrder: data.pickerOrder, pickerOrderMode: data.pickerOrderMode,
+        catalogRefresh: "catalogRefresh" in data ? data.catalogRefresh : undefined });
       setPickerDraft(null);
-
-      const refresh = "catalogRefresh" in data ? data.catalogRefresh : undefined;
-      const converged = refresh !== null && typeof refresh === "object"
-        && "status" in refresh && refresh.status === "committed"
-        && "degraded" in refresh && refresh.degraded === false;
-      publishFeedback(converged, t(converged ? "models.pickerOrder.saved" : "models.pickerOrder.pending"));
-      // Durable save is already accepted. Observational failure must not undo it.
-      void reloadAppServerState();
     } catch (error) {
-      if (pickerFlight.current === bounded) {
+      if (owns()) {
         publishFeedback(false, error instanceof Error ? error.message : t("models.networkError"));
       }
     } finally {
       bounded.clear();
-      if (pickerFlight.current === bounded) { pickerFlight.current = null; setPickerBusy(false); }
+      if (owns()) { pickerFlight.current = null; setPickerBusy(false); }
     }
   };
 
@@ -1977,7 +2074,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
             { value: "alphabetical", label: t("models.pickerOrder.alphabetical") },
             { value: "provider", label: t("models.pickerOrder.provider") },
             { value: "most-used", label: t("models.pickerOrder.mostUsed") },
-            ...(pickerMode === "custom" ? [{ value: "custom", label: t("models.pickerOrder.custom") }] : []),
+            { value: "custom", label: t("models.pickerOrder.custom") },
           ]}
           onChange={value => setPickerDraft(value as ModelPickerOrderMode)}
           disabled={pickerBusy || !pickerSettings || pickerResource.state.showError}
@@ -1996,6 +2093,9 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         </>}
         <span className="muted text-label leading-body">{t("models.pickerOrder.hint")}</span>
       </div>
+      {pickerMode === "custom" && <ModelPickerOrderEditor key={apiBase} apiBase={apiBase} active={catalogActive}
+        identities={models} onBusyChange={setPickerBusy} onAccepted={data => acceptPickerOrder(data, true)} />}
+
 
       {(() => {
         const customCount = models.filter(m => m.custom).length;
@@ -2601,11 +2701,27 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           saving={displayNameSaving}
           requestError={displayNameRequestError}
           currentNamePending={displayNameCurrentPending}
+          mutationOutcomeUnknown={displayNameRecovery?.confirmed === false}
           onRetry={displayNameRecovery ? () => void saveDisplayName(displayNameRecovery.value) : undefined}
           onEdit={() => setDisplayNameRecovery(null)}
           onSave={value => void saveDisplayName(value)}
           onReset={() => void saveDisplayName(null)}
           onClose={closeDisplayNameEdit}
+        />
+      )}
+      {priceModel && (
+        <ModelPriceDialog
+          key={`${apiBase}/${priceModel.namespaced}`}
+          model={priceModel}
+          apiBase={apiBase}
+          onRefresh={signal => load(true, signal)}
+          onClose={() => {
+            const trigger = priceTriggerRef.current;
+            setPriceModel(null);
+            window.setTimeout(() => {
+              if (trigger?.isConnected) trigger.focus();
+            }, 0);
+          }}
         />
       )}
     </>

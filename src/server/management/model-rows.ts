@@ -46,6 +46,7 @@ export type ManagementModelRow = Partial<CatalogModel> & {
   native?: boolean;
   custom?: boolean;
   customId?: string;
+  manualPricing?: boolean;
   fastRowAvailable?: boolean;
   displayNameOverride?: string;
   displayNameSource?: "operator" | "provider" | "fallback";
@@ -146,10 +147,25 @@ export async function listManagementModelRows(
     };
   });
   const publicModels = uniqueCatalogModelsForPublicList(models);
+  // Custom rows below are REBUILT from config.customModels rather than spread from a
+  // CatalogModel, so every field gather computed for the same slug has to be carried across by
+  // hand. Without this a custom model whose provider is out of credit would be the one row on
+  // the page that never shows as inactive (#1711), because the gather-derived row it replaces
+  // is dropped by the slug dedup below.
+  const quotaInactiveByNamespaced = new Map(
+    publicModels
+      .filter(model => model.quotaInactiveReason !== undefined)
+      .map(model => [catalogModelSlug(model), model.quotaInactiveReason!] as const),
+  );
   const comboNamespaced = new Set(
     publicModels.filter(model => model.provider === "combo").map(catalogModelSlug),
   );
-  const visibleCustomModels = customModels.filter(model => !comboNamespaced.has(model.namespaced));
+  const visibleCustomModels = customModels
+    .filter(model => !comboNamespaced.has(model.namespaced))
+    .map(model => {
+      const quotaInactiveReason = quotaInactiveByNamespaced.get(model.namespaced);
+      return quotaInactiveReason ? { ...model, quotaInactiveReason } : model;
+    });
   // Custom metadata wins when a physical live/static row resolves to the same Codex-facing
   // slug, while a combo keeps the same precedence it has in routing and /v1/models.
   const customNamespaced = new Set(visibleCustomModels.map(c => c.namespaced));
@@ -181,8 +197,12 @@ export async function listManagementModelRows(
   for (const row of rows) knownIds.add(row.namespaced);
   return rows.map(row => {
     const pending = initialModelSelectionPending(config.providers[row.provider]);
+    const modelCosts = Object.hasOwn(config.providers, row.provider)
+      ? config.providers[row.provider]?.modelCosts : undefined;
     return {
       ...row,
+      ...(!row.native && modelCosts !== undefined && Object.hasOwn(modelCosts, row.id)
+        ? { manualPricing: true } : {}),
       ...(pending ? { disabled: true, initialSelectionPending: true } : {}),
       fastRowAvailable: !row.disabled && !pending
         && !knownIds.has(fastRowId(row.namespaced)) && catalogFastRowEligible(config, row),
