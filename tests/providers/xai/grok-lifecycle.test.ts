@@ -7,7 +7,7 @@ import { repoPath } from "../../helpers/repo-root";
 const CLI_SOURCE = readFileSync(repoPath("src", "cli", "index.ts"), "utf8");
 const ENSURE_SOURCE = readFileSync(repoPath("src", "cli", "ensure-desired-integrations.ts"), "utf8");
 const DISPATCH_SOURCE = readFileSync(repoPath("src", "cli", "dispatch.ts"), "utf8");
-const SERVICE_SOURCE = readFileSync(repoPath("src", "service.ts"), "utf8");
+const SERVICE_SOURCE = readFileSync(repoPath("src", "service", "cli.ts"), "utf8");
 const MANAGEMENT_SOURCE = readFileSync(repoPath("src", "server", "management-api.ts"), "utf8");
 const PROCESS_CONTROL_SOURCE = readFileSync(repoPath("src", "lib", "process-control.ts"), "utf8");
 
@@ -189,12 +189,13 @@ describe("Grok fence lifecycle wiring", () => {
 
   test("only Task Scheduler earns the respawn wait", () => {
     const stopFn = sliceFn(CLI_SOURCE, "async function handleStop(", "async function handleUninstall(");
-    const serviceSource = readFileSync(repoPath("src", "service.ts"), "utf8");
+    const serviceSource = readFileSync(repoPath("src", "service", "orchestration.ts"), "utf8");
     // schtasks /end leaves the `cmd :loop` wrapper alive to respawn its child (#764).
     // launchd, systemd and WinSW are down when they report stopped, so charging them a
     // seven-second poll on every ocx stop would be a regression in ordinary use.
     expect(serviceSource).toContain('"absent" | "stopped" | "stopped-respawnable" | "failed"');
-    expect(serviceSource).toContain('schedulerStopped ? "stopped-respawnable" : "stopped"');
+    const windowsOps = readFileSync(repoPath("src", "service", "windows-ops.ts"), "utf8");
+    expect(windowsOps).toContain('schedulerStopped ? "stopped-respawnable" : "stopped"');
     expect(stopFn).toContain("if (schedulerCanRespawn && !ownershipBlocked)");
     // The wait is gated on the scheduler flag, not on "a service stopped".
     expect(stopFn).not.toContain("if (stoppedService && !ownershipBlocked)");
@@ -237,7 +238,12 @@ describe("Grok fence lifecycle wiring", () => {
     expect(controlSource).toContain("io.runtimeEndpoint ?? readRuntime(pid)");
     // Inherited obligations are snapshotted BEFORE this run claims anything, so its own
     // receipt is never mistaken for one it inherited.
-    expect(stopFn).toContain("isPendingTeardownAbandoned(read, isProcessAlive)");
+    expect(stopFn).toContain("isPendingTeardownAbandoned(read, teardownOwnerStillRunning)");
+    // Ownership is identity, not bare liveness. A reused PID reported the owner as still
+    // running forever, so the receipt was never recovered while both updater gates kept
+    // refusing on it (#4897). Passing `isProcessAlive` straight in is the regression.
+    expect(stopFn).toContain("isProcessAlive(ownerPid) && isLikelyOcxProcess(ownerPid)");
+    expect(stopFn).not.toContain("isPendingTeardownAbandoned(read, isProcessAlive)");
     expect(stopFn.indexOf("listPendingTeardowns()")).toBeLessThan(claimAt);
     expect(stopFn).toContain("clearPendingTeardown(nonce)");
     expect(stopFn.indexOf("await restoreSharedClientStateAfterStop()"))
@@ -314,7 +320,11 @@ describe("Grok fence lifecycle wiring", () => {
     const updateSource2 = readFileSync(repoPath("src", "update", "index.ts"), "utf8");
     expect(updateSource2).toContain("teardownOutstanding: pendingTeardownOutstanding()");
     const decisionSource = readFileSync(repoPath("src", "update", "stop-decision.mjs"), "utf8");
-    expect(decisionSource).toContain('if (teardownOutstanding) return { proceed: false, reason: "teardown-outstanding" };');
+    // The gate has exactly one exemption, and it is the child saying it kept those
+    // receipts on purpose after the Codex history preflight refused (#4718). Anything
+    // else — including a stop that merely exited 0 — still aborts the install.
+    expect(decisionSource).toContain('if (teardownOutstanding && !historyDeferred) return { proceed: false, reason: "teardown-outstanding" };');
+    expect(decisionSource).toContain("const historyDeferred = status === STOP_HISTORY_DEFERRED_EXIT_CODE;");
     const receiptSource = readFileSync(repoPath("src", "config", "pending-teardown.ts"), "utf8");
     expect(receiptSource).toContain('from "./pending-teardown-names.mjs"');
     expect(receiptSource).toContain("isPendingTeardownFileName(name)");
@@ -323,7 +333,14 @@ describe("Grok fence lifecycle wiring", () => {
   test("handleStop treats an incomplete native Codex restore as a stop failure", () => {
     const restoreFn = sliceFn(CLI_SOURCE, "async function restoreSharedClientStateAfterStop(", "async function handleStop(");
     const stopFn = sliceFn(CLI_SOURCE, "async function handleStop(", "async function handleUninstall(");
-    expect(restoreFn).toContain("if (result.success) console.log");
+    // The success branch grew a body when a degraded restore had to report the provider
+    // table it retained, so this pins the branch and its log separately rather than the
+    // one-line shape they used to share.
+    expect(restoreFn).toContain("if (result.success) {");
+    expect(restoreFn).toContain("console.log(`↩️  ${result.message}`)");
+    // A degraded restore is a discharged obligation, not a deferral: the refusal reason is
+    // what keeps a stop receipt owed, and it must stay part of that conjunction.
+    expect(restoreFn).toContain("result.historyPreflightRefusal !== undefined");
     // Config or catalog failure is a real teardown failure - a client reads those. Only a
     // history-only failure is separable, and it still surfaces (#3008).
     expect(restoreFn).toContain('artifacts.config.state === "failed" || artifacts.catalog.state === "failed"');
@@ -404,7 +421,7 @@ describe("POST /api/stop teardown", () => {
   });
 
   test("an unreadable scheduler state gets the same diagnosis from the CLI and the API", () => {
-    const serviceSource = readFileSync(repoPath("src", "service.ts"), "utf8");
+    const serviceSource = readFileSync(repoPath("src", "service", "orchestration.ts"), "utf8");
     // A manager that refused to stop and a query that could not answer are different
     // problems: reporting the second as "did not stop" sends the operator looking for the
     // wrong thing, and `ocx stop` was the command the API told them to run (#3008).
@@ -497,7 +514,7 @@ describe("POST /api/stop teardown", () => {
   });
 
   test("direct service stop and uninstall fail when a shared teardown half fails", () => {
-    const serviceSource = readFileSync(repoPath("src", "service.ts"), "utf8");
+    const serviceSource = readFileSync(repoPath("src", "service", "cli.ts"), "utf8");
     // These paths logged the failure and exited 0, so a script could not tell a complete
     // teardown from one that left Grok aimed at a stopped proxy.
     const stopCase = serviceSource.slice(

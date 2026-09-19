@@ -13,9 +13,13 @@ the hub's own processes dial `127.0.0.1:<the same port>` with no credential, thr
 companion listener. Start from [the recipe below](#linux-systemd-or-macos-launchd), then hand a
 second machine a ready-made command with [`ocx hub invite`](#inviting-another-machine).
 
-The management ingress never serves `/v1/*`, `/healthz`, `/readyz`, or WebSockets. Do not publish its
+The management ingress never serves `/v1/*`, `/healthz`, or `/readyz`. When explicitly enabled,
+Remote Workspace admits only its paired bearer-authenticated agent WebSocket and one-time pairing
+exchange; see [Remote Workspace](/guides/remote-workspace/). Do not publish its
 port directly, do not add a cloud-firewall rule for it, and do not use Tailscale Funnel. Funnel is a
 public-internet surface and is outside this deployment model.
+
+With management ingress enabled, the local dashboard command opens `http://127.0.0.1:<management port>` so the address matches the IPv4-only listener without resolving `localhost`.
 
 ## Trust and consent boundaries
 
@@ -45,6 +49,8 @@ ocx connect https://hub-name.tailnet-name.ts.net --pairing-code-stdin
 ocx connect status
 ocx sync
 ```
+
+Human-readable readiness diagnostics show control characters in catalog values as visible hexadecimal escapes, both when you first connect and when `ocx sync` refuses a refreshed hub catalog. Structured JSON status retains the original diagnostic value.
 
 You do not have to assemble that line by hand. `ocx hub invite`, run on the hub, mints the code and
 prints the exact command — including both origins — for the machine that is joining. See
@@ -77,6 +83,11 @@ data-key rotation, revocation, and disconnect.
 
 ### What a connected client shows
 
+`ocx connect` and `ocx connect status` check catalog readiness against the first valid local
+Codex runtime in selection order. Failed preferred candidates can fall back, but lower-priority
+alternatives are not probed after a valid runtime is selected. This check leaves the saved runtime
+selection unchanged. General `ocx status` still discovers alternatives for runtime diagnostics.
+
 A client stores no provider credentials and no catalog of its own, so its local config and
 credential store are empty by design — and reading them as the truth produces a confident, wrong
 answer about what the hub can serve. On a connected client `ocx status` therefore leads with
@@ -89,6 +100,10 @@ reports `unavailable` with an instruction to upgrade the hub rather than silentl
 local login state, and `ocx config show` on a client prints a `_remoteHub` note saying the
 credentials and model availability live on the hub. The hub read uses the per-client data key
 only; no admin token and no provider secret ever reaches a client.
+
+`ocx status` makes a live hub-state request only when the saved connection still matches the
+status snapshot and the data-token file matches that connection. If either check fails, it skips
+the request and shows matching cached hub state, or `unavailable` if no matching cache exists.
 
 ## Linux systemd or macOS launchd
 
@@ -559,26 +574,48 @@ its actual project-prefixed volume names:
 --mount type=volume,src=codex-state,dst=/home/bun/.codex
 ```
 
-Install Git and Bun on the host first. Before **every** image build, run the existing canonical
-generator from this Git checkout. It hashes Git-tracked working-tree sources (stage any newly
-added source files first), not an arbitrary directory scan. Do not change source files between
-generation and build. Only its untracked `src/generated/compatibility-version.json` artifact
-enters the image; `.git` remains outside the Docker context. Do not commit or hand-edit the
-manifest. The build rejects stale manifests: it verifies every recorded SHA-256 against the
-read-only build context and again against the copied runtime files. It requires `package.json`,
-`bun.lock`, and `scripts/model-metadata.source.json`; only that exact scripts artifact is
-included, not the rest of `scripts/`. Missing or mismatched files, extra source files absent
-from the manifest, and symlinks (including parent directories) fail the build. The only source
-file exempt from the inventory is the generated manifest itself. If validation fails, reconcile
-the tracked sources, remove unintended source files, and rerun the canonical generator.
+The host needs Git and Docker Compose for a local clone, or only Docker Compose for a remote Git
+context. Bun and a manual preparation step are not required. The build-only
+manifest stage derives the canonical inventory from the selected Git snapshot, writes the untracked
+`src/generated/compatibility-version.json`, and verifies every recorded SHA-256 against the read-only
+build context before source `COPY` instructions can dereference a symlink. The copied runtime files
+are verified again inside the image. Git metadata is admitted only for that bind mount; no `COPY`
+places `.git` in an image layer, and the Git executable remains confined to the manifest stage.
+
+"Git metadata" here means two files. The canonical inventory comes from `git ls-files`, which reads
+the index and never opens an object or a ref, so the build context admits only `.git/index` and
+`.git/HEAD` — about 1 MB, rather than the repository's full object store. The manifest stage copies
+them into a scratch Git directory it owns and supplies the empty `objects/` and `refs/` directories
+Git's repository check requires. A context with neither a manifest nor a Git index fails the build
+with a message naming both supported inputs; it never falls back to a placeholder.
+
+An existing host-generated manifest remains compatible: the build verifies and uses it instead of
+silently replacing it. Missing or mismatched files, extra source files absent from the manifest, and
+symlinks (including parent directories) fail the build. The inventory requires `package.json`,
+`bun.lock`, and `scripts/model-metadata.source.json`; the generated manifest itself is the only source
+file exempt from the inventory. Do not commit or hand-edit it.
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
-bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
+```
+
+For a remote Git context, set the BuildKit built-in argument that retains Git metadata. For example,
+replace the service's build block with:
+
+```yaml
+services:
+  hub:
+    pull_policy: build
+    build:
+      context: https://github.com/lidge-jun/opencodex.git#main
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
 ```
 
 Set an alternate host port without changing the container's fixed `10100` listener:
@@ -597,8 +634,8 @@ OPENCODEX_BIND_ADDRESS=0.0.0.0 docker compose up -d
 Use a firewall and an authenticated TLS/tailnet frontend before exposing the port. The bind
 override changes only the host publication; the container listener remains `0.0.0.0:10100`.
 Keep the same bind override on subsequent Compose invocations that recreate the hub. To update
-an existing deployment, regenerate the manifest, run `docker compose build`, and recreate the
-hub with `docker compose up -d`; do not repeat the one-time token initialization.
+an existing deployment, run `docker compose build` and recreate the hub with `docker compose up -d`;
+do not repeat the one-time token initialization.
 
 Configure providers with the dashboard through an operator-owned management frontend, or with
 one-shot CLI commands that share the state volume. The commands below show the existing Remote Hub
@@ -722,3 +759,18 @@ For a service rollback, stop the branch service and repair the prior release aga
   session, not a client data key.
 - **Outstanding revocation after disconnect:** use the hub dashboard's **Integrations → API Keys**
   page. It is the sole post-disconnect revocation path.
+### Usage from a connected client
+
+`ocx usage` reads the connected hub with this client's enrolled data key. Human output identifies the hub source and client-key scope; `--json` returns the same scoped data. Range, surface, provider/model filters and custom `--since`/`--until` bounds remain available. Account breakdowns and other clients' records are not shared. An old or unavailable hub produces an explicit error instead of substituting local usage; upgrade the hub if it does not support this read.
+
+The read-only data-plane endpoint is `GET /v1/usage`, using `x-opencodex-api-key` with a configured client key. Environment-wide and admin keys are refused. It accepts `range`, `surface`, `provider`, `model`, `since`, and `until`; unknown/repeated options and caller-selected key IDs are rejected. Oversized skipped rows retain the explicit incomplete-history warning.
+
+Client usage credentials are sent only over HTTPS or loopback HTTP. Both the request and response disable caching.
+
+### Pairing this browser with a hub
+
+Machine enrollment and browser authentication are separate. The pairing panel names the hub and displays an `ocx gui pair --origin` command for the exact origin currently open in your browser. Run that command on the hub, or send it to the hub operator and request a one-time pairing code. Paste that code into the panel; a data API key or admin token is not a pairing code.
+
+While browser authentication is pending, the dashboard does not recommend restarting a healthy connected client. Completing pairing refreshes the dashboard data immediately, including a previously cached authentication failure. Session expiry returns to pairing; permission denial keeps its own access-settings guidance. Other failed refreshes may show the last received data with a stale-data notice and retry action.
+
+If an auxiliary listener cannot bind, startup names `unauthenticatedLoopbackListener` or `hub.managementIngress` and the actual address. Correct that listener or free its address; changing only the public proxy port does not repair a fixed auxiliary port. Malformed hand-edited listener blocks warn and remain disabled while unrelated settings are preserved.

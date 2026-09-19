@@ -96,8 +96,10 @@ currently accepted OAuth and API-key provider ids when the name is missing or un
 
 Use the same command to **reauthenticate** after `ocx status` / `ocx doctor` reports
 reauthentication required or a terminal refresh failure (or use Reauthenticate in the dashboard).
-Codex pool accounts are not a public `ocx login` provider — reauthenticate via the dashboard Codex
-account pool (Reauthenticate) or the headless `ocx account reauth` flow instead.
+Codex pool accounts are not one of those OAuth or API-key providers, but `ocx login codex` reaches
+them anyway: it routes to the account-pool login, so `ocx login codex --reauth` is the same thing as
+`ocx account reauth codex`. The dashboard Codex account pool (Reauthenticate) does it too. That route
+runs inside the proxy, so it needs a running one.
 
 ```bash
 ocx login xai
@@ -205,7 +207,7 @@ List and switch provider accounts and API-key pools through the running proxy. T
 surface is:
 
 ```text
-Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits> ...
+Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits|grok-reset-coupons|import-orca> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 current <provider>  Show the active account or key.
@@ -217,11 +219,14 @@ remove <provider> <id> --yes  Remove a stored account or key after an existence 
 add-key <provider> [--label <label>]  Add a key read only from piped stdin.
 login/reauth/code/cancel  Run browser or manual-code auth from a headless shell.
 reset-credits <id|main> [--consume --yes]  Inspect or consume Codex reset credits.
+grok-reset-coupons [<id>] [--consume --yes] [--token-id <token-id>] [--operation-id <uuid>]  Inspect or redeem Grok reset coupons.
+import-orca --source <dir> --registry <file> [--apply]  Preview or apply imports from Orca-managed Codex homes.
 Switching the active account takes effect immediately; running threads move on their next request, and in-flight requests keep the account they captured.
 A selection-order change applies from the next unbound request and never moves a bound thread.
 ```
 
-All subcommands require the proxy to be running; the CLI auto-resolves its recorded runtime port.
+Account subcommands require the proxy to be running and auto-resolve its recorded runtime port,
+except `import-orca`: preview is local-only, and `import-orca --apply` requires the proxy to be stopped.
 Successful operations exit 0. Invalid usage, an unknown provider or account/key id, an unreachable
 proxy, or an API failure exits 1. Credential fields are displayed exactly as the management API
 returns them (including its masking); raw API keys and OAuth tokens are never returned. Display
@@ -246,6 +251,55 @@ and the plan/label column falls back across plan, masked email, label, and maske
   "quota": null
 }
 ```
+
+### `ocx account import-orca --source <orca-data-directory> --registry <orca-data.json> [--apply] [--json]`
+
+Reuse local Orca-managed Codex logins without another browser login. The source
+directory must contain `codex-accounts/<account>/home/auth.json`. Supply the Orca
+data directory and the chosen profile's `orca-data.json` explicitly. Only accounts
+registered in that profile are considered; leftover or removed account homes are
+not imported. Each home must carry Orca's matching `.orca-managed-home` marker.
+The command does not scan unrelated homes or remote hosts.
+
+```powershell
+# Windows: preview only; no account is registered.
+ocx account import-orca --source "$env:APPDATA\orca" --registry "$env:APPDATA\orca\profiles\local-default\orca-data.json" --json
+
+# Finish active proxy requests and stop the proxy before applying.
+ocx stop
+ocx account import-orca --source "$env:APPDATA\orca" --registry "$env:APPDATA\orca\profiles\local-default\orca-data.json" --apply
+ocx start
+```
+
+Older Orca profiles may use `orca-data.json` directly under the data directory.
+On other platforms, pass the local Orca data directory and profile registry with the same layout.
+The importer skips identities already present in the native main login, account
+pool, or credential store, including duplicates within the source. This deliberately
+uses the ChatGPT account ID as a conservative bucket: separate members sharing a
+workspace account ID are skipped too, not merged or individually imported. Repeating an
+import preserves existing accounts. If an earlier import stopped between saving
+credentials and registering the pool row, retry can finish that registration with
+the same ID only when its untouched pending record still matches the source. Invalid
+entries are counted by fixed reason code. A mixed result with at least one eligible
+account exits successfully; a result where every discovered entry is invalid exits
+nonzero. Output contains counts and reason codes, not emails, account identifiers,
+paths, or tokens.
+
+**Orca retains refresh ownership.** OpenCodex stores a read-only source link and
+an access-token snapshot, never Orca's refresh token. When resolving credentials,
+it reads the source again and verifies that it still belongs to the imported
+identity. Orca must keep that login available and refreshed. Missing, malformed,
+expired, or identity-mismatched source credentials fail closed; OpenCodex does not
+fall back to the old snapshot or refresh the source login. This is a local link,
+not a portable export or a transfer of refresh ownership.
+Requests already sent upstream keep the credentials they captured.
+
+New accounts are registered as **validation pending**. After starting the proxy,
+open **Codex Auth** and click **Refresh quotas** to authorize the existing model
+validation step, which may consume a small amount of quota. Offline import and
+JWT parsing do not establish upstream authentication. CLI quota refresh alone
+does not perform that validation. The importer never starts or stops either app,
+changes Orca files, or changes the active pool account.
 
 ### `ocx account list [provider] [--json] [--all] [--quota [--refresh]]`
 
@@ -346,11 +400,11 @@ instead (exit 0), matching the dashboard's quota bars.
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. Generic pool thresholds are currently inert: saving one does not enable threshold-based switching, change the provider enablement override, or disable reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is not applied, and unknown capability never reports `enabled: true`. API-key providers, Anthropic and invalid values are rejected.
+Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. A generic pool threshold steers selection only while `pool.kernel` is on with `strategy: "fill-first"`; with the flag off, saving one does not enable threshold-based switching. It never changes the provider enablement override or disables reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability, which never reports `enabled: true`. API-key providers, Anthropic and invalid values are rejected.
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }
-generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: boolean | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
@@ -369,8 +423,12 @@ eligible accounts, taking the highest order tier that still has quota headroom a
 `accountPoolStrategy` to choose inside it. Pause, cooldown, and reauthentication are unaffected.
 Changes apply from the **next unbound request**, not only from newly started sessions: preemption moves
 an unbound request up as soon as a higher order regains headroom. Threads already bound to an account
-normally keep it until that account is drained; a reauthentication failure, a quota cooldown, or a
-transient-failure streak releases the binding before that. Any accepted write also releases a manual
+normally keep it until that account is drained; a reauthentication failure or a quota cooldown still
+releases the binding immediately. A transient-failure streak (5xx and other non-quota failures
+reaching `upstreamFailoverThreshold`, default 3) no longer deletes a live binding: the request is
+served by another account while the binding is kept, and the task returns to its own account as soon
+as that account serves again. If the account is still failing after 10 minutes the binding is
+released normally. This hold is independent of `pool.cacheAffinity`. Any accepted write also releases a manual
 "use this account now" pin, on whichever account held it, including a write that stores the
 order an account already had — this is the only way to clear a pin while keeping the account
 that is currently selected. (Clearing the active account through the management API releases a
@@ -454,6 +512,26 @@ again instead of repeating `--consume`. Consume success does not guarantee routa
 see the [management API recovery contract](/reference/management-api/#codex-authentication-delegation)
 for reset/replay, freshness and scope limits.
 
+### `ocx account grok-reset-coupons [<account-id>] [--consume --yes [--token-id <id>] [--operation-id <uuid>]] [--json]`
+
+Inspects remaining reset coupons or redeems one for an xAI / Grok account.
+
+When invoked without `--consume`, returns the available coupon tokens and validity windows:
+
+```bash
+ocx account grok-reset-coupons
+ocx account grok-reset-coupons acc_xai_01 --json
+```
+
+Redeeming a reset coupon mutates billing state and permanently exhausts one coupon token. `--consume` strictly requires `--yes`:
+
+```bash
+ocx account grok-reset-coupons --consume --yes
+ocx account grok-reset-coupons --consume --yes --token-id <token-id>
+```
+
+Pass `--operation-id <uuid>` (must be a valid UUIDv4) to guarantee idempotent settlement. If the network drops or the command is retried, identical operation IDs replay the durably recorded outcome instead of consuming a second coupon.
+
 ### `ocx account main <subcommand>`
 
 Manage named native Codex main-login profiles without changing OpenCodex account-pool routing:
@@ -463,9 +541,14 @@ ocx account main doctor [--json]
 ocx account main list [--json]
 ocx account main register <label> [--json]
 ocx account main add <label>
+ocx account main reauth --device [--no-wait] [--json]
+ocx account main reauth status --flow <id> [--json]
+ocx account main reauth cancel --flow <id> [--json]
 ocx account main switch <profile-id-or-label> --yes [--json]
 ocx account main recover [--rollback --yes] [--json]
 ```
+
+`ocx account main reauth --device --no-wait --json` writes one JSON object to stdout on success, without the human-readable `follow up:` line. Use its `flowId` with `ocx account main reauth status --flow <id> --json` to check progress.
 
 Each mutating command reports the canonical effective `CODEX_HOME` returned by the running proxy.
 This path can differ from the caller's `CODEX_HOME`; commands that support JSON expose the same
@@ -477,6 +560,8 @@ login flow before importing the resulting credential. Close Codex before switchi
 successful switch preserves local tasks and history, then requires Codex to be restarted. Use
 `doctor` to inspect profile state and `recover` to finish or roll back an interrupted transition.
 `switch` accepts either the profile ID or its label.
+
+`reauth` re-authenticates the *existing* native main identity with an OpenAI device code (#3898) instead of enrolling a new profile. It is the headless-hub recovery path: no local Codex App, no `codex` binary, and no OS keyring are required. The device login must complete for the same ChatGPT account that already holds the native main slot; the credential write is fenced by the exclusive claim and a path/hash/inode snapshot, and the command output carries only the flow id, the verification URL, the device code, and status. The pool login route stays pool-only and keeps rejecting `__main__`; the equivalent dashboard surface is the Codex Auth main card's Re-login with device code control.
 
 The v1 recovery matrix covers an OpenCodex process exiting after a transaction file has been
 published by rename. It does not claim durability across an OS or kernel crash or sudden power
@@ -558,3 +643,15 @@ otherwise look routed.
 and rejects an entire catalog containing any other value, so `add`, `edit`, and the management API
 all refuse the bad value rather than storing something the catalog writer would have to strip later
 (#759).
+
+### Mark one model text-only
+
+Use `ocx provider add mine --adapter openai-chat --base-url https://example.com/v1 --default-model model-a --text-only` when registering a provider, or `ocx provider edit mine --model model-a --text-only` for an existing provider. Add can use `--model` or its default model; edit requires `--model`. The flag updates only that exact model's `modelCapabilities.inputModalities` to `["text"]`, preserving other models and axes.
+
+### Cached quota history
+
+`ocx account history openai <pool-account-id> [--limit 1-200] [--json]` reads stored observations without contacting the provider. The output separates actual observation time, WHAM or response-header source, window family and usage percentage. At most 200 observations per account are retained for 30 days, with global storage bounds.
+
+Ordinary token refresh preserves history. Reauthentication, removal or account replacement retires the old publication. Native main and probes performed before a login is published are not included. Missing history means insufficient observations, not zero usage. This command does not spend quota. Effective estimates, when supported by observations, carry the limitations below.
+
+The history output also includes effective reported-token estimates when same-window observations and attributable usage support them. Each estimate includes a sample count and low confidence. Quota rounding, external usage and assumed log-label continuity limit the inference; it is not your provider’s token allowance. Missing or truncated ledger evidence returns insufficient evidence. `--limit` controls displayed history, not the bounded estimate input.

@@ -27,8 +27,8 @@ export interface CodexWarmupOptions {
 }
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_MODEL = "gpt-5.4-mini";
-const FALLBACK_MODELS = ["gpt-5.5", "gpt-5.6-luna"];
+const DEFAULT_MODEL = "gpt-5.6-luna";
+const FALLBACK_MODELS = ["gpt-5.5"];
 const isRetryableWarmupStatus = (status?: number): boolean => status === 400 || status === 404;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 0x7fff_ffff;
@@ -44,7 +44,7 @@ async function drainErrorBody(res: Response, signal: AbortSignal): Promise<void>
       fatalUtf8: true,
     });
   } catch (error) {
-    if (signal.aborted) {
+    if (signal.aborted && res.status !== 429) {
       throw new CodexWarmupError("transport", "Codex warmup request failed", {
         cause: error,
       });

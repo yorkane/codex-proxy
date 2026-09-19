@@ -47,6 +47,7 @@ import type {
 } from "../../src/service";
 import { protectedLaunchAgentsDirForTests } from "../../src/lib/test-home-guard";
 import { repoPath } from "../helpers/repo-root";
+import { reportServiceServing } from "../../src/service/health";
 
 /**
  * Pin OPENCODEX_HOME per case. `buildPlist` reads config through `getConfigDir()`, and when
@@ -777,7 +778,8 @@ describe("restart restarts, repair stays a no-op (#4249)", () => {
   });
 
   test("the kick is wired to the restart verb only, and defaults to the real job restarter", () => {
-    const source = readFileSync(repoPath("src", "service.ts"), "utf8");
+    const source = readFileSync(repoPath("src", "service", "repair.ts"), "utf8");
+    const systemd = readFileSync(repoPath("src", "service", "systemd.ts"), "utf8");
     const branch = source.slice(
       source.indexOf('if (platform === "darwin") {', source.indexOf("export async function repairService(")),
       source.indexOf("throw new Error(`Background service repair is unsupported"),
@@ -788,7 +790,7 @@ describe("restart restarts, repair stays a no-op (#4249)", () => {
     // Linux needs no equivalent: `installSystemd` ends in an unconditional restart, so the
     // systemd unit is bounced whichever verb asked. Windows stops and starts the task.
     expect(branch).toContain("(deps.repairSystemd ?? installSystemd)();");
-    expect(source.slice(source.indexOf("function installSystemd()"), source.indexOf("function startSystemd()")))
+    expect(systemd.slice(systemd.indexOf("function installSystemd()"), systemd.indexOf("function startSystemd()")))
       .toContain("sh(`systemctl --user restart ${TASK}`);");
   });
 });
@@ -970,9 +972,14 @@ describe("deriveLaunchdServiceDiagnostic: what status is allowed to claim", () =
  * CLI process, so assert the shape instead of mocking the world.
  */
 describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
-  const source = readFileSync(repoPath("src", "service.ts"), "utf8");
+  const cli = readFileSync(repoPath("src", "service", "cli.ts"), "utf8");
+  const orchestration = readFileSync(repoPath("src", "service", "orchestration.ts"), "utf8");
+  const launchd = readFileSync(repoPath("src", "service", "launchd.ts"), "utf8");
+  const state = readFileSync(repoPath("src", "service", "state.ts"), "utf8");
+  const diagnostics = readFileSync(repoPath("src", "service", "diagnostics.ts"), "utf8");
+  const systemd = readFileSync(repoPath("src", "service", "systemd.ts"), "utf8");
 
-  function slice(from: string, to: string): string {
+  function slice(source: string, from: string, to: string): string {
     const start = source.indexOf(from);
     expect(start).toBeGreaterThan(-1);
     const end = source.indexOf(to, start + from.length);
@@ -981,20 +988,24 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
   }
 
   test("the repair branch still reports serving when repairService throws (1f)", () => {
-    const branch = slice('if (command === "repair" || command === "restart") {', "// Non-install subcommands follow");
+    const branch = slice(cli, 'if (command === "repair" || command === "restart") {', "// Non-install subcommands follow");
     // Without the catch, a throw escaped through src/cli/dispatch.ts to the top level and
     // the one command that can evict a hub never reached its own serving check.
     expect(branch).toContain("try {");
     expect(branch).toContain("await repairService({ verb });");
     expect(branch).toContain("} catch (error) {");
-    expect(branch).toContain('await reportServiceServing(verb === "restart" ? "restarted" : "repaired");');
+    expect(branch).toContain('await reportServiceServing(verb === "restart" ? "restarted" : "repaired", {}, repairError);');
+    // ONE outcome (#4914). The failure text has to reach the report, because printing it in
+    // the catch and then letting the report print its success line stated both outcomes for
+    // the same run — and the checkmark was the false half.
+    expect(branch).not.toContain("console.error(`❌ Service ${verb} failed");
     expect(branch).toContain("process.exitCode = 1;");
     // The serving check must not be inside the try, or a throw would still skip it.
     expect(branch.indexOf("} catch (error) {")).toBeLessThan(branch.indexOf("reportServiceServing(verb ==="));
   });
 
   test("install cleanup uses the same probe and the modern evict verb (1h, 2)", () => {
-    const ops = slice("function platformServiceInstallCleanupOps(", 'if (process.platform === "win32") {');
+    const ops = slice(orchestration, "function platformServiceInstallCleanupOps(", 'if (process.platform === "win32") {');
     // `unload` cannot evict a gui-domain job — the file's own comment on installLaunchd
     // says so — and `launchctl list` was the other half of defect 2.
     expect(ops).not.toContain("launchctl unload");
@@ -1015,7 +1026,7 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
    * "loaded / not loaded" answer turned one unreadable `launchctl print` into an eviction.
    */
   test("installLaunchd asks the tri-state probe, never launchdJobMatchesPlist", () => {
-    const fn = slice("export function installLaunchd(", " * Deps are named for the layer they replace");
+    const fn = slice(launchd, "export function installLaunchd(", " * Deps are named for the layer they replace");
     expect(fn).toContain("probe?: typeof probeLaunchdLoadState;");
     expect(fn).not.toContain("launchdJobMatchesPlist");
     // Refuse before any write, and again before any retry or rollback.
@@ -1023,35 +1034,35 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
     expect(fn).toContain("refusing to ${wasInstalled ? \"repair\" : \"install\"}");
     expect(fn).toContain('verdict.state === "not-loaded" || verdict.state === "loaded-stale"');
     // `startLaunchd` keeps the two-state helper deliberately: it does not evict anything.
-    expect(slice("export function startLaunchd(", "function stopLaunchd(")).toContain("launchdJobMatchesPlist");
+    expect(slice(launchd, "export function startLaunchd(", "function stopLaunchd(")).toContain("launchdJobMatchesPlist");
   });
 
   test("the no-op pre-check treats a PATH-only difference as identical (finding 2)", () => {
-    const fn = slice("export function installLaunchd(", " * Deps are named for the layer they replace");
+    const fn = slice(launchd, "export function installLaunchd(", " * Deps are named for the layer they replace");
     expect(fn).toContain("reusePreviousPlistPathVariable(previousPlist, rendered)");
     // Only against a job proven to run the exec line this install baked.
     expect(fn).toContain('verdict.state === "loaded-current"');
   });
 
   test("install state fails loudly instead of writing nowhere (nit 6)", () => {
-    const filter = slice("function serviceStatePaths()", "function currentCodexHome(");
+    const filter = slice(state, "function serviceStatePaths()", "function currentCodexHome(");
     expect(filter).toContain("isTestHomeGuardArmed()");
     // One canonicalization, the guard's own: `resolve()` alone calls /var/... and
     // /private/var/... different paths on macOS.
     expect(filter).toContain("isProtectedHomeUnderTest(dirname(path))");
     expect(filter).toContain("paths.filter(");
     expect(filter).toContain("refusing to write service install state");
-    expect(slice("function writeServiceInstallState(", "function readServiceInstallState("))
+    expect(slice(state, "function writeServiceInstallState(", "function readServiceInstallState("))
       .toContain("serviceStateWritePaths()");
   });
 
   test("diagnoseService no longer grep-matches launchctl list (2)", () => {
-    const branch = slice("export function diagnoseService()", 'if (process.platform === "win32") {');
+    const branch = slice(diagnostics, "export function diagnoseService()", 'if (process.platform === "win32") {');
     expect(branch).toContain("probeLaunchdLoadState()");
     expect(branch).toContain("deriveLaunchdServiceDiagnostic(");
     expect(branch).not.toContain("statusLaunchd");
     // The executable form is gone; the prose naming what it did deliberately stays.
-    expect(source).not.toContain("sh(`launchctl list | grep");
+    expect(diagnostics).not.toContain("sh(`launchctl list | grep");
   });
 
   /**
@@ -1062,7 +1073,7 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
    * opencodexHome with temp-directory paths before this filter existed.
    */
   test("stop and uninstall prefer bootout, in both domains, and keep unload only as a fallback (D)", () => {
-    const stop = slice("function stopLaunchd(", "function statusLaunchd(");
+    const stop = slice(launchd, "function stopLaunchd(", "function statusLaunchd(");
     expect(stop).toContain('run(["bootout"');
     // Review finding 4: gui-only, a `user/<uid>` job made `ocx service stop` a silent no-op
     // — `bootout gui/<uid>/<label>` exits 3 in a domain that never held it.
@@ -1071,7 +1082,7 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
     // all (`status === null`), which is the only state a second attempt can improve.
     expect(stop).toContain("launchctl unload");
     expect(stop.indexOf('run(["bootout"')).toBeLessThan(stop.indexOf("launchctl unload"));
-    const uninstall = slice("function uninstallLaunchd(", "/**");
+    const uninstall = launchd.slice(launchd.indexOf("function uninstallLaunchd("));
     // Uninstall inherits both domains by routing through stopLaunchd.
     expect(uninstall).toContain("stopLaunchd(deps)");
     expect(uninstall).not.toContain("launchctl unload");
@@ -1084,10 +1095,96 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
    * same resolver, which is what makes that coverage transferable.
    */
   test("the recorded-launcher preference is shared with the systemd installer (nit 8)", () => {
-    const systemd = slice("function installSystemd()", "function startSystemd(");
-    expect(systemd).toContain("stableLauncherEntry()");
-    expect(systemd).toContain("buildUnit(resolvedProxyEnv(), { launcher })");
-    expect(slice("export function installLaunchd(", " * Deps are named for the layer they replace"))
+    const systemdInstall = slice(systemd, "function installSystemd()", "function startSystemd(");
+    expect(systemdInstall).toContain("stableLauncherEntry()");
+    expect(systemdInstall).toContain("buildUnit(resolvedProxyEnv(), { launcher })");
+    expect(slice(launchd, "export function installLaunchd(", " * Deps are named for the layer they replace"))
       .toContain("stableLauncherEntry()");
+  });
+});
+
+/**
+ * One outcome per run — issue #4914.
+ *
+ * The reported Windows run printed `✅ opencodex service repaired and serving on port 10100`
+ * to stdout and `❌ Service repair failed: Background service install failed with exit code
+ * 199` to stderr for the same repair. The checkmark was the false half: the elevated
+ * re-registration never completed, the recovery path restarted the definition that was
+ * already there, and the registered task XML came out unchanged.
+ *
+ * These drive the real reporter, so they hold on every platform even though the reported
+ * failure is Windows-only.
+ */
+describe("service outcome reporting after a failed operation (#4914)", () => {
+  async function capture(
+    verb: "repaired" | "restarted",
+    serving: boolean,
+    failure?: unknown,
+  ): Promise<{ out: string; err: string; exitCode: number | string | undefined }> {
+    const out: string[] = [];
+    const err: string[] = [];
+    const previousLog = console.log;
+    const previousError = console.error;
+    const previousExitCode = process.exitCode;
+    console.log = (...values: unknown[]) => { out.push(values.join(" ")); };
+    console.error = (...values: unknown[]) => { err.push(values.join(" ")); };
+    let now = 0;
+    try {
+      await reportServiceServing(
+        verb,
+        { port: 10100, probe: async () => serving, sleep: async ms => { now += ms; }, now: () => now, timeoutMs: 0 },
+        failure,
+      );
+      return { out: out.join("\n"), err: err.join("\n"), exitCode: process.exitCode };
+    } finally {
+      console.log = previousLog;
+      console.error = previousError;
+      process.exitCode = previousExitCode ?? 0;
+    }
+  }
+
+  test("a failed repair that left the old registration serving is not reported as repaired", async () => {
+    const result = await capture("repaired", true, new Error("Background service install failed with exit code 199"));
+    // The exact contradiction from the report must be gone: no checkmark, and nothing
+    // claiming the service was repaired.
+    expect(result.out).toBe("");
+    expect(result.err).not.toContain("✅");
+    expect(result.err).not.toContain("repaired and serving");
+    // And it must still say the true things: what failed, and that something is answering.
+    expect(result.err).toContain("Service repair did not complete");
+    expect(result.err).toContain("exit code 199");
+    expect(result.err).toContain("10100");
+    expect(result.err).toContain("existing registration was kept");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("a failed repair with nothing serving reports one failure carrying both facts", async () => {
+    const result = await capture("repaired", false, new Error("Background service install failed with exit code 199"));
+    expect(result.out).toBe("");
+    expect(result.err).toContain("Service repair failed");
+    expect(result.err).toContain("exit code 199");
+    expect(result.err).toContain("No proxy answered on port 10100");
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("restart names itself rather than borrowing the repair wording", async () => {
+    const result = await capture("restarted", true, new Error("boom"));
+    expect(result.err).toContain("Service restart did not complete");
+    expect(result.err).not.toContain("Service repair");
+  });
+
+  test("UNCHANGED: with no preceding failure the success and silent-port lines are exactly as before", async () => {
+    // Narrowing the success claim must not cost the ordinary outcomes. A clean repair still
+    // gets its checkmark, and a registered-but-silent service still gets the warning that
+    // registration is not serving.
+    const ok = await capture("repaired", true);
+    expect(ok.out).toContain("✅ opencodex service repaired and serving on port 10100.");
+    expect(ok.err).toBe("");
+
+    const silent = await capture("repaired", false);
+    expect(silent.out).toBe("");
+    expect(silent.err).toContain("Service repaired, but no proxy answered on port 10100");
+    expect(silent.err).toContain("that is not the same as serving");
+    expect(silent.exitCode).toBe(1);
   });
 });

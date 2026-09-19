@@ -1,4 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
+import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
+import { modelCapabilitiesConfigError } from "../config/provider-validation";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
 import { formatErrorResponse } from "../bridge";
@@ -13,6 +15,8 @@ import {
 } from "../config";
 import {
   apiKeyTransportConfigError,
+  autoReviewModelOverridesConfigError,
+  autoReviewModelTargetConfigError,
   booleanRecordConfigError,
   providerReasoningPinsConfigError,
   modelAdapterRecordConfigError,
@@ -26,6 +30,7 @@ import {
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
+import { DECLARABLE_HOSTED_TOOL_TYPES } from "../responses/hosted-tool-policy";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../providers/registry";
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -357,9 +362,29 @@ function secretEquals(actual: string, expected: string | undefined): boolean {
  */
 export type DataPlaneAdmissionSource = "loopback" | "dedicated" | "bearer" | "x-api-key";
 
+/**
+ * Process-local, salted identity of the admission secret that was actually matched.
+ *
+ * Context-relay ownership is partitioned by this value, so two operators holding different
+ * keys cannot reach each other's sessions even when both resolve to the same upstream
+ * workspace. `source` is deliberately excluded: the same key arriving as a bearer or in the
+ * dedicated header is one principal. Rotating or replacing a secret mints a new principal and
+ * drops continuity, which is the safe direction — a reused key id or a replaced environment
+ * secret must not inherit the previous holder's sessions. Loopback admission carries no caller
+ * identity and mints nothing, so the relay refuses it rather than treating every local process
+ * as one user.
+ */
+const CONTEXT_PRINCIPAL_SALT = randomBytes(32);
+
+function mintContextPrincipal(kind: string, keyId: string, credential: string): string {
+  return createHmac("sha256", CONTEXT_PRINCIPAL_SALT)
+    .update(kind).update("\0").update(keyId).update("\0").update(credential)
+    .digest("hex");
+}
+
 export type DataPlaneAdmission =
-  | { kind: "configured"; keyId: string; source: DataPlaneAdmissionSource }
-  | { kind: "environment"; source: DataPlaneAdmissionSource }
+  | { kind: "configured"; keyId: string; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
+  | { kind: "environment"; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
   | { kind: "loopback"; source: "loopback" };
 
 /**
@@ -378,15 +403,50 @@ export function resolveDataPlaneAdmissionSecret(
 ): DataPlaneAdmission | null {
   const actual = token.trim();
   if (!actual) return null;
-  if (secretEquals(actual, configuredApiAuthToken(config))) return { kind: "environment", source };
+  if (secretEquals(actual, configuredApiAuthToken(config))) {
+    return { kind: "environment", source, contextPrincipalId: mintContextPrincipal("environment", "", actual) };
+  }
   for (const k of config.apiKeys ?? []) {
-    if (secretEquals(actual, k.key)) return { kind: "configured", keyId: k.id, source };
+    if (secretEquals(actual, k.key)) {
+      return { kind: "configured", keyId: k.id, source, contextPrincipalId: mintContextPrincipal("configured", k.id, actual) };
+    }
     const pending = k.pendingRotation;
     if (pending && Date.parse(pending.expiresAt) > Date.now() && secretEquals(actual, pending.key)) {
-      return { kind: "configured", keyId: k.id, source };
+      return { kind: "configured", keyId: k.id, source, contextPrincipalId: mintContextPrincipal("configured", k.id, pending.key) };
     }
   }
   return null;
+}
+
+/** The principal an authenticated admission belongs to, or undefined for loopback. */
+export function contextPrincipalIdOf(admission: DataPlaneAdmission | undefined): string | undefined {
+  return admission && "contextPrincipalId" in admission ? admission.contextPrincipalId : undefined;
+}
+
+/**
+ * The caller principal for a context-relay request, which is a stricter question than admission.
+ *
+ * The default bind is loopback, where admission deliberately never reads a token, so an admitted
+ * request carries no caller identity. History ownership needs one, so the relay asks separately:
+ * a caller that presents a real opencodex API key gets that key’s principal even on loopback,
+ * and a caller that presents none gets nothing and is refused. This adds identity where the caller
+ * volunteered it; it does not admit anyone who was not already admitted, and it does not change
+ * which credential goes upstream.
+ */
+export function resolveContextPrincipal(req: Request, config: OcxConfig, admission: DataPlaneAdmission | undefined): string | undefined {
+  const named = contextPrincipalIdOf(admission);
+  if (named) return named;
+  if (admission?.kind !== "loopback") return undefined;
+  const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
+  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const apiKey = req.headers.get("x-api-key")?.trim();
+  for (const [token, source] of [[dedicated, "dedicated"], [bearer, "bearer"], [apiKey, "x-api-key"]] as const) {
+    if (!token) continue;
+    const resolved = resolveDataPlaneAdmissionSecret(token, config, source);
+    const principal = contextPrincipalIdOf(resolved ?? undefined);
+    if (principal) return principal;
+  }
+  return undefined;
 }
 
 /** Whether `token` is a data-plane admission secret. */
@@ -431,6 +491,9 @@ export interface ApiAuthMatrixRow {
  * against every cell rather than reading the table back to itself.
  */
 export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
+  { endpoint: "/v1/audio/transcriptions", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  { endpoint: "/v1/live", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  { endpoint: "/v1/realtime/calls", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
   // #1686: a bearer that is one of OUR admission secrets is now accepted here. It is safe
   // because materializeCodexUpstreamAuth substitutes the stored main credential rather than
   // forwarding it; a bearer that is NOT our secret stays unadmitted and remains Codex Direct
@@ -448,6 +511,8 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   // it forwards no caller credential upstream and its body is booleans plus model ids — and it
   // 404s on any host whose runtimeRole is not "hub", so no standalone install gains a surface.
   { endpoint: "/v1/hub-state", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  // Usage additionally requires a configured key identity; unscoped environment keys are refused.
+  { endpoint: "/v1/usage", bearer: "rejected", dedicated: "accepted", xApiKey: "rejected" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -551,6 +616,23 @@ function sameCanonicalProviderSeed(actual: Record<string, unknown>, expected: Oc
   return actualKeys.every(key => JSON.stringify(actual[key]) === JSON.stringify((expected as unknown as Record<string, unknown>)[key]));
 }
 
+/**
+ * Operator-overlay tolerant variant of the canonical seed check: every key the registry
+ * seed defines must still match the submitted provider verbatim, but keys the seed never
+ * defines are ignored instead of failing the comparison. Field-masked writes (PATCH,
+ * the provider editor, reload) merge onto the persisted row, so the submitted candidate
+ * legitimately carries stored operator overlays like `selectedModels` or `disabled`.
+ * Those fields are validated by their own write boundaries and cannot widen what the
+ * forward proxy claims. Full-object writes (POST) keep the strict exact-key comparison
+ * so a forged overlay cannot ride in on a canonical transport seed.
+ */
+function matchesCanonicalProviderSeed(actual: Record<string, unknown>, expected: OcxProviderConfig): boolean {
+  return Object.keys(expected).every(
+    key => Object.hasOwn(actual, key)
+      && JSON.stringify(actual[key]) === JSON.stringify((expected as unknown as Record<string, unknown>)[key]),
+  );
+}
+
 function positiveWindowValue(value: unknown): boolean {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
@@ -587,13 +669,41 @@ function nativeContextOverlayError(raw: Record<string, unknown>): string | null 
  * string, or null when the provider may be persisted. Caller-controlled names/fields are
  * redacted and JSON-escaped so secrets never reach the response.
  */
-export function providerManagementConfigError(name: unknown, provider: unknown): string | null {
+export function providerManagementConfigError(
+  name: unknown,
+  provider: unknown,
+  options?: { allowOperatorOverlays?: boolean },
+): string | null {
   if (typeof name !== "string" || !provider || typeof provider !== "object" || Array.isArray(provider)) {
     return "provider must be a plain object";
   }
   const raw = provider as Record<string, unknown>;
+  const capabilitiesError = modelCapabilitiesConfigError(raw.modelCapabilities);
+  if (capabilitiesError) return capabilitiesError;
   const pinsError = providerReasoningPinsConfigError(raw);
   if (pinsError) return pinsError;
+  if (name === "openai" && (Object.hasOwn(raw, "autoReviewModel") || Object.hasOwn(raw, "autoReviewModelOverrides"))) {
+    return "provider openai must not include autoReviewModel or autoReviewModelOverrides";
+  }
+  // Canonical OpenAI is the ChatGPT forward seed. allowPrivateNetwork is the explicit
+  // opt-in that skips destination DNS classification (loopback, RFC1918, metadata).
+  // Overlay-tolerant comparison would otherwise treat it as an extra key and persist it.
+  if (name === "openai" && Object.hasOwn(raw, "allowPrivateNetwork")) {
+    return "provider openai must not include allowPrivateNetwork";
+  }
+  // The same reasoning applies to `headers`, and it is not hypothetical. Canonical OpenAI
+  // has no registry `staticHeaders`, so any header block on this row is operator-authored,
+  // and the forward adapter copies it onto the ChatGPT request BEFORE the incoming forward
+  // headers — a persisted value therefore wins whenever the caller omits that header. The
+  // exact-key comparison rejected it as an extra key; overlay tolerance would silently admit
+  // it on every merge-based write path while POST still refused it.
+  if (name === "openai" && Object.hasOwn(raw, "headers")) {
+    return "provider openai must not include headers";
+  }
+  const autoReviewTargetError = autoReviewModelTargetConfigError(raw.autoReviewModel, "autoReviewModel", true);
+  if (autoReviewTargetError) return autoReviewTargetError;
+  const autoReviewMapError = autoReviewModelOverridesConfigError(raw.autoReviewModelOverrides, "autoReviewModelOverrides", true);
+  if (autoReviewMapError) return autoReviewMapError;
   for (const field of FORBIDDEN_PROVIDER_RUNTIME_FIELDS) {
     if (Object.hasOwn(raw, field)) return `provider ${name} must not include runtime field "${field}"`;
   }
@@ -632,7 +742,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
-    const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
+    const canonical = seed && (options?.allowOperatorOverlays
+      ? matchesCanonicalProviderSeed(canonicalCandidate, seed)
+      : sameCanonicalProviderSeed(canonicalCandidate, seed));
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
     }
@@ -648,6 +760,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const destinationError = providerDestinationConfigError(name, typed);
   if (destinationError) return `provider ${name} ${destinationError}`;
+  for (const field of ["responsesPath", "chatCompletionsPath"] as const) {
+    const sendPathError = providerRelativeSendPathConfigError(field, raw[field]);
+    if (sendPathError) return `provider ${JSON.stringify(redactSecretString(name))} ${sendPathError}`;
+  }
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
@@ -660,7 +776,7 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
   }
-  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge);
+  const webSearchBridgeError = providerWebSearchBridgeConfigError(raw.webSearchBridge, name, typed);
   if (webSearchBridgeError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${webSearchBridgeError}`;
   }
@@ -687,6 +803,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const reasoningSummariesError = booleanRecordConfigError(raw.modelSupportsReasoningSummaries, "modelSupportsReasoningSummaries");
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
+  const suppressSyntheticMaxError = booleanRecordConfigError(raw.modelSuppressSyntheticMax, "modelSuppressSyntheticMax");
+  if (suppressSyntheticMaxError) return `provider ${name} ${suppressSyntheticMaxError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
     raw.modelReasoningSummaryDelivery,
     raw.modelSupportsReasoningSummaries,
@@ -716,6 +834,11 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     "noStructuredOutputModels",
   );
   if (structuredOutputOptOutError) return `provider ${name} ${structuredOutputOptOutError}`;
+  const jsonSchemaOptOutError = nonBlankStringArrayConfigError(
+    raw.noJsonSchemaModels,
+    "noJsonSchemaModels",
+  );
+  if (jsonSchemaOptOutError) return `provider ${name} ${jsonSchemaOptOutError}`;
   const retainModelsError = nonBlankStringArrayConfigError(raw.retainModels, "retainModels");
   if (retainModelsError) return `provider ${name} ${retainModelsError}`;
   const toolReasoningOptOutError = nonBlankStringArrayConfigError(
@@ -723,6 +846,22 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     "omitReasoningEffortWithToolsModels",
   );
   if (toolReasoningOptOutError) return `provider ${name} ${toolReasoningOptOutError}`;
+  const unsupportedHostedToolsError = nonBlankStringArrayConfigError(
+    raw.unsupportedHostedTools,
+    "unsupportedHostedTools",
+  );
+  if (unsupportedHostedToolsError) return `provider ${name} ${unsupportedHostedToolsError}`;
+  if (Array.isArray(raw.unsupportedHostedTools)) {
+    // Closed vocabulary, same reason as the config schema: an unrecognized name would be
+    // stored and then strip nothing, so the operator would keep getting the upstream 400
+    // this field exists to prevent.
+    const unknownTool = (raw.unsupportedHostedTools as unknown[])
+      .find(tool => typeof tool === "string" && !DECLARABLE_HOSTED_TOOL_TYPES.has(tool.trim()));
+    if (unknownTool !== undefined) {
+      return `provider ${name} unsupportedHostedTools must name only hosted tool types: `
+        + `${[...DECLARABLE_HOSTED_TOOL_TYPES].join(", ")}`;
+    }
+  }
   const openRouterError = openRouterRoutingConfigError(typed);
   if (openRouterError) return `provider ${name} ${openRouterError}`;
   const vercelError = vercelGatewayRoutingConfigError(typed);
@@ -798,9 +937,11 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   fastWire: "editor",
   baseUrl: "editor",
   responsesPath: "editor",
+  chatCompletionsPath: "editor",
   commandCodeVersion: "editor",
   statelessResponses: "editor",
   requiresAdjacentResponsesToolResults: "editor",
+  requiresPairedResponsesToolResults: "editor",
   annotateEmptyToolOutputs: "editor",
   supportsServiceTier: "editor",
   modelSupportsServiceTier: "editor",
@@ -816,6 +957,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   apiKey: "redacted",
   apiKeyTransport: "editor",
   apiKeyPool: "redacted",
+  // Ordering preference only; it names no key material, so an editor may read and set it.
+  apiKeyPoolStrategy: "editor",
   apiKeySelectionRevision: "runtime",
   _apiKeyAttempt: "runtime",
   defaultModel: "editor",
@@ -829,6 +972,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   contextWindow: "editor",
   modelContextWindows: "editor",
   modelInputModalities: "editor",
+  modelCapabilities: "editor",
   modelMaxInputTokens: "runtime",
   modelAutoCompactTokenLimits: "editor",
   defaultMaxOutputTokens: "editor",
@@ -848,9 +992,12 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   refreshPolicy: "editor",
   reasoningEfforts: "editor",
   modelReasoningEfforts: "editor",
+  modelSuppressSyntheticMax: "editor",
   modelDefaultReasoningEfforts: "editor",
   pinnedReasoningEffort: "editor",
   modelPinnedReasoningEfforts: "editor",
+  autoReviewModel: "editor",
+  autoReviewModelOverrides: "editor",
   modelSupportsReasoningSummaries: "editor",
   modelSupportsVerbosity: "editor",
   supportsVerbosity: "editor",
@@ -859,7 +1006,9 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   supportsOpenAiWebSearchToolFields: "editor",
   xaiResponsesXSearch: "editor",
   xaiResponsesDefaultVersion: "runtime",
+  zaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
+  unsupportedHostedTools: "editor",
   responsesSnapshotRepair: "editor",
   webSearchBridge: "editor",
   reasoningEffortMap: "editor",
@@ -870,6 +1019,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   noTopPModels: "editor",
   noPenaltyModels: "editor",
   noStructuredOutputModels: "editor",
+  noJsonSchemaModels: "editor",
   omitReasoningEffortWithToolsModels: "editor",
   parallelToolCalls: "editor",
   pinParallelToolCallsFalse: "editor",
@@ -881,6 +1031,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   autoToolChoiceOnlyModels: "editor",
   preserveReasoningContentModels: "editor",
   requiresReasoningPlaceholderModels: "editor",
+  showThinkingSummary: "editor",
   retryOn429: "editor",
   transientRetryOn5xx: "editor",
   reasoningSplitModels: "editor",

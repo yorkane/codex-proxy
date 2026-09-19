@@ -196,6 +196,7 @@ async function relay(upstream: string, phantom: string | undefined): Promise<str
         new Set(["web_search"]),
         undefined,
         undefined,
+        undefined,
         phantom ? new Set([phantom]) : undefined,
       ),
       budget,
@@ -251,7 +252,7 @@ describe("guard terminal-name verdicts", () => {
   test("undeclaredToolCallName stands down on a droppable name with the allowlist", () => {
     const payload = { type: "response.output_item.added", item: phantomItem };
     expect(undeclaredToolCallName(payload, new Set(["web_search"]))).toBe("update_plan");
-    expect(undeclaredToolCallName(payload, new Set(["web_search"]), undefined, undefined, new Set(["update_plan"]))).toBeUndefined();
+    expect(undeclaredToolCallName(payload, new Set(["web_search"]), undefined, undefined, undefined, new Set(["update_plan"]))).toBeUndefined();
   });
 });
 

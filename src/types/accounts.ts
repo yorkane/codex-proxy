@@ -19,6 +19,10 @@ export interface CodexAccount {
 }
 
 export interface CodexAccountCredentials {
+  /** Read-only Orca auth.json link; Orca exclusively owns OAuth refresh. */
+  sourceAuthPath?: string;
+  /** Bind the link to the originally imported OAuth subject. */
+  sourceSubject?: string;
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
@@ -29,6 +33,8 @@ export interface CodexAccountCredentialRecord {
   credential?: CodexAccountCredentials;
   generation: number;
   refreshGrantFingerprint?: string;
+  /** Private non-secret publication identity, stable across same-account token refresh. */
+  quotaHistoryIdentity?: string;
   deletedAt?: number;
   replacedAt?: number;
   lastCodexValidatedAt?: number;

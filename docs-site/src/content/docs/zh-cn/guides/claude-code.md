@@ -25,6 +25,7 @@ ocx claude
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claudeCode.tierModels.haiku ?? claudeCode.smallFastModel`（可选，也包括旧版 `ANTHROPIC_SMALL_FAST_MODEL`） |
 | `ANTHROPIC_DEFAULT_{OPUS,SONNET,FABLE}_MODEL` | `claudeCode.tierModels.*`（可选） |
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 启用 `alwaysEnableEffort` 时设为 `1`（条件注入） |
+| `ENABLE_TOOL_SEARCH` | 设置了 `claudeCode.toolSearch` 时注入（条件注入，默认关闭） |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `DISABLE_COMPACT` | 设置 `maxContextTokens` 时使用的旧版上下文覆盖项（条件注入） |
 你自行导出的变量始终优先。额外参数会直接透传：`ocx claude -p "hello"`。
 
@@ -463,3 +464,7 @@ Claude 模型时自动加载。对于原生透传，这是正常现象；对于�
 
 **子代理派发到错误模型**——名册代理（`ocx-*`）使用 `<!-- ocx-route: ... -->` 指令，
 而不是 Agent 工具的 `model` 参数。请确保指令与预期路由一致。传入 `"haiku"` 作为模型占位符。
+
+在 `config.json` 中设置 `claudeCode.stabilizePromptCache: true`，可在转换路由上将系统指令末尾受支持的 Claude 提示移到最后一条用户消息。默认值为 `false`。仅在客户端允许这种角色变化时启用。代码围栏内的示例和不匹配的文本会保留，Anthropic 原生透传不变。没有元数据时，缓存键按稳定后的指令计算。该选项不会生成会话标识，也不保证上游缓存命中。
+
+在 OpenCode Go 的 `deepseek-v4.1-flash` Chat 路由上，转换后的时间线系统提醒会自动保留原有位置和 system 角色，并排在尚待返回的工具结果之后。因此，追加提醒不会重写开头的系统提示。无论 `stabilizePromptCache` 是否启用，该行为都会生效；其他模型、目标地址的转换方式以及 Anthropic 原生透传保持不变。缓存复用仍需要稳定的会话标识和可用的上游缓存。修改较早的指令或工具、压缩对话也可能影响缓存命中；仅保留提醒顺序并不保证缓存复用。

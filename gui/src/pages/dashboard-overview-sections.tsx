@@ -445,13 +445,13 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
     sidecar, sidecarSaving, sidecarModels, visionModels, models, saveSidecar,
     shadowCall, shadowCallSaving, shadowCallHelpTriggerRef, shadowCallHelpOpen, setShadowCallHelpOpen, saveShadowCall,
   } = d;
-  const visionEnabled = sidecar?.vision.enabled !== false;
-  const visionModel = visionEnabled ? (sidecar?.vision.model ?? "gpt-5.4-mini") : "";
-  const persistedVisionReasoning = sidecar?.vision.reasoning ?? "low";
+  const visionEnabled = sidecar?.vision?.enabled !== false;
+  const visionModel = visionEnabled ? (sidecar?.vision?.model ?? "gpt-5.6-luna") : "";
+  const persistedVisionReasoning = sidecar?.vision?.reasoning ?? "low";
   const visionLadder = visionReasoningLadder(models, visionModel);
   const visionReasoning = clampVisionReasoningToLadder(visionLadder, persistedVisionReasoning);
-  const serverMaxDescriptions = String(sidecar?.vision.maxDescriptionsPerTurn ?? VISION_MAX_DESCRIPTIONS_DEFAULT);
-  const serverTimeoutMs = String(sidecar?.vision.timeoutMs ?? VISION_TIMEOUT_MS_DEFAULT);
+  const serverMaxDescriptions = String(sidecar?.vision?.maxDescriptionsPerTurn ?? VISION_MAX_DESCRIPTIONS_DEFAULT);
+  const serverTimeoutMs = String(sidecar?.vision?.timeoutMs ?? VISION_TIMEOUT_MS_DEFAULT);
   const [maxDraft, setMaxDraft] = useState<string | null>(null);
   const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null);
   const [maxInvalid, setMaxInvalid] = useState(false);
@@ -470,7 +470,7 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
     }
     setMaxInvalid(false);
     setMaxDraft(null);
-    if (parsed === (sidecar?.vision.maxDescriptionsPerTurn ?? VISION_MAX_DESCRIPTIONS_DEFAULT)) return;
+    if (parsed === (sidecar?.vision?.maxDescriptionsPerTurn ?? VISION_MAX_DESCRIPTIONS_DEFAULT)) return;
     void saveSidecar(visionMaxDescriptionsPatch(parsed));
   };
 
@@ -483,7 +483,7 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
     }
     setTimeoutInvalid(false);
     setTimeoutDraft(null);
-    if (parsed === (sidecar?.vision.timeoutMs ?? VISION_TIMEOUT_MS_DEFAULT)) return;
+    if (parsed === (sidecar?.vision?.timeoutMs ?? VISION_TIMEOUT_MS_DEFAULT)) return;
     void saveSidecar(visionTimeoutPatch(parsed));
   };
 
@@ -599,7 +599,7 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
           <div className="dash-delegation-controls">
             <div className="dash-sidecar-select-row">
               <Select
-                value={sidecar?.webSearch.model ?? "gpt-5.6-luna"}
+                value={sidecar?.webSearch?.model ?? "gpt-5.6-luna"}
                 options={sidecarModels}
                 onChange={model => {
                   void saveSidecar({ webSearch: webSearchSidecarSelectionForModel(models, sidecarModels, model) });
@@ -613,13 +613,13 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
               <span className="muted setting-hint dash-sidecar-toggle-label">{t("dash.webSearchStream")}</span>
               <button
                 type="button"
-                className={`switch ${sidecar?.webSearch.streamRoutedModelOutput ? "on" : ""}`}
+                className={`switch ${sidecar?.webSearch?.streamRoutedModelOutput ? "on" : ""}`}
                 onClick={() => {
-                  void saveSidecar({ webSearch: { streamRoutedModelOutput: !sidecar?.webSearch.streamRoutedModelOutput } });
+                  void saveSidecar({ webSearch: { streamRoutedModelOutput: !sidecar?.webSearch?.streamRoutedModelOutput } });
                 }}
                 disabled={!sidecar || sidecarSaving}
                 aria-label={t("dash.webSearchStream")}
-                aria-pressed={sidecar?.webSearch.streamRoutedModelOutput === true}
+                aria-pressed={sidecar?.webSearch?.streamRoutedModelOutput === true}
               >
                 <span className="knob" />
               </button>

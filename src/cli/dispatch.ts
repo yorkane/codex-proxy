@@ -24,11 +24,11 @@ import {
 } from "../codex/desired-state";
 import { syncModelsToCodex } from "../codex/sync";
 import { collectOrcaCodexHomeDiagnostic } from "../codex/home";
-import { restoreNativeCodexAsync } from "../codex/inject";
+import { restoreNativeCodexAsync, type CodexNativeRestoreResult } from "../codex/inject";
 import { stripGrokConfig } from "../grok/inject";
-import { afterCatalogWriteHandleAppServers } from "../codex/app-server-processes";
+import { handleRestartScopeAfterWrite, readRestartScope, type RestartScope } from "./restart-scope";
 import { normalizeUpdateChannel, runGuiUpdateWorker } from "../update/job";
-import { isJsonOption, takeFlag } from "./runtime-api";
+import { isJsonOption, takeFlag, terminalSafeError } from "./runtime-api";
 import type { ClientConnectionState } from "../client/state";
 import { OCX_NATIVE_REPLAY_RECOVERY_NOTE } from "../responses/compaction";
 
@@ -70,7 +70,7 @@ export function selectDefaultGuiUrl(
   probeHostname: (hostname: string | undefined) => string,
 ): string {
   const ingress = config.runtimeRole === "hub" ? config.hub?.managementIngress : undefined;
-  if (ingress?.enabled) return `http://localhost:${ingress.port}`;
+  if (ingress?.enabled) return `http://127.0.0.1:${ingress.port}`;
 
   const guiHost = probeHostname(live?.hostname ?? config.hostname);
   const hostname = guiHost === "127.0.0.1" ? "localhost" : guiHost;
@@ -106,6 +106,7 @@ const commandRunners: Record<string, CommandRunner> = {
   restore: async deps => {
     const restoreArgs = deps.args.slice(1);
     const restoreJson = takeFlag(restoreArgs, "--json");
+    const removeProviderTable = takeFlag(restoreArgs, "--remove-codex-provider-table");
     if (restoreArgs[0] === "back") {
       // Reverse switch: re-point plain `codex` at the RUNNING proxy without touching its
       // lifecycle — the counterpart of `ocx restore`. Start/stop triggers are unchanged;
@@ -145,6 +146,9 @@ const commandRunners: Record<string, CommandRunner> = {
       }
       const target = collectOrcaCodexHomeDiagnostic();
       return emitBack(true, `Plain \`codex\` now routes through opencodex in ${target.effectiveCodexHome} (undo with: ocx restore).`, 0);
+    }
+    if (removeProviderTable && !restoreJson) {
+      console.log("⚠️  Removing [model_providers.opencodex] means conversations already tagged opencodex will stop opening.");
     }
     const desired = setIntegrationEnabled("codex", false);
     if (!desired.ok) {
@@ -191,9 +195,9 @@ const commandRunners: Record<string, CommandRunner> = {
         return grokCode;
       }
     }
-    let r: { success: boolean; message: string };
+    let r: CodexNativeRestoreResult | Pick<CodexNativeRestoreResult, "success" | "message">;
     try {
-      r = await restoreNativeCodexAsync({ revalidateDesiredState: true });
+      r = await restoreNativeCodexAsync({ revalidateDesiredState: true, removeProviderTable });
     } catch (err) {
       r = { success: false, message: err instanceof Error ? err.message : String(err) };
     }
@@ -232,7 +236,16 @@ const commandRunners: Record<string, CommandRunner> = {
       code = 1;
     }
     if (r.success) {
-      console.log("Codex integration is OFF and plain `codex` now runs natively. Switch back with: ocx restore back");
+      const retained = "retainedCodexProviderTable" in r ? r.retainedCodexProviderTable : undefined;
+      if (retained) {
+        console.log("Codex integration is OFF and plain `codex` now runs natively.");
+        console.log("The following lines remain in $CODEX_HOME/config.toml because conversations already tagged opencodex resolve their provider only through this table:");
+        console.log(retained.lines.join("\n"));
+        console.log(`Follow-up: ${retained.followUp}`);
+        console.log("Switch back with: ocx restore back");
+      } else {
+        console.log("Codex integration is OFF and plain `codex` now runs natively. Switch back with: ocx restore back");
+      }
       console.log(`Note: ${OCX_NATIVE_REPLAY_RECOVERY_NOTE}`);
     } else {
       console.error("Plain `codex` was not fully restored. Inspect $CODEX_HOME/config.toml before using native Codex.");
@@ -302,8 +315,20 @@ const commandRunners: Record<string, CommandRunner> = {
     return Number(process.exitCode ?? 0);
   },
   login: async deps => {
+    const loginArgs = deps.args.slice(1);
+    // 'ocx login codex' is the command people type first, and until now it answered with
+    // the full provider wall because the Codex pool lives behind 'ocx account login'.
+    // Route the three Codex spellings to that flow instead of making the user discover
+    // a second noun. Everything else stays on the local OAuth/API-key path.
+    const { isCodexAccountLoginName, handleAccountAuthCommand } = await import("./account-auth");
+    if (isCodexAccountLoginName(loginArgs[0] ?? "")) {
+      // null means "unknown subcommand", which "login" never is; the coalesce exists because
+      // the shared signature serves callers that do pass an unknown one.
+      const code = await handleAccountAuthCommand("login", loginArgs, { findLiveProxy: deps.findLiveProxy });
+      return code ?? 1;
+    }
     const { handleLogin } = await import("../oauth/login-cli");
-    await handleLogin(deps.args[1]);
+    await handleLogin(loginArgs[0]);
     return 0;
   },
   logout: async deps => {
@@ -366,10 +391,12 @@ const commandRunners: Record<string, CommandRunner> = {
   },
   sync: async deps => {
     const syncArgs = deps.args.slice(1);
-    const restartCodex = syncArgs.includes("--restart-codex");
-    // Separate flag on purpose: --restart-codex promises app-server-only scope,
-    // and quitting the desktop app ends live conversations.
-    const restartDesktopApp = syncArgs.includes("--restart-desktop-app");
+    const restartScope = readRestartScope(syncArgs, console);
+    // The wire field keeps APP-SERVER-ONLY meaning and is deliberately not widened. A
+    // remote hub must not end a local user's conversations because a field name acquired
+    // a wider meaning underneath it; the maintainer decision widened a local CLI flag and
+    // said nothing about remote callers. syncConnectedClient ignores it either way.
+    const restartCodex = restartScope.appServers;
     const { readClientConnectionState } = await import("../client/state");
     const clientState = readClientConnectionState();
     if (clientState.kind === "invalid" || clientState.kind === "mismatched") {
@@ -383,7 +410,7 @@ const commandRunners: Record<string, CommandRunner> = {
         console.log(result.stale
           ? "Hub unavailable; retained and applied the last-known-good remote catalog (stale)."
           : "Remote hub catalog synchronized.");
-        await handleConnectedSyncCatalogWrite(result, restartCodex, restartDesktopApp);
+        await handleConnectedSyncCatalogWrite(result, restartScope);
         // `process.exitCode` rather than a literal 0, for the same reason every other
         // runner does it (tests/cli/cli-transport-honesty.test.ts): the catalog-write helper
         // drives app-server restarts, and one of those recording a failure must not be
@@ -391,7 +418,11 @@ const commandRunners: Record<string, CommandRunner> = {
         // types it as `number | string`; only a numeric code means anything here.
         return typeof process.exitCode === "number" ? process.exitCode : 0;
       } catch (error) {
-        console.error(`Connected sync failed without local fallback: ${error instanceof Error ? error.message : String(error)}`);
+        // The refresh path reaches the same hub catalog `ocx connect` validates, so a rejected
+        // reasoning level arrives here as hub-supplied text. Rendering it through the shared
+        // terminal boundary is what keeps the routine refresh from forging output; the domain
+        // error itself is left alone for callers that inspect it.
+        console.error(`Connected sync failed without local fallback: ${terminalSafeError(error).message}`);
         return 1;
       }
     }
@@ -412,6 +443,7 @@ const commandRunners: Record<string, CommandRunner> = {
       // Explicit sync with the integration OFF still refreshes the catalog/cache
       // for side profiles that consume the proxy without injection.
       console.log(synced.message ?? "Codex integration is OFF; catalog refreshed, Codex config untouched.");
+      if (!synced.ok) code = 1;
     } else if (!synced.ok) {
       code = 1;
       console.error("Codex sync did not complete. Fix the reported Codex config issue and retry.");
@@ -421,8 +453,7 @@ const commandRunners: Record<string, CommandRunner> = {
     // so a sync can fail (`ok: false`) after the catalog was already rewritten — which is
     // exactly when a long-lived app-server is holding the stale list.
     if (synced.catalogWritten || synced.cacheSynced) {
-      afterCatalogWriteHandleAppServers({ restart: restartCodex, log: console });
-      if (restartDesktopApp) await handleDesktopAppRestart(console);
+      await handleRestartScopeAfterWrite(restartScope, console);
     }
     // `ocx sync` is a direct CLI path; it does not call the management
     // `/api/sync` route. Refresh already-connected file integrations here too,
@@ -440,7 +471,7 @@ const commandRunners: Record<string, CommandRunner> = {
             },
             config,
             port: live.port,
-          }, ["mcode", "pi", "raycast"]));
+          }, ["mcode", "pi", "raycast", "omo", "cline"]));
         } catch (error) {
           console.warn(`Client integrations were not refreshed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -469,14 +500,21 @@ const commandRunners: Record<string, CommandRunner> = {
     const { handleConnectCommand } = await import("./connect");
     return await handleConnectCommand(deps.args.slice(1));
   },
+  "remote-workspace": async deps => {
+    const { runRemoteWorkspaceCommand } = await import("./remote-workspace");
+    return await runRemoteWorkspaceCommand(deps.args.slice(1));
+  },
   disconnect: async deps => {
     const { handleDisconnectCommand } = await import("./connect");
     return await handleDisconnectCommand(deps.args.slice(1));
   },
+  catalog: async deps => {
+    const { handleCatalogCommand } = await import("./catalog");
+    return await handleCatalogCommand(deps.args.slice(1));
+  },
   "sync-cache": async deps => {
     const cacheArgs = deps.args.slice(1);
-    const restartCodex = cacheArgs.includes("--restart-codex");
-    const restartDesktopApp = cacheArgs.includes("--restart-desktop-app");
+    const restartScope = readRestartScope(cacheArgs, console);
     const { withCatalogWriteSerialization } = await import("../codex/catalog-write-serialization");
     const { invalidateCodexModelsCacheWithPermit } = await import("../codex/catalog/sync");
     const { getCodexHome } = await import("../codex/paths");
@@ -493,8 +531,7 @@ const commandRunners: Record<string, CommandRunner> = {
       : console;
     // Only warn/restart when models_cache was actually rewritten from a readable catalog.
     if (invalidated.kind === "completed" && invalidated.value) {
-      afterCatalogWriteHandleAppServers({ restart: restartCodex, log: jsonSafeLog });
-      if (restartDesktopApp) await handleDesktopAppRestart(jsonSafeLog);
+      await handleRestartScopeAfterWrite(restartScope, jsonSafeLog);
     } else if (desiredDisabled && !cacheJson) {
       // Worth saying in the human path, because it explains why nothing was written.
       // Under --json this belongs on the envelope, not as a second stdout line.
@@ -928,6 +965,60 @@ export function decideStartWithLiveOwner(input: {
   return input.ocxService === "1" ? "service-stay-out" : "refuse";
 }
 
+/** What `chooseListenPort` does when the preferred port stayed busy through prefer-retry. */
+export type BusyPreferredPortDecision =
+  | "hop"
+  | "refuse-live-proxy"
+  | "service-stay-out"
+  | "refuse-unidentified-holder";
+
+/**
+ * Pure decision for a soft `start` whose preferred port is busy and whose only remaining
+ * option is an ephemeral port.
+ *
+ * The hop exists so a first start is not defeated by a port this machine happens to be
+ * using. What it must never be is a silent answer to "someone is already here": a start
+ * that hops takes over this home's pid and runtime-port records and re-points Codex at
+ * itself, so hopping past a live opencodex leaves two proxies running and the editor
+ * talking to the one the user did not mean (#5004). The hop path never asked who held the
+ * port, and `findLiveProxy` returning null — a stale record, a probe that lost a race, a
+ * loopback family split — was enough to reach it.
+ *
+ * So the decision is made from the holder's own answer rather than from this home's
+ * bookkeeping, and both outcomes stop the start. An opencodex answer is the duplicate this
+ * closes. A holder that does not answer as opencodex is deliberately NOT called foreign:
+ * an identity probe returns the same nothing for a foreign server, an unreachable one, and
+ * one that lost a race, so all the start can honestly say is that the port it was told to
+ * use is taken by something it could not identify — and moving to an arbitrary port is the
+ * one response that hides that from the user while re-pointing Codex. An explicit
+ * `--port` never reaches here (`findAvailablePort` refuses the fallback instead), and a
+ * configured port of 0 is a request for an ephemeral port, not a collision.
+ *
+ * Service-wrapper context keeps the semantics `decideStartWithLiveOwner` gives it: a
+ * healthy proxy on the port means the port is served, and the wrapper's
+ * `if %ERRORLEVEL% NEQ 0` loop must see a zero exit rather than respawn every 5 seconds.
+ */
+export function decideBusyPreferredPort(input: {
+  preferredPort: number;
+  selectedPort: number;
+  hardPin: boolean;
+  holderIsOpencodex: boolean;
+  ocxService: string | undefined;
+}): BusyPreferredPortDecision {
+  // Port 0 (or an unusable preference) asked the OS to choose; nothing was taken away.
+  if (input.preferredPort <= 0) return "hop";
+  // The preferred port was obtained — no hop happened, nothing to decide.
+  if (input.selectedPort === input.preferredPort) return "hop";
+  // Defensive: a hard pin cannot reach a different port, and if it ever did, the pin is
+  // the user's explicit instruction and not something to answer with a refusal here.
+  if (input.hardPin) return "hop";
+  if (input.holderIsOpencodex) {
+    // Same sentinel rule as decideStartWithLiveOwner: only the exact "1" is service context.
+    return input.ocxService === "1" ? "service-stay-out" : "refuse-live-proxy";
+  }
+  return "refuse-unidentified-holder";
+}
+
 export function resolveDispatchCommand(command: string | undefined): string | undefined {
   if (command === undefined) return undefined;
   if (Object.prototype.hasOwnProperty.call(commandRunners, command)) return command;
@@ -940,6 +1031,12 @@ export async function dispatchCommand(head: CliHead, deps: CliDispatchDeps): Pro
     printUsage();
     return 0;
   }
+  if (command === "internal") {
+    // Routed here rather than as a runner key so it stays out of DISPATCH_COMMANDS and
+    // therefore out of the registry-parity gate. See src/cli/internal-command.ts.
+    const { handleInternalCommand } = await import("./internal-command");
+    return await handleInternalCommand(deps.args.slice(1));
+  }
   const runner = commandRunners[resolveDispatchCommand(command) ?? ""];
   if (!runner) {
     console.error(`Unknown command: ${command}`);
@@ -949,62 +1046,12 @@ export async function dispatchCommand(head: CliHead, deps: CliDispatchDeps): Pro
   return await runner(deps);
 }
 
-/**
- * Report the outcome of an opt-in desktop-app restart. Kept next to the two
- * callers so `sync` and `sync-cache` cannot drift in what they tell the user.
- */
-async function handleDesktopAppRestart(log: Pick<Console, "log" | "error">): Promise<void> {
-  const { restartCodexDesktopApp } = await import("../codex/desktop-app-restart");
-  const result = restartCodexDesktopApp();
-  switch (result.reason) {
-    case "windows_only":
-      log.error("--restart-desktop-app is supported on Windows only; nothing was stopped.");
-      return;
-    case "package_discovery_failed":
-      log.error(
-        "Could not identify the installed Codex desktop package. Quit and relaunch the desktop app "
-        + "manually to refresh the model picker.",
-      );
-      return;
-    case "self_ancestry":
-      log.error(
-        "Refusing to restart the desktop app because this command is running inside it. "
-        + "Run 'ocx sync --restart-desktop-app' from an external terminal instead.",
-      );
-      return;
-    case "process_probe_failed":
-      // Distinct from `no_targets`: we could not look, which is not the same as looking and
-      // finding nothing. Saying "not running" here sent users away believing there was nothing
-      // to restart (#2557).
-      log.error(
-        "Could not enumerate Codex desktop processes, so the app was not restarted. "
-        + "Quit and relaunch the desktop app manually to refresh the model picker.",
-      );
-      return;
-    case "no_targets":
-      log.log("Codex desktop app is not running; nothing to restart.");
-      return;
-    case "targets_survived":
-      log.error(
-        `Codex desktop app PID(s) ${result.surviving.join(", ")} did not exit, so it was not relaunched. `
-        + "Quit the desktop app manually to refresh the model picker.",
-      );
-      return;
-    default:
-      if (result.relaunch === "started") {
-        log.log("Codex desktop app restarted; its model picker will re-read the catalog.");
-      }
-  }
-}
-
 async function handleConnectedSyncCatalogWrite(
   result: { catalogWritten: boolean; cacheSynced: boolean },
-  restartCodex: boolean,
-  restartDesktopApp: boolean,
+  scope: RestartScope,
 ): Promise<void> {
   if (!result.catalogWritten && !result.cacheSynced) return;
-  afterCatalogWriteHandleAppServers({ restart: restartCodex, log: console });
-  if (restartDesktopApp) await handleDesktopAppRestart(console);
+  await handleRestartScopeAfterWrite(scope, console);
 }
 
 async function reconcileClientJournalBeforeLifecycle(

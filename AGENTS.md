@@ -31,7 +31,14 @@ Bun-native TypeScript with no separate server compile step.
 - `go/` — retired Go native-runtime experiment; kept only where the TypeScript
   runtime still references it. New work does not go here.
 - `structure/` — maintainer invariants and architecture notes; read before
-  changing shared subsystems.
+  changing shared subsystems. [`structure/INDEX.md`](./structure/INDEX.md) is the
+  reading order and the source-ownership table, and
+  [`structure/AGENTS.md`](./structure/AGENTS.md) holds the rules for changing
+  anything in there. Ownership is not advisory: changing an owned source area
+  obliges the same change to update its doc, and `bun run structure:check`
+  (wired into the suite by `tests/ci-workflows/structure-ssot.test.ts`) fails on a
+  doc that names a path this tree no longer has, on an invariant whose test is
+  gone, and on a new `src/` area nobody claimed.
 - `scripts/` — release and maintenance tooling; `scripts/release.ts` is the
   release authority.
 - `devlog/` — planning and investigation notes, tracked in this repository. See
@@ -187,6 +194,8 @@ bun run test:changed   # import-graph tests against the resolved `dev` merge bas
 bun run test           # full tests/ suite (PR-ready / explicit ask only)
 bun run lint:gui       # GUI eslint
 bun run privacy:scan   # credential/privacy scan used by CI
+bun run structure:check # structure/ doc-map, ownership, and invariant-binding gate
+bun run structure:index # regenerate structure/INDEX.md from structure/manifest.json
 bun run build:gui      # Vite GUI build
 ```
 
@@ -222,6 +231,55 @@ approving such a PR, run `bun run typecheck` and `bun run test`. CI runs these
 on Linux, Windows, and macOS.
 
 Do not rerun passing checks on unchanged code merely for additional confidence.
+
+## What a green pull request does not tell you
+
+Exact-head CI cannot see a defect that exists only in the union of two changes. Each
+branch is correct at its own head, the merge is not, and the failure lands on whoever
+pushes next. One round produced ten of these, including an hour of red `dev`, so the
+classes below are worth checking before you push rather than after.
+
+### The file-size ratchet has almost no headroom
+
+`tests/fixtures/file-size-baseline.json` records a line cap per file and
+`updateBaseline` uses `Math.min`, so a cap only ever moves **downward**. Raising one is
+not possible by design, and a cap is not a suggestion you can negotiate with.
+
+At the time of writing, 39 of the 51 tracked files sit at **exactly** their cap and three
+more are within five lines. Among them are `src/server/index.ts`, `src/config.ts`,
+`src/server/responses/core.ts`, `gui/src/pages/Models.tsx`, and the large test files
+`tests/codex-integration/codex-catalog.test.ts` and
+`tests/responses/openai-responses-passthrough.test.ts`. Adding one line to any of them
+fails `file-size ratchet: repository` for your branch and for every branch cut from
+`dev` afterwards.
+
+Two branches can each stay under a cap alone and sum over it together; that is what
+happened in #4908, #5011 and #5018. The remedy is always a move, never a number: put the
+new case in a sibling file, byte for byte, and register it in **both**
+`scripts/test-layout/layout.json` and `tests/fixtures/test-layout-expected.json`.
+`d3ca5522db` is the original precedent.
+
+A moved test is not automatically the same test. One case moved out of
+`codex-v2-gate.test.ts` failed in isolation and then failed again in place once unrelated
+blocks moved around it, because its final assertion was reading catalog state earlier
+cases had warmed rather than the contract. If a moved case changes colour, suspect the
+case before the move.
+
+### Anything exhaustive over a union
+
+A locale catalog, a `satisfies Record<Union, ...>`, a hand-maintained roster, a count in
+generated documentation. Adding a member to the union in one branch while another branch
+adds a consumer keyed by it produces a merge that typechecks in neither direction.
+
+`typecheck` precedes every job, so one missing member is not one red suite. It took down
+fourteen checks on `dev` — all four test shards, `docker smoke`, `storage policy`,
+`api usage` and all three `npm-global` smokes — when a closed translation namespace still
+listed nine locales after a tenth had landed.
+
+Counts drift the same way and more quietly, because both sides write a plausible number.
+Two branches each added one CLI capability and each wrote `47`; the merged truth was 48.
+Two each added one provider preset and each wrote `94`; the registry had 95. Prefer
+deriving a count or a member list from the thing it describes over restating it.
 
 ## Minimal containers and agent sandboxes
 

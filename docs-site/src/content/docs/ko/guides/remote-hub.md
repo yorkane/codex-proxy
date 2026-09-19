@@ -9,6 +9,8 @@ Remote Hub를 쓰면 프로바이더 인증 정보와 사용량 기록은 허브
 
 관리 포트에서는 `/v1/*`, `/healthz`, `/readyz`, WebSocket을 제공하지 않습니다. 이 포트를 직접 공개하거나 방화벽에 열지 말고 Tailscale Funnel도 사용하지 마세요.
 
+관리 리스너를 사용하면 로컬 대시보드 명령은 `http://127.0.0.1:<관리 포트>`를 엽니다. `localhost` 이름 해석 없이 IPv4 전용 리스너 주소와 일치합니다.
+
 ## 보안과 동의 경계
 
 - 프로바이더/OAuth 인증 정보는 허브 밖으로 복사하지 마세요.
@@ -32,9 +34,18 @@ ocx connect status
 ocx sync
 ```
 
+준비 상태를 사람이 읽는 출력에서는 카탈로그 값의 C0/C1 제어문자, DEL, 유니코드 줄·문단 구분자(U+2028, U+2029)를 눈에 보이는 16진수 이스케이프로 표시합니다. 처음 연결할 때뿐 아니라 `ocx sync`가 새로 받은 허브 카탈로그를 거부할 때도 같습니다. JSON 상태에는 원래 진단값을 그대로 유지합니다.
+
 이 줄을 직접 만들 필요는 없습니다. 허브에서 `ocx hub invite`를 실행하면 코드를 발급하고, 두 Origin이 모두 채워진 명령을 그대로 출력합니다. [다른 컴퓨터 초대하기](#다른-컴퓨터-초대하기)를 보세요.
 
 허브가 발급한 클라이언트별 키는 권한이 제한된 `service-api-token` 파일에 저장됩니다. `config.json`에는 저장되지 않습니다. 연결 중 사용량은 허브 기록에서 해당 `apiKeyId`만 조회하고, 연결을 끊은 뒤에는 로컬 기록을 봅니다. 두 기록은 서로 복제되지 않습니다.
+
+### 연결된 클라이언트의 상태 표시
+
+연결된 클라이언트의 `ocx status`는 허브 상태를 표시합니다. 상태 수집 중 연결 정보가
+바뀌거나 데이터 토큰 파일이 현재 연결과 일치하지 않으면 실시간 허브 조회를 건너뜁니다.
+이때 상태 조회 대상 연결의 캐시를 표시하고, 일치하는 캐시가 없으면 `unavailable`로 보고합니다.
+`ocx status --json`의 `remoteHub.stateSource`는 `hub`, `cache`, `unavailable` 중 하나입니다.
 
 ## systemd 또는 launchd
 
@@ -293,17 +304,30 @@ ocx connect rotate --admin-token-stdin
 
 opencodex는 공식 컨테이너 이미지를 배포하지 않지만, 저장소 루트의 `Dockerfile`과 `compose.yaml`로 digest가 고정된 소스 이미지를 직접 빌드할 수 있습니다. 최초 실행 전에 데이터 키를 stdin으로 초기화하세요. 키는 출력되지 않으며 `ocx-state` 볼륨의 owner-only `service-api-token`에 저장됩니다.
 
-호스트에 Git과 Bun이 필요합니다. 이미지를 빌드할 때마다 Git이 추적하는 소스로 정식 매니페스트를 생성하고, 생성부터 빌드 사이에는 소스를 변경하지 마세요. 생성된 JSON은 Git에 추가하지 않으며 `.git`은 Docker 컨텍스트에서 제외됩니다. 호스트 포트는 기본적으로 `127.0.0.1`에 바인딩됩니다. 원격 공개는 `OPENCODEX_BIND_ADDRESS=<LAN-또는-Tailscale-IP> docker compose up -d`로 명시적으로 선택하며, `0.0.0.0`은 모든 인터페이스에 공개합니다. 방화벽과 인증된 TLS/tailnet 프런트엔드로 보호하세요.
+로컬 체크아웃은 Git과 Docker Compose가 필요하고, 원격 Git 컨텍스트는 Docker Compose만 필요합니다. 두 경로 모두 호스트 Bun 설치나 수동 생성 단계는 필요하지 않습니다. 빌드 전용 단계가 선택한 Git 스냅샷에서 정식 매니페스트를 생성하고 소스를 복사하기 전에 검증합니다. `.git`은 읽기 전용 마운트에서만 사용되며 이미지 레이어에는 복사되지 않습니다. 호스트에서 미리 생성한 매니페스트도 검증을 통과하면 계속 사용할 수 있습니다. 호스트 포트는 기본적으로 `127.0.0.1`에 바인딩됩니다. 원격 공개는 `OPENCODEX_BIND_ADDRESS=<LAN-또는-Tailscale-IP> docker compose up -d`로 명시적으로 선택하며, `0.0.0.0`은 모든 인터페이스에 공개합니다. 방화벽과 인증된 TLS/tailnet 프런트엔드로 보호하세요.
 
 빌드는 오래된 매니페스트를 거부하며 모든 SHA-256을 컨텍스트와 복사된 파일에 각각 대조합니다. 누락·불일치 파일, 매니페스트에 없는 추가 소스, 심볼릭 링크는 거부됩니다. `package.json`, `bun.lock`과 `scripts/`에서 유일하게 포함하는 `scripts/model-metadata.source.json`이 필수입니다.
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
 cd opencodex
-bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
+```
+
+원격 Git 컨텍스트에서 직접 빌드하려면 BuildKit 내장 인수로 Git 메타데이터를 보존하세요.
+
+```yaml
+services:
+  hub:
+    pull_policy: build
+    build:
+      context: https://github.com/lidge-jun/opencodex.git#main
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
 ```
 
 컨테이너 리스너는 `0.0.0.0`에 바인드되므로 컨테이너 자신의 루프백 주소에서도 이미 닿습니다. 와일드카드 바인드에서는 companion 형태가 거부되므로 `unauthenticatedLoopbackListener`는 여기에 해당하지 않습니다. 위의 토큰 부트스트랩이 서비스가 직접 하는 토큰 준비 단계의 컨테이너판이며, 역시 한 번만 실행합니다.
@@ -336,3 +360,12 @@ docker compose up -d
 - `/v1/catalog`가 `403 origin_rejected`인데 `/readyz`가 `200`이면 데이터 리스너가 TLS 프런트엔드 뒤에서 루프백에 바인드되어 있습니다. [데이터 리스너에 TLS 붙이기](#데이터-리스너에-tls-붙이기)를 보세요.
 - 브라우저 로그아웃/만료는 해당 원격 세션만 끊습니다. 데이터 키와는 별개입니다.
 - 연결 해제 후 남은 키는 허브의 **Integrations → API Keys**에서만 폐기할 수 있습니다.
+### 연결된 클라이언트의 사용량
+
+`ocx usage`는 등록된 데이터 키로 허브에서 이 클라이언트의 사용량만 읽습니다. 출력에는 허브 출처와 키 범위가 표시됩니다. 기간·모델·공급자 필터와 `--since`/`--until`, `--json`을 그대로 사용할 수 있습니다. 계정별 내역과 다른 클라이언트 기록은 반환하지 않습니다. 허브가 응답하지 않거나 이 기능을 지원하지 않으면 오류를 알립니다. 로컬 기록으로 대신 표시하지 않습니다. 구형 허브라면 허브를 업데이트하세요.
+
+### 이 브라우저를 허브에 인증하기
+
+기기 연결과 브라우저 인증은 별개입니다. 페어링 패널에 표시된 허브에서 현재 브라우저 주소용 `ocx gui pair --origin` 명령을 실행하세요. 직접 운영하지 않는 허브라면 운영자에게 명령을 전달하고 일회용 코드를 요청하세요. 입력 칸에는 페어링 코드를 붙여 넣습니다. 데이터 API 키나 관리자 토큰을 대신 입력하지 마세요.
+
+인증을 기다리는 동안 정상인 클라이언트를 재시작하라고 안내하지 않습니다. 페어링을 마치면 이전 인증 오류가 캐시에 남아 있어도 대시보드를 새로 읽습니다. 세션이 만료되면 페어링 화면으로 돌아가며, 권한 거부는 별도로 안내합니다. 다른 갱신 오류에서는 마지막 데이터를 오래된 정보로 표시하고 재시도할 수 있습니다.

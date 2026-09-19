@@ -12,6 +12,7 @@ export type Page =
   | "logs"
   | "usage"
   | "storage"
+  | "remote"
   | "codex-set"
   | "integrations";
 
@@ -25,6 +26,7 @@ export const VALID_PAGES = new Set<Page>([
   "logs",
   "usage",
   "storage",
+  "remote",
   "codex-set",
   "integrations",
 ]);
@@ -103,6 +105,8 @@ export const INTEGRATION_TAB_HASHES = [
   "integrations/prime",
   "integrations/aside",
   "integrations/raycast",
+  "integrations/omo",
+  "integrations/cline",
 ] as const;
 
 export function hashBelongsToPage(rawHash: string, page: Page): boolean {
