@@ -18,12 +18,31 @@ import {
   shadowSourceModelPrefix,
   shouldInterceptShadowCall,
 } from "../../lib/shadow-call";
+import {
+  INTERCEPT_TARGET_UNAVAILABLE_CODE,
+  interceptTargetUnavailableResponse,
+  resolveShadowCallTarget,
+} from "./shadow-target-availability";
+
+/** Outcome of the shadow-intercept resolution: a route to use, a refusal to return, or neither. */
+export interface ShadowRouteOutcome {
+  /** Set when the intercept fired: the request must use this route. */
+  route?: RouteResult;
+  /** Set when the operator-chosen target stopped resolving; return it to the client as-is. */
+  response?: Response;
+}
 
 /**
  * Resolve the shadow intercept for the request's current model id, mutating
  * `parsed` in place when the intercept fires (model rewrite, cursor isolation,
- * `_shadowIntercepted` flag) and returning the replacement route. `undefined`
+ * `_shadowIntercepted` flag) and reporting the replacement route. An empty outcome
  * means the caller falls through to the ordinary route for the model id.
+ *
+ * A target that no longer resolves yields `response` instead of falling through
+ * (#5618, applied per-source): the replacement is the one destination the operator
+ * chose, so a dead target fails the helper call once before any send rather than
+ * reaching the native model or the router's default-provider fallback. A combo or
+ * routing-profile target keeps its own declared failover.
  */
 export function resolveShadowRoute(args: {
   parsed: OcxParsedRequest;
@@ -31,21 +50,28 @@ export function resolveShadowRoute(args: {
   logCtx: RequestLogContext;
   options: { comboAttempt?: boolean };
   resolveRoute: (modelId: string) => RouteResult;
-}): RouteResult | undefined {
+}): ShadowRouteOutcome {
   const { parsed, config, logCtx, options, resolveRoute } = args;
   const sci = config.shadowCallIntercept;
-  if (!sci?.enabled || !isShadowSourceModel(parsed.modelId, sci.sourceModels)) return undefined;
+  if (!sci?.enabled || !isShadowSourceModel(parsed.modelId, sci.sourceModels)) return {};
   const sourcePrefix = shadowSourceModelPrefix(parsed.modelId, sci.sourceModels)!;
   // Each source model resolves its own replacement; no replacement => left native.
   const replacement = shadowCallReplacementFor(parsed.modelId, sci);
-  if (!replacement) return undefined;
+  if (!replacement) return {};
   let sourceIdentity = { providerName: OPENAI_CODEX_PROVIDER_ID, modelId: sourcePrefix };
   try {
     const resolvedSource = routeConcreteModel(config, parsed.modelId);
     sourceIdentity = { providerName: resolvedSource.providerName, modelId: sourcePrefix };
   } catch { /* Native Codex helper calls remain OpenAI-owned without an enabled OpenAI route. */ }
-  const targetRoute = resolveRoute(replacement);
-  if (!shouldInterceptShadowCall(parsed.modelId, sci.sourceModels, sourceIdentity, targetRoute)) return undefined;
+  // A dead target fails this helper call once, before any send (#5618).
+  const target = resolveShadowCallTarget(replacement, resolveRoute);
+  if ("unavailable" in target) {
+    logCtx.shadowCallRewrittenFrom = sanitizeLogMetadataString(sourcePrefix);
+    logCtx.errorCode = INTERCEPT_TARGET_UNAVAILABLE_CODE;
+    return { response: interceptTargetUnavailableResponse(replacement, target.unavailable) };
+  }
+  const targetRoute = target.route;
+  if (!shouldInterceptShadowCall(parsed.modelId, sci.sourceModels, sourceIdentity, targetRoute)) return {};
   const original = parsed.modelId;
   parsed.modelId = replacement;
   if (parsed._rawBody && typeof parsed._rawBody === "object") {
@@ -63,7 +89,7 @@ export function resolveShadowRoute(args: {
   // replayed tool names are a property of the replacement model, not of any
   // provider, and direct (non-intercepted) traffic keeps fail-closed.
   parsed._shadowIntercepted = true;
-  return targetRoute;
+  return { route: targetRoute };
 }
 
 /**

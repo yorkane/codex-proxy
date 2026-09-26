@@ -41,7 +41,6 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 export const GENERIC_OAUTH_MAX_FAILOVERS_PER_REQUEST = 3;
 
 const DEFAULT_COOLDOWN_MS = 60_000;
-const MAX_COOLDOWN_MS = 15 * 60_000;
 
 /**
  * How long a presence answer may be reused before the store is consulted again.
@@ -179,11 +178,39 @@ function isProactivePreferenceEnabled(config: OcxConfig, providerName: string, n
 
 /** Accounts that may serve traffic right now: not cooled, not flagged for reauth. */
 export function eligibleFailoverAccounts(providerName: string, now = Date.now(), family?: QuotaModelFamily): string[] {
-  const set = getAccountSet(providerName);
+  return eligibleIdsIn(getAccountSet(providerName), providerName, now, family);
+}
+
+function eligibleIdsIn(
+  set: ReturnType<typeof getAccountSet>,
+  providerName: string,
+  now: number,
+  family?: QuotaModelFamily,
+): string[] {
   if (!set) return [];
   return set.accounts
     .filter(account => account.needsReauth !== true && !isCooled(providerName, account.id, now, family))
     .map(account => account.id);
+}
+
+/**
+ * Whether reactive rotation has an alternate account it could select right now.
+ *
+ * Answers from the same live roster read and the same guards `rotateGenericOAuthAccountOn429`
+ * applies: a roster of fewer than two accounts has nowhere to go, even when a cached quorum
+ * count or a stale failed id would suggest otherwise. It applies no cooldown and advances no
+ * rotation state; like every eligibility read, it may prune an already-expired cooldown entry.
+ */
+export function hasEligibleGenericOAuthFailoverTarget(
+  providerName: string,
+  failedAccountId: string,
+  now = Date.now(),
+  requestedModelId?: string | null,
+): boolean {
+  const set = getAccountSet(providerName);
+  if (!set || set.accounts.length < 2) return false;
+  const family = classifyModelFamilyForQuota(providerName, requestedModelId);
+  return eligibleIdsIn(set, providerName, now, family).some(id => id !== failedAccountId);
 }
 
 /** Generic pool strategies the kernel can actually run. `quota` IS the pre-kernel path. */
@@ -321,12 +348,15 @@ export function rotateGenericOAuthAccountOn429(
   // A single stored account has nowhere to go; rotating to itself would just replay the 429.
   if (!set || set.accounts.length < 2) return null;
 
-  const parsed = parseRetryAfterMs(retryAfterHeader, now, { preserveImmediate: true });
+  // `preserveServerDelay` keeps the delay the server actually stated, bounded by the parser's
+  // one-day ceiling, exactly as the combo path does. Truncating it locally only guarantees a
+  // second 429 on an account we were told to leave alone.
+  const parsed = parseRetryAfterMs(retryAfterHeader, now, { preserveImmediate: true, preserveServerDelay: true });
   // An account whose allowance is provably spent gets a reset-aligned cooldown instead of
   // the default minute: retrying it every 60s until the window rolls over is pure waste.
   // A Retry-After from upstream still wins — it is the server's own instruction.
   const exhausted = parsed === undefined ? exhaustedCooldownMs(providerName, failedAccountId, now) : null;
-  const cooldownMs = exhausted ?? Math.min(parsed ?? DEFAULT_COOLDOWN_MS, MAX_COOLDOWN_MS);
+  const cooldownMs = exhausted ?? parsed ?? DEFAULT_COOLDOWN_MS;
   const family = classifyModelFamilyForQuota(providerName, requestedModelId);
   health.set(healthKey(providerName, failedAccountId, family), {
     cooldownUntil: now + cooldownMs,

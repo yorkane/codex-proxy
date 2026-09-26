@@ -64,6 +64,13 @@ export type EmittedCallDecision =
 export interface EmittedCallGuardOptions {
   /** Wire names the request declared. Absent or empty means no catalog, so nothing is enforced. */
   declaredToolNames?: ReadonlySet<string>;
+  /**
+   * Explicit caller assertion that only request-declared tools may be called. Without a
+   * catalog nothing can authorize an emission, so an explicit true fails an undeclared call
+   * closed (upstream #4735-era semantics); absent or false keeps the fork's "no catalog
+   * means no enforcement" contract for bridge callers that never build one.
+   */
+  enforceDeclaredToolNames?: boolean;
   /** Declared names that take freeform input (exec-style). Drives leak feedback. */
   freeformToolNames?: ReadonlySet<string>;
   /** Allowlisted hallucinated names to drop on sight (shadow-scoped phantomToolAllowlist). */
@@ -86,14 +93,22 @@ export interface EmittedCallGuardOptions {
  *
  * The emitted name is the raw name the model sent; the returned name is the wire
  * name the caller should use. Enforcement is opt-in: with no catalog the call is
- * allowed through untouched.
+ * allowed through untouched, unless the caller explicitly asserted enforceDeclaredToolNames:
+ * true, which fails an undeclared emission closed even against an empty catalog.
  */
 export function resolveEmittedCall(
   emitted: string,
   options: EmittedCallGuardOptions = {},
 ): EmittedCallVerdict {
   const declared = options.declaredToolNames;
-  if (!declared || declared.size === 0) return { kind: "allow", name: emitted, repaired: false };
+  if (!declared || declared.size === 0) {
+    if (options.enforceDeclaredToolNames === true) {
+      // Nothing is declared, so nothing is authorized: the caller asked for fail-closed.
+      options.onDecision?.({ emitted, effective: emitted, decision: "undeclared" });
+      return { kind: "drop", name: emitted };
+    }
+    return { kind: "allow", name: emitted, repaired: false };
+  }
 
   const normalized = normalizeDeclaredToolName(emitted, declared);
   const effective = repairEmittedToolName(normalized, declared);

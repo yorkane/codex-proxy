@@ -136,28 +136,47 @@ Remove the stored OAuth credential for a provider.
 
 ## Accounts and key pools
 
-### Main-account 99% protection
+### Main-account 98% protection
 
-In **Codex settings → Multi-auth → Advanced settings**, **Block main account at 99%**
-is an independent opt-in beside Ultra Fast. Enabling it first shows the consequences; cancelling
-does not change the setting. The main-account card shows monitoring, unknown usage, or a current
-policy block even when Advanced settings is closed.
+In **Codex settings → Multi-auth → Advanced settings**, **Block main account at 98%**
+is on by default beside Ultra Fast. Switching it off applies immediately; turning it back on first
+shows the consequences, and cancelling does not change the setting. The main-account card shows
+monitoring, unknown usage, or a current policy block even when Advanced settings is closed.
 
-The policy uses the **5h window when present**, otherwise the weekly window. Monthly-only
-accounts use their monthly window. It does not take the highest percentage across windows.
-A fresh **0%** observation automatically releases the block while the switch stays on; the next
-99% observation blocks again. Unknown usage does not fabricate a zero, and a missing reading does
+The default follows from what a drained main account does to Codex Desktop: once the ChatGPT
+account window reports **0%** remaining, Desktop disables its send button and the account stops
+accepting turns until the window resets. Holding ocx's own traffic below that point keeps the
+account usable ([#5694](https://github.com/lidge-jun/opencodex/issues/5694)). The cost is Luna
+Reserve: while the block is in force, Reserve on that main account cannot activate. To let the main
+account run to exhaustion and hand over to Reserve, turn the switch off.
+
+The **5h window and the weekly window each block on their own**: either one reaching 98% blocks
+immediately, even while the other still has headroom. Monthly-only accounts use their monthly
+window. The block releases automatically, with the switch still on, once every blocking window
+reports a fresh reading below 98% (a 0% reset counts); the next 98% observation blocks again.
+An unreadable 5h reading cannot hide a weekly block. Unknown usage does not fabricate a zero, and a missing reading does
 not erase an already measured blocking tuple. A predicted reset time alone does not unlock it.
 While blocked, the existing once-per-minute background cycle checks fresh owned usage; failed or
 invalid readings retain the block. Other pause, reauthentication, and upstream limits remain independent.
 
-The persisted option is `"codexMainAccountHardLock": true` in OpenCodex's `config.json`; it is off
-by default. This protects new requests using the identified main account, not the last 1% itself:
-already-running requests, unmatched caller-owned keyring credentials, and traffic outside the
-proxy can still spend quota. Added accounts and other providers remain available.
+Protection treats one fresh valid WHAM usage response as a replacement for the old 5h reading when
+its primary window explicitly lasts **at least 24 hours** and secondary/tertiary windows are explicitly `null`
+or also explicitly last at least 24 hours and report their usage. This follows the parser's short/long boundary, so a
+one-day window qualifies as well as weekly/monthly windows. The current window still uses the same
+98% threshold. This relies on the single reported snapshot; repeated observations are not required.
+Omitted secondary/tertiary fields, an unknown primary duration, or partial response headers cannot clear a previous block.
 
-With protection enabled, an owned startup restores the main credential's in-memory identity
-binding after native-profile recovery and cleanup, so a persisted 99% block survives a restart.
+The persisted option is `"codexMainAccountHardLock"` in OpenCodex's `config.json`. An absent key or
+`true` means on; only an explicit `false` turns it off, and that is what switching the setting off
+stores. The default changed here: the policy used to be opt-in and the old switch removed the key
+when it was turned off, so an install that had switched it off now reads as on. If you want the old
+behavior, switch it off once to record the opt-out. Protection covers new requests using the
+identified main account, not the last 2% itself: already-running requests, unmatched caller-owned
+keyring credentials, and traffic outside the proxy can still spend quota. Added accounts and other
+providers remain available.
+
+With protection on, an owned startup restores the main credential's in-memory identity
+binding after native-profile recovery and cleanup, so a persisted 98% block survives a restart.
 Caller-owned Direct, exact-main, main-fallback, and main-pin requests can briefly receive 503
 while that binding is pending; healthy stored Pool accounts stay eligible throughout. No
 credential is read from a foreign or unconfirmed service home for this initialization.
@@ -191,7 +210,7 @@ Each compatibility request checks a credential-bound server authorization, cache
 requires ordinary usage to be disallowed, the Luna Reserve banner, and exactly one allowed Reserve
 bucket. Missing, denied, stale or mismatched evidence refuses the request; it does not switch accounts
 or silently use ordinary Luna. Passive usage can revoke authorization but cannot create it.
-Global cooldown, pause, reauthentication and the 99% hard lock still apply. Disable the hard lock if
+Global cooldown, pause, reauthentication and the 98% hard lock still apply. Turn the hard lock off if
 you want to use Reserve on an exhausted main account; doing so does not grant server entitlement.
 This compatibility path supports conversation requests and compaction, not Reserve as a vision or
 web-search helper or a standalone search-relay model. Choose another model for those helpers.
@@ -207,20 +226,30 @@ List and switch provider accounts and API-key pools through the running proxy. T
 surface is:
 
 ```text
-Usage: ocx account <list|current|use|refresh|auto-switch|priority|login|reauth|code|cancel|remove|add-key|reset-credits|grok-reset-coupons|import-orca> ...
+Usage: ocx account <list|history|current|use|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
+history openai <pool-account-id> [--limit <1-200>]  Recent routing decisions for one Codex pool account.
 current <provider>  Show the active account or key.
-use <provider> <id> Switch the active credential; 'main' selects the Codex App login.
+use <provider> <id|alias|main|auto> Switch the active credential; 'main' selects the Codex App login, 'auto' clears the selection.
 refresh <provider>  Force-refresh Codex or provider quota reports.
 auto-switch <provider> <on|off|status|threshold N>  Control the Codex pool threshold.
-priority <provider> <id|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
-remove <provider> <id> --yes  Remove a stored account or key after an existence check.
+alias <provider> <id|alias> <display-name|->  Set or clear an account's display name; '-' clears it.
+pause <provider> <id|alias|main>  Hold an account out of automatic selection.
+resume <provider> <id|alias|main>  Return a paused account to automatic selection.
+pause-exhausted <provider>  Pause every account whose quota is spent.
+clear-cooldown <provider> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
+strategy <provider> [<quota|round-robin|fill-first|reset-first>]  Pool placement strategy; omit the value to read it.
+sticky <provider> [<1-100>]  Requests a bound thread keeps on one account; omit the value to read it.
+priority <provider> <id|alias|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
+remove <provider> <id|alias|main> --yes  Remove a stored account or key after an existence check.
 add-key <provider> [--label <label>]  Add a key read only from piped stdin.
 login/reauth/code/cancel  Run browser or manual-code auth from a headless shell.
 reset-credits <id|main> [--consume --yes]  Inspect or consume Codex reset credits.
 grok-reset-coupons [<id>] [--consume --yes] [--token-id <token-id>] [--operation-id <uuid>]  Inspect or redeem Grok reset coupons.
+import <provider> --format <format> (--file <path>|--stdin)  Import credentials from a named external format.
 import-orca --source <dir> --registry <file> [--apply]  Preview or apply imports from Orca-managed Codex homes.
+main <doctor|list|register|add|reauth|switch|recover>  Manage the Codex App login the pool calls 'main'.
 Switching the active account takes effect immediately; running threads move on their next request, and in-flight requests keep the account they captured.
 A selection-order change applies from the next unbound request and never moves a bound thread.
 ```
@@ -364,7 +393,9 @@ that state and still exits 0. `--json` returns:
 { provider, type, activeId: string | null, autoSwitchThreshold?: number, account: AccountRow | null }
 ```
 
-### `ocx account use <provider> <account-or-key-id|main> [--json]`
+### `ocx account use <provider> <account-or-key-id|alias|main|auto> [--json]`
+
+`auto` clears the manual selection so the pool places work by its own strategy again. Any Codex account can be named by the alias set with `ocx account alias` instead of its id; that holds for `priority`, `pause`, `resume`, `clear-cooldown`, `remove` and `alias` too. For Codex accounts, `auto`, `main` and `__main__` are reserved regardless of case and cannot be assigned as aliases. OAuth and API-key display names keep their existing rules.
 
 Selects an existing Codex account, OAuth account, or API key. For `openai`, `main` selects the Codex
 App login. A Codex Pool selection clears process-local affinity and applies to the next request,
@@ -407,7 +438,7 @@ openai: { provider, autoSwitchThreshold: number, enabled: boolean }
 generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: boolean | null }
 ```
 
-### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
+### `ocx account priority <provider> <account-id|alias|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`
 
 Reads or sets one Codex pool account's selection order: **higher is used earlier**, the default is
 `0`, and the range is `-100` through `100`. Only the `openai` Codex pool is ordered, so other
@@ -468,7 +499,7 @@ machine"** checkbox on the add-account modal. That setting already means the ope
 sitting at the proxy host, which is exactly when a callback URL is useless — so ticking it
 switches the Codex login to the device flow and shows a copyable code instead.
 
-### `ocx account remove <provider> <id|main> --yes [--json]`
+### `ocx account remove <provider> <id|alias|main> --yes [--json]`
 
 This guarded, non-interactive deletion requires `--yes`. Before deleting, it verifies that the id
 exists; a missing id exits 1 without sending DELETE. The main Codex App login cannot be removed, so
@@ -621,7 +652,7 @@ proxy to be running (`ocx start`, or an installed service).
 | `provider <name> <on\|off>` | `--json` | Enable or disable every model of one provider in a single write. |
 | `selected <provider>` | `--set <id,id...>`, `--clear`, `--json` | Read or replace the provider model allowlist. `--clear` removes the allowlist so every model is offered. |
 | `context <status\|value <tokens> [--set-all]\|provider <name> on [--value <tokens>]\|provider <name> off\|all <on\|off>>` | `--json` | Read or set the context-window cap, globally or per provider. `value <tokens> --set-all` also re-points every routed provider (like the dashboard toggle); without it the value only becomes the default. `provider ... on --value <tokens>` sets an explicit cap for that provider only (`--value` is valid with `on` only). |
-| `shadow <status\|set> [model\|-]` | `--enabled <on\|off>`, `--json` | Read or set the replacement model for Codex's background helper calls. `-` clears the model. `status` also reports `sourceModels`, the helper slugs the proxy intercepts (default: `gpt-5.6-luna`; clients through 0.144.x used `gpt-5.4-mini`, which an explicit `sourceModels` override can restore). |
+| `shadow <status\|set> [model\|-]` | `--enabled <on\|off>`, `--json` | Read or set the replacement model for Codex's background helper calls. `-` clears the model. `status` also reports `sourceModels`, the helper slugs the proxy intercepts (default: `gpt-6-luna`, `gpt-5.6-luna`; clients through 0.144.x used `gpt-5.4-mini`, which an explicit `sourceModels` override can restore). |
 
 ```bash
 ocx models live --json                                  # what Codex can actually see right now

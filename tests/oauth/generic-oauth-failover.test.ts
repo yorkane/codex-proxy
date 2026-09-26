@@ -7,6 +7,7 @@ import {
   clearGenericFailoverHealth,
   eligibleFailoverAccounts,
   genericFailoverRetryAfterSeconds,
+  hasEligibleGenericOAuthFailoverTarget,
   hasFailoverAccountQuorum,
   isGenericFailoverProvider,
   isGenericOAuthFailoverEnabled,
@@ -241,6 +242,10 @@ describe("#2568 generic OAuth account failover", () => {
     const ids = await seed(2);
     const cfg = config();
     expect(rotateGenericOAuthAccountOn429(cfg, "xai", ids[0]!, "120")).toBe(ids[1]);
+    // The durable roster quorum remains active, but the only alternate is cooled. A denied
+    // request budget must not describe this state as an otherwise available rotation.
+    expect(isGenericOAuthFailoverEnabled(cfg, "xai")).toBe(true);
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", ids[1]!)).toBe(false);
     expect(rotateGenericOAuthAccountOn429(cfg, "xai", ids[1]!, "30")).toBeNull();
     const retryAfter = genericFailoverRetryAfterSeconds("xai");
     // The earliest window wins: a client must not be told to wait for the longest cooldown.
@@ -248,10 +253,40 @@ describe("#2568 generic OAuth account failover", () => {
     expect(retryAfter!).toBeLessThanOrEqual(30);
   });
 
+  test("an uncooled alternate reports an eligible target", async () => {
+    const ids = await seed(2);
+    // The negative case above proves cooled accounts are excluded; without this positive
+    // side an always-false implementation would also pass, silently deleting the
+    // rotation-send-budget attribution for the normal case it exists to describe.
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", ids[0]!)).toBe(true);
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", ids[1]!)).toBe(true);
+  });
+
+  test("a one-account roster reports no eligible target even for a stale failed id", async () => {
+    const [solo] = await seed(1);
+    // The failed account can be removed after the request was sent, leaving one stored account
+    // whose id differs from the failed one. Rotation refuses a roster under two accounts, so the
+    // probe must not describe that state as a rotation the send budget withheld.
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", "removed-account")).toBe(false);
+    expect(hasEligibleGenericOAuthFailoverTarget("xai", solo!)).toBe(false);
+    expect(rotateGenericOAuthAccountOn429(config(true), "xai", "removed-account", null)).toBeNull();
+  });
+
   test("Retry-After drives the cooldown length", async () => {
     const ids = await seed(2);
     rotateGenericOAuthAccountOn429(config(), "xai", ids[0]!, "600");
     expect(genericFailoverRetryAfterSeconds("xai")).toBeGreaterThan(500);
+  });
+
+  test("a stated Retry-After past the local cap is honoured, not truncated", async () => {
+    const ids = await seed(2);
+    const now = Date.now();
+    // One hour. Retrying before it elapses buys a second 429 on an account upstream already
+    // told us to leave alone — the exact wasted send this pool exists to avoid.
+    expect(rotateGenericOAuthAccountOn429(config(), "xai", ids[0]!, "3600", now)).toBe(ids[1]);
+    expect(genericFailoverRetryAfterSeconds("xai", now)).toBe(3600);
+    // Still cooled long after any local truncation would have released it.
+    expect(eligibleFailoverAccounts("xai", now + 20 * 60_000)).toEqual([ids[1]!]);
   });
 
   test("an excluded provider is never enabled, however many accounts it has", async () => {
@@ -281,6 +316,15 @@ describe("#2568 generic OAuth account failover", () => {
  */
 describe("sidecar on429 wiring", () => {
   const coreSource = readResponsesCoreSource();
+
+  test("budget-withheld attribution proves a cooldown-eligible generic OAuth target", () => {
+    // Continuation, native passthrough and run-turn each have their own budget-denial branch.
+    // A durable two-account quorum is insufficient because it intentionally ignores cooldowns.
+    expect(coreSource.match(/hasEligibleGenericOAuthFailoverTarget\(/g)).toHaveLength(3);
+    // The check must GATE the log, not merely run beside it: every call site wraps
+    // noteAttemptRecoveryWithheld in the eligibility condition.
+    expect(coreSource.match(/hasEligibleGenericOAuthFailoverTarget\([\s\S]*?\)\s*\)\s*noteAttemptRecoveryWithheld/g)).toHaveLength(3);
+  });
 
   test("both sidecar loops receive the SAME hook, so neither can drift key-pool-only", () => {
     const hooks = coreSource.match(/^\s*on429: (\w+),$/gm)?.map(line => line.trim()) ?? [];

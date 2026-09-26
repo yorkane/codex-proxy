@@ -6,6 +6,18 @@ The client-integration subsystem writes one generated OpenCodex provider contrib
 third-party client's existing config without taking ownership of the rest of that file. Its core
 promise is reversibility: apply snapshots first, writes atomically, records exactly what it owns,
 and refuses refresh, disable, or restore when the current file cannot be classified safely.
+Managed client targets are inspected without following a final symbolic link, and their atomic
+replacement addresses the named directory entry rather than resolving that link again at commit.
+Uninstall runs the same coordinated disable path for every strict ownership record before removing
+OpenCodex state, including the legacy Aside owner and every child profile store under
+`integrations/aside-profiles/<profileId>/`. `src/cli/uninstall-integrations.ts` validates all stores
+and registered Aside paths before mutation; `src/integrations/aside-profile-context.ts` supplies
+the guarded child stores. An unreadable record, conflict, or failed compensation aborts config
+removal and retains remaining recovery state. Earlier successful disables are not rolled back;
+failed compensation can leave an intermediate client file. Inspect the reported client files and
+retained snapshots before retrying; preserved recovery state does not prove restoration completed.
+
+> Decision record: [ADR-0107](../decisions/ADR-0107-uninstall-integration-recovery.md)
 
 Shared response support has a separate [bounded ingestion contract](../transports/inventory.md#bounded-response-ingestion-and-orcarouter-login):
 raw-byte callers own their byte and deadline budgets and inherit best-effort cancellation.
@@ -17,7 +29,8 @@ parsing and ownership rules below.
 | Module | Responsibility |
 | --- | --- |
 | `src/clients/config-export.ts` | Pure per-client config builders and the exact managed fragments each client receives. It never writes files. |
-| `src/integrations/registry.ts` | Canonical config/detection paths, source-preserving YAML declarations, writer-lock behavior, and client IDs. |
+| `src/integrations/registry.ts` | Canonical config/detection paths, current-provider-store declarations, source-preserving YAML declarations, writer-lock behavior, and client IDs. |
+| `src/integrations/target.ts` | Which file one operation reads, writes and records, and whether a write there reaches the client. |
 | `src/integrations/config-io.ts` | Bounded file loading and parsing. Values that cannot round-trip through the target serializer are rejected before mutation. |
 | `src/integrations/state.ts` | The single `absent` / `current` / `stale` / `conflict` / `unsafe` classifier used by status and every writer operation. |
 | `src/integrations/ownership.ts` | Durable ownership records: file, generated contribution, protected contribution, exact fragment paths, and operation identity. |
@@ -25,6 +38,14 @@ parsing and ownership rules below.
 | `src/integrations/writer.ts` | Apply, refresh, disable, and restore transactions, including snapshot-first ordering, compare-before-commit, and compensation. Freezing an input copies the proxy configuration and the model roster as plain data before the first await, so the plan a revalidation approves and the document that follows it read one input; an input that cannot be copied is refused rather than read twice. Aside captures the same configuration copy when its context is created, because its preference write edits the live configuration between the check and the profile writes. |
 | `src/integrations/mutation-plan.ts` | The shared observation both a preview and a mutation read, and the value-free plan an operator confirms. It owns no IO of its own, takes no lock, and must never import `writer.ts`. |
 | `src/integrations/store.ts` / `journal.ts` | One-root persistence for ownership records, operation history, snapshots, and retention maintenance. |
+
+## Cursor installed capability reads
+
+`src/integrations/cursor-effort-table.ts` reads the installed agent bundle through one regular-file
+handle, refuses final symlinks where supported, and caps bytes read even if the file grows after
+inspection. Failure retains the static-table fallback. Parsed content is cached by path, mtime and
+size; the returned table always uses the current install version, including on a cache hit.
+`tests/providers/cursor/cursor-effort-table.test.ts` covers cache reuse, version refresh and unsafe files.
 
 ## Data Flow
 
@@ -164,6 +185,26 @@ because its authoritative input-modality vocabulary currently has no video value
 
 > Decision record: [ADR-0090](../decisions/ADR-0090-hermes-model-capabilities.md)
 
+## Hermes session affinity
+
+Hermes exports include `session_affinity_header: session-id` on the entire OpenCodex provider,
+independent of the model roster. This is a header name: Hermes generates the conversation-scoped
+value. No static session identifier or protocol switch is emitted, and upstream header-forwarding
+rules remain unchanged. Hermes must support the documented per-provider affinity option to use it.
+
+`src/integrations/ownership-policy.ts` recognizes exactly one predecessor: an owned Hermes block
+without this setting. The block may remain unchanged or have gained only the supported value; after
+removing that field, its exact or recorded semantic fingerprint must match the previous record.
+Client, config path and fragment-path ownership still apply. Other edits remain conflicts, and
+after adoption the affinity field is fully protected, including against deletion.
+
+Legacy blocks report `stale` until an explicit Apply records the new contribution. Implicit refresh
+leaves both their configuration and ownership unchanged, reporting that Apply is needed; this also
+defers catalog updates until Apply. Once upgraded, normal refresh resumes and preserves affinity.
+Replace emits the setting too. The existing source-preserving YAML, snapshot and restore paths
+remain authoritative. `tests/clients/integrations-hermes-affinity.test.ts` exercises the real writer
+against temporary client homes, including exact-workaround adoption, refusal, refresh and undo.
+
 ## Ownership Axes
 
 `fileFingerprint` records the exact whole-file result for restore and for serializers that may lose
@@ -207,6 +248,68 @@ fail closed. A successful refresh writes the new operation-scoped policy.
 
 > Decision record: [ADR-0092](../decisions/ADR-0092-zcode-runtime-metadata.md)
 
+## A store the client no longer reads
+
+A client may move its provider list to a different file between releases and keep the old one
+reachable only through a one-shot import. That import runs on an install that has never created the
+new file and never again, so every later write to the old path is read by nobody. ZCode 3.14 is the
+instance this rule was written for: the apply was correct, the ownership record was correct, the
+journal row was correct, and no model appeared in the client.
+
+A client in that position declares `currentStore` in the registry. The declaration is not only a
+location: it carries the text format of that file, the contribution shape its reader understands,
+and the predicate that decides whether a document on disk is a version whose shape has been
+observed. Naming the store without the last three would be naming a file we cannot write.
+
+`src/integrations/target.ts` turns that declaration into the one answer every surface uses: which
+file this operation reads, writes, journals and records, and whether a write there reaches the
+client. It decides from three facts, in order:
+
+1. No declared store, or no store on disk — the config file, unchanged. A client that has never run
+   still imports what we write there, which is why the rule keys on the store's presence rather
+   than on a client version.
+2. This project's own block already in one of the two files — that file. Disable removes what we
+   wrote from where we wrote it, and no apply leaves a block in one file while writing another.
+3. Otherwise the store, and only when its schema establishes.
+
+Four properties are load-bearing:
+
+- The store is observed through the same `IntegrationIO` seam as the config file, so status and
+  mutation cannot disagree about which file an operation is about. Only proven absence permits
+  legacy writes; failed observations and non-file stores refuse apply/refresh as unestablished.
+- The ownership record, the journal row and the undo guard all follow the target rather than the
+  client. A row naming the store is restorable because the guard asks whether this client still
+  names that location, not whether it is the config file.
+- The refusal is bound into the plan fingerprint together with its reason, so a confirmation taken
+  before the client created its store cannot be committed afterwards — and neither can one taken
+  before the store's schema version moved under an unchanged path.
+- Disable is never gated on it. Removing bytes this project wrote from the file it wrote them to is
+  unaffected by where the client reads, and refusing it would leave the block unremovable through
+  the tool.
+
+Writing the store does not relax ownership anywhere. The store keys a model rule by the pair
+`(providerId, modelId)`, so the managed path names both: a selector naming only the model would
+match another provider's rule for the same model and replace it. A rule carrying this project's
+provider id that no record accounts for — including one the client's own migration created — is a
+conflict, and the explicit overwrite remains the only way past it.
+
+Persisted selector segments have two disjoint grammars owned by `src/integrations/merge.ts`.
+An unversioned `[field=value]` segment is permanently a one-criterion selector; commas and later
+equals signs remain part of its value, so an older ownership record keeps naming the same element.
+New multi-field selectors use the explicit `[v2:field=value,field=value]` grammar and are emitted by
+the shared formatter. A segment beginning with that reserved marker but failing the complete v2
+grammar is unreadable rather than a plain key or a v1 selector, so malformed persisted bytes cannot
+silently select a different element.
+
+A store whose schema cannot be established is reported, never merged into. That file holds the
+user's other providers and the client rewrites it on its own, so asserting a nesting we have not
+observed would trade a silent no-op for a silent loss. Status reports the store beside the file
+state rather than folding it into the state: `current` remains the truth about the file, and the
+notice appears only when the client reads some other file than the one the state is about.
+
+Deleting the client's store to re-trigger its own import is not implemented and must not be. It
+discards every provider the client keeps there.
+
 ## Verification
 
 Behavior changes require real writer tests against a temporary home and state store. At minimum,
@@ -245,6 +348,9 @@ what produced a dead socket on a tailnet-bound hub in the first place.
 
 ## Aside profile ownership
 
+The local CLI sync shares one absolute deadline across listener attestation and the
+capability-bearing POST, even if the listener keeps sending partial bytes.
+
 Aside discovery projects only registered numeric account IDs, labels and current status. Catalog
 paths derive from the configured root/u/id, never from browser profilePath. Guarded filesystem
 identity and IO apply to status and writes; internal resolved path pairs survive async freezing.
@@ -280,3 +386,6 @@ existing explicit confirmation. The journal endpoint evaluates Undo against the 
 Recovery reads commit history and ownership through strict store methods. Unreadable or malformed
 metadata is uncertainty, never evidence that a transaction did not commit. Pending records validate
 complete ownership, exact Cline paths and result fingerprints before either native file is replaced.
+Native pair writes replace the named directory entries without following final symlinks. A symlink
+present at validation is refused, and one exchanged into place during a mutation is refused rather
+than redirecting OpenCodex's write outside Cline's settings directory.

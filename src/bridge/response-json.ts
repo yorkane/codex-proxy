@@ -7,6 +7,7 @@ import type {
   OcxUsage,
 } from "../types";
 import { coerceIntegerToolArguments } from "../lib/tool-argument-integers";
+import { attemptDeliveryRecorder } from "../usage/attempt-delivery";
 import {
   adapterFailureFromMessage,
   classifyError,
@@ -46,14 +47,30 @@ import { adapterFailureFromEvent, emptyChunks, joinChunks, responsesUsage, toolC
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
 
+/** Build a buffered Responses result within a caller-owned or temporary translator budget. */
 export function buildResponseJSON(
   events: AdapterEvent[],
   modelId: string,
-  options?: Parameters<typeof buildResponseJSONWithBudget>[2],
+  options?: Parameters<typeof buildResponseJSONWithBudget>[2] & {
+    /**
+     * False when the body is not what the client receives: a direct client encoder counts its
+     * own relayed frames and folds the same events here only for the completion effects.
+     */
+    recordBufferedDelivery?: boolean;
+  },
 ): Record<string, unknown> {
   // Default-budget safety net: a caller that omits the budget gets a bounded
   // default (disposed with the call), never the unbounded append path.
-  if (options?.translatorBudget) return buildResponseJSONWithBudget(events, modelId, options);
+  if (options?.translatorBudget) {
+    const body = buildResponseJSONWithBudget(events, modelId, options);
+    // A buffered turn delivers its whole answer as one body, so nothing calls the per-frame
+    // recorder on the SSE bridge. Without this the attempt would persist adapter events with
+    // zero relayed ones, which is the loss signal -- raised on every non-streaming request.
+    if (options.recordBufferedDelivery !== false) {
+      attemptDeliveryRecorder(options.translatorBudget)?.noteBufferedDelivery(body);
+    }
+    return body;
+  }
   const budget = createTranslatorBudget();
   try {
     return buildResponseJSONWithBudget(events, modelId, { ...options, translatorBudget: budget });
@@ -62,13 +79,14 @@ export function buildResponseJSON(
   }
 }
 
+/** Fold adapter events into a Responses result while enforcing the requested tool boundary. */
 function buildResponseJSONWithBudget(
   events: AdapterEvent[],
   modelId: string,
   options?: {
     hideThinkingSummary?: boolean;
     toolNsMap?: Map<string, { namespace: string; name: string; freeform?: true }>;
-    /** Request-visible tool names. When present, an upstream call outside this set fails closed. */
+    /** Request-visible tool names. Required for client calls when enforcement is explicitly enabled. */
     declaredToolNames?: ReadonlySet<string>;
     /** See `bridgeToResponsesSSE`: enforcement is separate from normalization (#4735). */
     enforceDeclaredToolNames?: boolean;
@@ -447,21 +465,26 @@ function buildResponseJSONWithBudget(
         // Same single decision point as the streaming twin in bridge/sse.ts.
         const verdict = resolveEmittedCall(e.name, {
           declaredToolNames: options?.declaredToolNames,
+          // Upstream #4735: a catalog that is merely PRESENT (even explicitly empty)
+          // authorizes enforcement unless the inbound wire opted out; an explicit true
+          // enforces even without a catalog.
+          enforceDeclaredToolNames: options?.enforceDeclaredToolNames !== false
+            && (options?.enforceDeclaredToolNames === true || options?.declaredToolNames != null),
           freeformToolNames: options?.freeformToolNames,
           phantomNames: options?.undeclaredToolPhantomNames,
           undeclaredFeedback: options?.undeclaredToolFeedback,
         });
-        if (verdict.kind === "drop" && options?.declaredToolNames) {
+        if (verdict.kind === "drop") {
           // Phantom-allowlist drop: the call is never opened - currentToolCallId
           // stays empty, which every downstream flush keys on - so its deltas and
           // end event are no-ops and no item enters the output. Otherwise the
           // undeclared call fails the batch closed (unless enforcement is deferred, #4735).
-          if (options.undeclaredToolPhantomNames
+          if (options?.undeclaredToolPhantomNames
             && (options.undeclaredToolPhantomNames.has(verdict.name)
               || options.undeclaredToolPhantomNames.has(e.name))) {
             break;
           }
-          if (options.enforceDeclaredToolNames !== false) {
+          if (options?.enforceDeclaredToolNames !== false) {
             errorEvent = {
               type: "error",
               message: `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,

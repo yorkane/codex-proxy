@@ -20,6 +20,17 @@ const LEAKED_JSON_ENVELOPE = /^\{\s*['"][^'"\n]{1,200}['"]\s*:/;
 /** Program opening on a serialized parameter tag: also never valid JS. */
 const LEAKED_PARAMETER_TAG = /^<\/?parameter[\s>=]/i;
 
+/**
+ * A body that starts with one of exec's OWN freeform wrapper fields (#5047 / #5151).
+ *
+ * When upstream's unwrap path declines to unwrap such an object — two candidate fields, or
+ * JSON that never parses — the completed item is the raw text, and the bridge contract pins
+ * that body byte-exact (streamed deltas must equal it). The leak repair must not fire on it,
+ * or the stable representation those tests pin disappears. A leaked envelope names ANOTHER
+ * tool's fields, so it never matches this shape.
+ */
+const EXEC_WRAPPER_FIELD_HEAD = /^\{\s*"(?:input|code|script|js|javascript|command|cmd|content)"\s*:/;
+
 const REPAIR_MESSAGE =
   "opencodex envelope repair: exec input was rejected because it looks like a " +
   "serialized tool-call envelope (a JSON object with quoted keys, or an XML " +
@@ -30,6 +41,7 @@ const REPAIR_MESSAGE =
 /** Whether one unwrapped exec body is guaranteed to crash the client JS VM. */
 export function looksLikeExecEnvelopeLeak(unwrapped: string): boolean {
   const head = unwrapped.trimStart();
+  if (EXEC_WRAPPER_FIELD_HEAD.test(head)) return false;
   return LEAKED_JSON_ENVELOPE.test(head) || LEAKED_PARAMETER_TAG.test(head);
 }
 

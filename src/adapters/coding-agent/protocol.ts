@@ -21,6 +21,30 @@ export const MAX_STREAM_LINE_BYTES = 8 * 1024 * 1024;
 export const MAX_STREAM_TOTAL_BYTES = 64 * 1024 * 1024;
 /** Hard ceiling on projected conversation history text (characters) to prevent runaway memory. */
 export const MAX_PROJECTED_HISTORY_CHARS = 200_000;
+/**
+ * Chars-per-token ratio for deriving the projected-history ceiling from the model context
+ * window. Sits between the English/code (~4 chars per token) and CJK (~1.5) extremes: the
+ * ceiling is a runaway-memory bound and a coarse guard against cutting history the window can
+ * hold, not a token accounting - the caller-side compaction line stays the token authority.
+ */
+const PROJECTED_HISTORY_CHARS_PER_TOKEN = 3;
+/** Absolute ceiling on a window-derived history cap, so runaway metadata cannot unbound stdin. */
+const MAX_PROJECTED_HISTORY_DERIVED_CHARS = 4_000_000;
+
+/**
+ * Projected-history character ceiling for a turn, derived from the declared model context
+ * window. A missing or non-finite window keeps the legacy flat cap, and the derivation never
+ * lowers the cap below it: small windows change nothing, while large windows scale (a 1M-token
+ * model keeps 3M characters) until the hard ceiling. The flat 200k cap predates window
+ * metadata and cut long replays to roughly 50k-130k tokens of content regardless of the model.
+ */
+export function projectedHistoryCharLimit(contextWindowTokens: number | undefined): number {
+  if (typeof contextWindowTokens !== "number" || !Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) {
+    return MAX_PROJECTED_HISTORY_CHARS;
+  }
+  const derived = contextWindowTokens * PROJECTED_HISTORY_CHARS_PER_TOKEN;
+  return Math.min(Math.max(derived, MAX_PROJECTED_HISTORY_CHARS), MAX_PROJECTED_HISTORY_DERIVED_CHARS);
+}
 
 export class CodingAgentStreamLimitError extends Error {
   constructor(message: string) {
@@ -56,14 +80,11 @@ export async function* readJsonLines(
   const maxLineBytes = limits.maxLineBytes ?? MAX_STREAM_LINE_BYTES;
   const maxTotalBytes = limits.maxTotalBytes ?? MAX_STREAM_TOTAL_BYTES;
   const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = "";
+  let parts: string[] = [];
+  let lineBytes = 0;
   let totalBytes = 0;
 
   const flushLine = function* (line: string): Generator<StreamMessage> {
-    if (encoder.encode(line).byteLength > maxLineBytes) {
-      throw new CodingAgentStreamLimitError("Coding-agent stream line exceeded the byte ceiling");
-    }
     const trimmed = line.trim();
     if (!trimmed) return; // Blank lines and whitespace-only lines are ignored as padding.
     let parsed: unknown;
@@ -84,26 +105,39 @@ export async function* readJsonLines(
     yield parsed as StreamMessage;
   };
 
+  // Decode continuously for split UTF-8/BOM semantics, but search and measure only new
+  // decoded segments. Joining once per frame avoids repeatedly flattening a growing rope.
+  const consume = function* (text: string): Generator<StreamMessage> {
+    let start = 0;
+    while (start < text.length) {
+      const newline = text.indexOf("\n", start);
+      const end = newline < 0 ? text.length : newline;
+      const part = text.slice(start, end);
+      lineBytes += Buffer.byteLength(part);
+      if (lineBytes > maxLineBytes) {
+        throw new CodingAgentStreamLimitError("Coding-agent stream line exceeded the byte ceiling");
+      }
+      if (part) parts.push(part);
+      if (newline < 0) break;
+      const line = parts.join("");
+      parts = [];
+      lineBytes = 0;
+      yield* flushLine(line);
+      start = newline + 1;
+    }
+  };
+
   for await (const chunk of chunks) {
     totalBytes += chunk.byteLength;
     if (totalBytes > maxTotalBytes) {
       throw new CodingAgentStreamLimitError("Coding-agent stream exceeded the total byte ceiling");
     }
-    buffer += decoder.decode(chunk, { stream: true });
-    let newline = buffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      yield* flushLine(line);
-      newline = buffer.indexOf("\n");
-    }
-    if (encoder.encode(buffer).byteLength > maxLineBytes) {
-      throw new CodingAgentStreamLimitError("Coding-agent stream line exceeded the byte ceiling");
-    }
+    yield* consume(decoder.decode(chunk, { stream: true }));
   }
-  // Flush the decoder's trailing bytes and any final line without a newline terminator.
-  buffer += decoder.decode();
-  if (buffer.trim()) yield* flushLine(buffer);
+  // Flush incomplete UTF-8 through the same decoded-byte accounting before parsing EOF.
+  yield* consume(decoder.decode());
+  const finalLine = parts.join("");
+  if (finalLine.trim()) yield* flushLine(finalLine);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -114,23 +148,70 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/** Extract OpenCodex usage from a `result` frame's Anthropic-shaped usage object. */
-export function usageFromResult(message: StreamMessage): OcxUsage | undefined {
-  const usage = asRecord(message.usage);
-  if (!usage) return undefined;
+/** Extract OpenCodex usage from the Anthropic-shaped usage record shared by frames and deltas. */
+function usageFromAnthropicShape(usage: Record<string, unknown>): OcxUsage | undefined {
   const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
   const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
   const cachedInputTokens = typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : undefined;
   const cacheCreationInputTokens =
     typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : undefined;
-  if (inputTokens === 0 && outputTokens === 0 && cachedInputTokens === undefined) return undefined;
+  // A snapshot is zero-only when every counter is absent or zero. Testing only the cache-read
+  // field dropped a cache-creation-only snapshot (input/output 0 with, say, 200 cache-creation
+  // tokens), and a capture-only tool leg terminated at message_stop never sees a result frame
+  // that could carry those tokens instead, so the turn under-reported usage and cost.
+  const cacheReadTotal = cachedInputTokens ?? 0;
+  const cacheCreationTotal = cacheCreationInputTokens ?? 0;
+  if (inputTokens === 0 && outputTokens === 0 && cacheReadTotal === 0 && cacheCreationTotal === 0) {
+    return undefined;
+  }
   return {
     inputTokens,
     outputTokens,
     totalTokens: inputTokens + outputTokens,
-    ...(cachedInputTokens !== undefined ? { cachedInputTokens, cacheReadInputTokens: cachedInputTokens } : {}),
-    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(cacheReadTotal > 0 ? { cachedInputTokens: cacheReadTotal, cacheReadInputTokens: cacheReadTotal } : {}),
+    ...(cacheCreationTotal > 0 ? { cacheCreationInputTokens: cacheCreationTotal } : {}),
   };
+}
+
+/** Extract OpenCodex usage from a `result` frame's Anthropic-shaped usage object. */
+export function usageFromResult(message: StreamMessage): OcxUsage | undefined {
+  const usage = asRecord(message.usage);
+  return usage ? usageFromAnthropicShape(usage) : undefined;
+}
+
+/**
+ * Fold a pre-result usage snapshot into the running partial usage.
+ *
+ * `message_delta` and assistant-frame snapshots are cumulative per message, but a later snapshot
+ * can repeat or extend an earlier one, so each field keeps its maximum. The `result` frame stays
+ * authoritative for a text-only turn; partial state exists so a capture-only tool-bridge turn —
+ * which is terminated at `message_stop` before any result frame can arrive — still reports real
+ * token usage instead of zero.
+ */
+function mergePartialUsage(previous: OcxUsage | undefined, next: OcxUsage): OcxUsage {
+  if (!previous) return next;
+  const inputTokens = Math.max(previous.inputTokens, next.inputTokens);
+  const outputTokens = Math.max(previous.outputTokens, next.outputTokens);
+  const cacheRead = Math.max(
+    previous.cacheReadInputTokens ?? previous.cachedInputTokens ?? 0,
+    next.cacheReadInputTokens ?? next.cachedInputTokens ?? 0,
+  );
+  const cacheCreation = Math.max(previous.cacheCreationInputTokens ?? 0, next.cacheCreationInputTokens ?? 0);
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    ...(cacheRead > 0 ? { cachedInputTokens: cacheRead, cacheReadInputTokens: cacheRead } : {}),
+    ...(cacheCreation > 0 ? { cacheCreationInputTokens: cacheCreation } : {}),
+  };
+}
+
+/** Record one usage snapshot; absent, malformed, or zero-only snapshots leave state untouched. */
+function observePartialUsage(state: StreamParseState, value: unknown): void {
+  const usage = asRecord(value);
+  if (!usage) return;
+  const next = usageFromAnthropicShape(usage);
+  if (next) state.partialUsage = mergePartialUsage(state.partialUsage, next);
 }
 
 /**
@@ -142,6 +223,16 @@ export interface StreamParseState {
   sawPartialThinking: boolean;
   sawTerminalResult: boolean;
   openToolCallId?: string;
+  /** A `message_stop` stream event arrived: the assistant message is complete. */
+  sawMessageStop?: boolean;
+  /** Completed tool_use content blocks observed in this stream. */
+  completedToolCalls?: number;
+  /** Tool IDs already captured through partial events, for complete-assistant deduplication. */
+  partialToolCallIds?: Set<string>;
+  /** A complete assistant tool block had no matching partial capture. */
+  uncapturedToolUse?: boolean;
+  /** Highest-seen usage snapshot from `message_delta`/assistant frames before a terminal result. */
+  partialUsage?: OcxUsage;
 }
 
 /**
@@ -164,7 +255,8 @@ export function mapStreamMessageToEvents(message: StreamMessage, state: StreamPa
   if (type === "assistant") {
     // Fallback path: a complete assistant message. Surface text and thinking independently
     // only when the partial delta stream did not already carry them (§十二).
-    const content = asRecord(message.message)?.content;
+    const messageRecord = asRecord(message.message);
+    const content = messageRecord?.content;
     if (Array.isArray(content)) {
       for (const block of content) {
         const part = asRecord(block);
@@ -176,9 +268,13 @@ export function mapStreamMessageToEvents(message: StreamMessage, state: StreamPa
         } else if (blockType === "thinking" && !state.sawPartialThinking) {
           const thinking = asString(part.thinking);
           if (thinking) events.push({ type: "thinking_delta", thinking });
+        } else if (blockType === "tool_use") {
+          const id = asString(part.id);
+          if (!id || !state.partialToolCallIds?.has(id)) state.uncapturedToolUse = true;
         }
       }
     }
+    observePartialUsage(state, messageRecord?.usage);
     return events;
   }
 
@@ -257,8 +353,9 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
         events.push({ type: "thinking_delta", thinking });
       }
     } else if (deltaType === "input_json_delta") {
-      // Tool-input streaming. Inert while tools are disabled (Codex's catalog is not advertised),
-      // but parsed so the seam is ready and an unexpected frame never crashes.
+      // Tool-input streaming. Live for capture-only bridge turns, where the advertised MCP
+      // catalog makes the CLI emit real tool_use blocks; parsed unconditionally so a stray
+      // frame on a tools-disabled turn is ignored rather than crashing.
       const partial = asString(delta?.partial_json);
       if (partial && state.openToolCallId) events.push({ type: "tool_call_delta", arguments: partial });
     }
@@ -272,6 +369,7 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
       const name = asString(block?.name) ?? "tool";
       if (id) {
         state.openToolCallId = id;
+        state.partialToolCallIds?.add(id);
         events.push({ type: "tool_call_start", id, name });
       }
     }
@@ -281,12 +379,61 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
   if (eventType === "content_block_stop") {
     if (state.openToolCallId) {
       state.openToolCallId = undefined;
+      state.completedToolCalls = (state.completedToolCalls ?? 0) + 1;
       events.push({ type: "tool_call_end" });
     }
     return events;
   }
 
+  if (eventType === "message_stop") {
+    state.sawMessageStop = true;
+    return events;
+  }
+
+  if (eventType === "message_start") {
+    // Anthropic-shaped streams report input tokens on `message_start.message.usage` and output
+    // tokens later on `message_delta.usage`. A capture-only tool leg is terminated at
+    // `message_stop`, so without this branch the synthesized done(tool_use) undercounts input
+    // tokens whenever the CLI puts them here (and `message_stop` arrives before any assistant
+    // fallback frame that would otherwise carry them).
+    const messageRecord = asRecord(event.message);
+    observePartialUsage(state, messageRecord?.usage);
+    return events;
+  }
+
+  if (eventType === "message_delta") {
+    // Pre-result usage snapshots: a capture-only tool-bridge turn ends at message_stop with no
+    // result frame, so these snapshots are the only token accounting that leg will ever see.
+    observePartialUsage(state, event.usage);
+    return events;
+  }
+
   return events;
+}
+
+/**
+ * Validate a `system/init` frame against an active capture-only tool bridge.
+ *
+ * With the bridge armed, the CLI must report exactly the bridge's MCP server as connected: a
+ * missing or failed server means the model never saw the advertised catalog, so the turn fails
+ * closed instead of silently degrading to a text-only answer.
+ */
+export function toolBridgeInitError(message: StreamMessage, serverName: string): string | undefined {
+  if (message.type !== "system" || message.subtype !== "init") return undefined;
+  const servers = message.mcp_servers;
+  if (!Array.isArray(servers) || servers.length !== 1) {
+    return "Coding-agent system/init reported an unexpected MCP server set for the tool bridge.";
+  }
+  const server = servers[0];
+  if (
+    !server
+    || typeof server !== "object"
+    || server.name !== serverName
+    || server.status !== "connected"
+  ) {
+    return `Coding-agent system/init did not report the ${serverName} MCP server as connected.`;
+  }
+  return undefined;
 }
 
 /** One content part on the stream-json input wire (Anthropic message shape). */
@@ -308,7 +455,7 @@ function formatMessageForHistory(message: OcxMessage): string {
   if (message.role === "user") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" ? p.text : `[${p.type}]`)).join("\n");
+      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : `[${p.type}]`)).join("\n");
     return `USER:\n${text}`;
   }
   if (message.role === "assistant") {
@@ -328,7 +475,7 @@ function formatMessageForHistory(message: OcxMessage): string {
   if (message.role === "toolResult") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" ? p.text : "[image]")).join("");
+      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : "[image]")).join("");
     const status = message.isError ? " (error)" : "";
     return `TOOL RESULT (call_id: ${message.toolCallId})${status}:\n${text}`;
   }
@@ -355,6 +502,8 @@ export function buildInputLines(message: OcxMessage): string[] {
         else if (part.type === "image") {
           const image = imagePart(part.imageUrl);
           if (image) content.push(image);
+        } else if (part.type === "document") {
+          content.push(textPart(part.text));
         } else {
           content.push(textPart("[video]"));
         }
@@ -378,7 +527,7 @@ export function buildSystemPrompt(parsed: OcxParsedRequest): string | undefined 
     if (message.role !== "developer") continue;
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(part => (part.type === "text" ? part.text : "")).join("");
+      : message.content.map(part => (part.type === "text" || part.type === "document" ? part.text : "")).join("");
     if (text.trim()) parts.push(text);
   }
   return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -395,7 +544,7 @@ export function buildSystemPrompt(parsed: OcxParsedRequest): string | undefined 
  * prior conversation turns are structured as bounded context text with tool results as text,
  * clearly demarcated from the current user request. Codex retains tool control; vendor tools are never invoked.
  */
-export function buildConversationInput(parsed: OcxParsedRequest): string[] {
+export function buildConversationInput(parsed: OcxParsedRequest, options: { maxHistoryChars?: number } = {}): string[] {
   const nonDev = parsed.context.messages.filter(m => m.role !== "developer");
   if (nonDev.length === 0) {
     return [JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "" }] } })];
@@ -440,6 +589,8 @@ export function buildConversationInput(parsed: OcxParsedRequest): string[] {
           const image = imagePart(part.imageUrl);
           if (image) currentImageBlocks.push(image);
           else textParts.push("[image omitted: unsupported reference]");
+        } else if (part.type === "document") {
+          textParts.push(part.text);
         } else {
           textParts.push("[video]");
         }
@@ -463,6 +614,7 @@ export function buildConversationInput(parsed: OcxParsedRequest): string[] {
           else segments.push("[image omitted: unsupported reference]");
           continue;
         }
+        if (part.type === "document") { segments.push(part.text); continue; }
         segments.push("[video]");
       }
       text = segments.join("");
@@ -475,10 +627,11 @@ export function buildConversationInput(parsed: OcxParsedRequest): string[] {
 
   const imageBlocks: WireContentPart[] = [...historyImageBlocks, ...currentImageBlocks];
 
+  const maxHistoryChars = options.maxHistoryChars ?? MAX_PROJECTED_HISTORY_CHARS;
   let historyText = historyMessages.map(formatMessageForHistory).filter(Boolean).join("\n\n");
-  if (historyText.length > MAX_PROJECTED_HISTORY_CHARS) {
+  if (historyText.length > maxHistoryChars) {
     historyText = `[Earlier conversation history truncated for length...]\n\n` +
-      historyText.slice(historyText.length - MAX_PROJECTED_HISTORY_CHARS);
+      historyText.slice(historyText.length - maxHistoryChars);
   }
 
   const combinedText = `Prior conversation context:\n\n${historyText}\n\nCurrent user request:\n\n${currentRequestText}`;

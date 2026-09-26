@@ -26,6 +26,7 @@ runs helper features around provider requests.
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
 | `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` data-plane admission credentials on non-loopback binds. They do not authorize management APIs; management access uses the separate credential documented in the [management reference](/reference/management-api/). Dashboard-managed. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
+| `usageLedgerMaxBytes?` | `number` | unset | Opt-in ceiling in bytes for `usage.jsonl`. Absent means the request history grows without limit, which stays the default. See [usage history size](#usage-history-size). |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Cap in MiB for evictable app-owned logs, caches, blobs, and continuation payloads. Range 64–4096; not an RSS cap. |
 | `metricsExport.enabled?` | `boolean` | `false` | Enable process-local aggregate request metrics at authenticated `GET /api/metrics`. Restart required; disabled mode returns 404 and starts no exporter activity. |
 | `spend?` | `{ root?: { maxTokens?: number }; identity?: { maxTokens?: number }; pool?: { maxTokens?: number }; retentionDays?: number }` | unset | Durable token ceilings, off unless you write one. Each scope bounds settled spend plus in-flight reservations plus unresolved spend: `root` is one task including its whole fan-out, `identity` is one account across every task it serves, and `pool` is one provider pool. They intersect, so a request is admitted only when all three have room — which is what holds a ceiling against a client that mints a new task id per request. A reservation is the request's whole input plus its enforceable output ceiling, counted as if every cached prefix misses. Observe-only mode still journals, so every server owns the state directory's single-writer lease; an explicit sibling must use a separate `OPENCODEX_HOME`. Spend survives an ordinary process restart when its writes reached the filesystem, but the journal does not promise survival across host power loss because each append is not fsynced. Raising or removing the value is what grants more. `maxTokens` must be a positive integer (0 would refuse everything), `retentionDays` is 1–365 and defaults to 7, and an unknown key in this section is rejected rather than ignored. A refusal is a local HTTP 429 carrying `x-opencodex-local-refusal: workflow_spend_exhausted`, and its message names the scope and the ceiling; no provider is contacted. |
@@ -39,7 +40,7 @@ runs helper features around provider requests.
 | `codexProviderDisplayName?` | `string` | `"OpenCodex Proxy"` | Label Codex shows for the injected `opencodex` provider, written as its `name` field in `config.toml` and the reference profile. Presentation only: routing resolves through the provider id `opencodex`, so a rename never moves `model_provider = "opencodex"` or the `[model_providers.opencodex]` header and cannot orphan threads already tagged with that id. Codex refuses to load a provider with no name, so there is no way to omit the field — choose a neutral label instead. A blank, over-128-character, or control-character value is ignored and the default label is written. |
 | `resetCreditAutoRedeem?` | `{ enabled?: boolean; leadTimeMinutes?: number }` | off | Opt-in: redeem the main Codex account's soonest-expiring reset credit `leadTimeMinutes` (1–60, default 10) before it expires. Every attempt re-reads the upstream credit list first and skips when the credit is gone (for example, redeemed by hand); the `redeem_request_id` is journaled in `$OPENCODEX_HOME/reset-credit-auto-redeem.json` before the call so a crash replays the same idempotent request instead of spending a second credit. Servers sharing this configuration directory coordinate reservations and settlements so one process does not replace another's request record. Logs carry a hashed account key only. |
 | `syncResumeHistory?` | `boolean` | `true` | Reversible Codex App history compatibility. Original metadata is backed up and restored by `ocx stop` / `ocx restore`. |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Redirect recognized Codex helper/shadow calls to a chosen model while preserving the request's configured reasoning effort. The default source prefix is `gpt-5.6-luna`; older clients through 0.144.x used `gpt-5.4-mini`, which `sourceModels` can restore. |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Redirect recognized Codex helper/shadow calls to a chosen model while preserving the request's configured reasoning effort. The default source prefixes are `gpt-6-luna` and `gpt-5.6-luna`; older clients through 0.144.x used `gpt-5.4-mini`, which `sourceModels` can restore. |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on when usable | Web-search sidecar options. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on when usable | Image-description sidecar options. |
 | `images?` | `OcxImagesConfig` | automatic OpenAI selection | Standalone Images relay options for Codex `image_gen`. |
@@ -53,9 +54,10 @@ HTTP 504 with an `upstream_no_response` error. A slow but alive origin therefore
 client's own deadline or for `connectTimeoutMs` (default 200s), whichever comes first; a
 connect timeout that fires after the create frame was sent settles as the same 504. A socket
 that closes or errors before the first Responses event settles as an HTTP 502 with
-`upstream_closed_before_response`. These statuses are never retried inside the proxy — the
-frame may already be executing upstream, so the client applies its own retry policy exactly as
-it would when connected to the backend directly. Once the response has started, a later drop
+`upstream_closed_before_response`. The proxy does not retry either status on its own: the frame
+may already be executing upstream, so the client applies its own retry policy exactly as it would
+when connected to the backend directly. The one exception is that 502 on a provider that opted
+into `retryOnReset`, described below. Once the response has started, a later drop
 surfaces inside the stream as before. `stallTimeoutSec` is unrelated to this window.
 
 An ordinary HTTP send has a third case. When the connection dies before any response header
@@ -63,10 +65,30 @@ arrives, the proxy cannot tell whether the model already processed the request, 
 to send it again and answers HTTP 429 with `upstream_reset_replay_refused`. The status is
 deliberate: a 5xx here is an instruction to most clients, including Codex, to send the whole
 turn again, which is the duplicate the refusal exists to prevent. No `Retry-After` is
-attached, and the proxy performs no key rotation, account failover or same-target replay on
-it, nor does it record the refusal as rate-limit or quota evidence against the credential it
-was holding. Tool-call side requests such as vision and web search are replayed normally, because
-repeating them cannot duplicate a turn.
+attached, and the response carries `x-should-retry: false`, which the official OpenAI and
+Anthropic SDKs read before their own status rules — without it those clients retry a 429 on
+their own schedule and resend the turn anyway. The same replay-refusal behavior applies on
+`/v1/responses` and `/v1/chat/completions`, whether the request is forwarded natively or translated.
+Routed `/v1/messages` requests translate through Responses and project the same status, code, and
+retry headers into an Anthropic-shaped error envelope. The proxy
+performs no key rotation, account failover or same-target replay on it, nor does it record the
+refusal as rate-limit or quota evidence against the credential it was holding. Tool-call side
+requests such as vision and web search are replayed normally, because repeating them cannot
+duplicate a turn.
+
+A native Responses provider can opt into replacing that send with
+[`retryOnReset`](/reference/configuration/providers/#provider-entries-ocxproviderconfig). The same grant covers the
+case where the connection survives the header and the SSE body then dies carrying only control
+events, because the caller has observed nothing in either one. It also covers the canonical
+ChatGPT WebSocket above: a socket that closes or errors before the first Responses event is
+replaced by one HTTP send, never by a second socket. A silent socket keeps its 504, and a native
+steering or injection turn is never replaced. A replacement happens only when
+the request is self-contained (`store: false`, complete input, client-executed tools only, no
+server-side continuation state), and one logical request gets the configured number of
+replacements in total — across every recovery leg and every combo child, not one each. The
+refusal returns as soon as that grant is spent, the leg has no send left, or a replacement fails
+for any other reason. A request that already emitted output or a tool call keeps the refusal
+regardless. A caller that cancels mid-replacement gets the cancellation, not the refusal.
 
 `noProxy` accepts either a comma-separated string or an array. Both forms add entries without
 replacing an inherited `NO_PROXY`:
@@ -370,6 +392,26 @@ either `target.reduceToBytes` or `target.removeOldestPercent`. `mode` defaults t
 Configure it on the Storage page or with `GET`/`PUT /api/storage/cleanup-policy`; trigger a manual run
 with `POST /api/storage/cleanup-policy/run`.
 
+## Usage history size
+
+`usageLedgerMaxBytes` is unset by default, and unset means the request history in `usage.jsonl`
+grows without limit. Nothing deletes history you did not ask to have deleted.
+
+Set it to a byte ceiling and the proxy trims the file after an append crosses it, keeping the
+newest whole rows and dropping the oldest. It trims a little below the ceiling rather than exactly
+to it, so the next append does not immediately re-cross the line. The minimum accepted value is
+1 MiB; a smaller number, or one that is not a safe integer, leaves the limit off rather than
+failing the configuration.
+
+Rows are copied byte for byte and never rewritten, so every field survives a trim — including
+fields a newer build wrote that an older one does not understand. The replacement is refused
+outright if anything appended to the ledger while it ran, so a request logged during a trim is
+never lost; the next append tries again. Trimming also refreshes what the dashboard shows, so
+`/api/logs` stops serving rows the ledger no longer has.
+
+There is no dashboard control for this yet; set it in `config.json` or with
+`ocx config set usageLedgerMaxBytes <bytes>`.
+
 ## Quota-reset notifications (`quotaResetNotify`)
 
 Off by default. When the section is absent, no detection runs, no timer starts, and no state
@@ -458,9 +500,62 @@ shell-injection surface. Delivery is attempted once; there is no retry.
 
 Read recent detections with `ocx provider resets` or `GET /api/quota-resets`.
 
+## API surfaces (`apiSurfaces`)
+
+Responses (`/v1/responses`) and Chat Completions (`/v1/chat/completions`) are always served.
+The Messages API (`/v1/messages` and `/v1/messages/count_tokens`) can be closed on its own.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `apiSurfaces.messages.enabled?` | `boolean` | inherit | `true` serves the Messages API, `false` refuses both routes with 403. Unset inherits `claudeCode.enabled`, so a Claude integration that is off also closes Messages. |
+
+A present but malformed value (a non-object `apiSurfaces` or `messages`, or a non-boolean
+`enabled`) closes the Messages API rather than falling back to the inherited value. Both
+routes always agree.
+
+The dashboard's API page shows one card per API with the setting's source (explicit,
+inherited from Claude settings, or invalid) and a toggle for Messages. Turning Messages off
+there writes `apiSurfaces.messages.enabled: false` **and** `claudeCode.enabled: false` in the
+same save, so a proxy version older than this setting, which only reads `claudeCode.enabled`,
+keeps the endpoint closed after a downgrade. Turning it on writes only
+`apiSurfaces.messages.enabled: true`; an older version then still follows
+`claudeCode.enabled` and may keep Messages closed, which is the safe direction.
+
+## Protocol paths (`protocols`)
+
+How a Chat Completions or Messages request may reach a provider. Every value defaults to the
+behavior before these keys existed; see [Protocol paths](/guides/protocol-paths/) for the delivery
+modes, the preview, and the per-request trace.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `protocols.unrepresentable?` | `"legacy" \| "reject"` | `"legacy"` | `legacy` sends a request whose path drops a feature and records the loss in the trace. `reject` refuses it with HTTP 400 before any send, naming only the feature keys. |
+| `protocols.rollout.nativeChatCombos?` | `boolean` | `false` | Send an eligible Chat candidate inside a combo natively from its own copy of the client body. |
+| `protocols.rollout.managedMessagesNative?` | `boolean` | `false` | Send Messages natively to a direct, key-authenticated Anthropic provider instead of through the internal Responses bridge. |
+| `protocols.rollout.managedMessagesNativeOAuth?` | `boolean` | `false` | Native Messages for the unpooled `anthropic` OAuth provider on `api.anthropic.com`. Read as off unless `managedMessagesNative` is on; a pooled account set stays on the bridge. |
+| `protocols.rollout.directEncoders?` | `boolean` | `false` | Encode Chat and Messages answers from a non-Responses upstream directly from adapter events. |
+| `protocols.rollout.shadowPlan?` | `boolean` | `false` | Compare each Chat or Messages request's path with the plan a preview predicts and mark a disagreement as `planMismatch` on its log row. Sends nothing extra. |
+
+A malformed `protocols` block is dropped to these defaults, because each default is the
+conservative one. Only `true` turns a switch on.
+
+```json
+{
+  "protocols": {
+    "unrepresentable": "legacy",
+    "rollout": { "shadowPlan": true }
+  }
+}
+```
+
+`ocx api policy` shows the resolved values and changes them through the running proxy
+(`--unrepresentable <legacy|reject>`, `--rollout <switch>=<on|off>`, `--messages <on|off>` for
+[`apiSurfaces`](#api-surfaces-apisurfaces)). It writes only when a setting flag is given. The
+dashboard's API page and `PATCH /api/protocols/settings` use the same validation.
+
 ## Claude Code (`claudeCode`)
 
-These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx claude` launcher, and the Claude dashboard page.
+These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx claude` launcher, and the Claude dashboard page. Whether the Messages API is served at all is decided by [`apiSurfaces`](#api-surfaces-apisurfaces), which inherits `claudeCode.enabled` while unset.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -563,17 +658,20 @@ input size and content. Restart the proxy after editing
 Codex uses small helper models for tasks such as titles and commit messages. Enable
 `shadowCallIntercept` to redirect recognized source-model prefixes to another configured model. The
 replacement keeps the request's configured reasoning effort. Set `sourceModels` only when a client
-uses different helper ids.
+uses different helper ids. A non-empty `sourceModels` replaces the default prefixes instead of
+extending them, so include `gpt-6-luna` (and `gpt-5.6-luna` for 0.145.0-0.153.x clients) in the
+list when current clients should still be intercepted.
 Interception is model-based: every request whose bare model id matches `sourceModels` can be
-redirected, including normal `request_kind: "turn"` requests. `x-codex-turn-metadata` does not exempt
-a matching request.
+redirected, including normal `request_kind: "turn"` requests. Requests marked as spawned children by
+`x-openai-subagent: collab_spawn` or `subagent_kind: "thread_spawn"` in the `x-codex-turn-metadata`
+JSON header are exempt, so an explicitly spawned sub-agent keeps its model.
 
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"],
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"],
     "modelMap": { "gpt-5.6-terra": "myprovider/my-model" },
     "phantomToolAllowlistEnabled": true,
     "phantomToolAllowlist": ["update_plan", "web__run"]
@@ -598,6 +696,24 @@ with an operator-curated one (an empty array means fail-closed). Everything here
 to shadow-replaced requests only: direct routes are unaffected. Edit it in the dashboard
 under Shadow call intercept.
 
+### When the target is unavailable
+
+The replacement is the one destination the operator chose, so a target that stops resolving fails
+the helper call instead of sending it elsewhere. When the target's provider is disabled or deleted,
+or its combo no longer exists, an intercepted request returns `409` with error code
+`intercept_target_unavailable` before anything is sent upstream. The request log records the same
+code. The request is not passed through to the native helper model and does not fall back to the
+default provider, because either would change the destination, credentials and cost without your
+choice. A combo or routing-profile target still fails over among its own members. A qualified
+target such as `provider/model` whose provider segment names nothing configured is treated the same
+way, and the settings API refuses to save one. A bare model id that resolves through the default
+provider stays valid.
+
+Disabling (`PATCH /api/providers?name=<provider>` with `disabled: true`) or deleting a provider that the
+target resolves to still succeeds; the response adds `dependentShadowIntercept: { model, enabled }`
+and the dashboard shows a warning. Re-enabling the provider, or choosing another target, restores
+interception.
+
 ## Sidecars
 
 ### `images` (`OcxImagesConfig`)
@@ -613,9 +729,11 @@ Images API paths and response shape expected by Codex.
 
 ### `webSearchSidecar` (`OcxWebSearchSidecarConfig`)
 
+RunTurn adapters also use the configured search sidecar. Search turns preserve progress heartbeats. A first-event OAuth 429 rotates the account on the initial request and on each post-search answer request. The replay keeps the search tool and the gathered results. With `emptyCompletionRetry: true`, an empty answer before the search limit receives one retry using the current conversation and gathered results. The existing tool-free recovery after the search limit remains available independently of that setting. Upstream failures stop the turn instead of triggering another search.
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | on when usable | Master switch. |
+| `enabled?` | `boolean` | on when usable | Master switch. When false, OpenCodex stops intercepting `web_search` AND the Codex integration writes `web_search = "disabled"` into `~/.codex/config.toml`. |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | Explicit wins; unset always resolves to `openai`. `anthropic` and `xai` run only when explicitly configured; `gemini` and `exa` remain reserved until their executors ship. |
 | `model?` | `string` | backend-dependent | `gpt-5.6-luna` for OpenAI, `claude-sonnet-5` for Anthropic, or `grok-4.6` for xAI. Legacy explicit `gpt-5.4-mini` migrates on start. |
 | `exaApiKey?` | `string` | none | Operator key for the `exa` backend. Write-only: management reads never return the stored value. |
@@ -696,6 +814,6 @@ wildcard `hostname`, where the public listener already holds `127.0.0.1:<port>`.
 
 `codexNativeSteering` and `codexNativeInjection` enable separate, default-off native
 WebSocket control paths. See the canonical guide for
-[supported steering routes and settings](../../guides/codex-integration.md#steering-continuation-settings-and-public-api),
-[typed result and approval continuations](../../guides/codex-integration.md#rich-tool-results-and-explicit-approvals-after-response-completion),
-and [confirmation deadlines and retained context](../../guides/codex-integration.md#steering-confirmation-deadlines-and-retained-context).
+[supported steering routes and settings](/guides/codex-integration/#steering-continuation-settings),
+[typed result and approval continuations](/guides/codex-integration/#rich-tool-results-and-explicit-approvals-after-response-completion),
+and [confirmation deadlines and retained context](/guides/codex-integration/#steering-confirmation-deadlines-and-retained-context).

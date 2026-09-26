@@ -58,7 +58,7 @@ describe("Grok fence lifecycle wiring", () => {
     const helper = sliceFn(
       ENSURE_SOURCE,
       "export async function ensureGrokFenceMatchesDesired(",
-      "export function ensureClaudeDesktopMatchesDesired(",
+      "export async function ensureClaudeDesktopMatchesDesired(",
     );
     const ensureFn = sliceFn(CLI_SOURCE, "async function handleEnsure(", "async function handleTrayProxyStart(");
 
@@ -76,14 +76,14 @@ describe("Grok fence lifecycle wiring", () => {
   test("ensure clears Claude Desktop residue when the durable switch is OFF", () => {
     const helper = sliceFn(
       ENSURE_SOURCE,
-      "export function ensureClaudeDesktopMatchesDesired(",
+      "export async function ensureClaudeDesktopMatchesDesired(",
       "Claude Desktop cleanup failed",
     );
     const ensureFn = sliceFn(CLI_SOURCE, "async function handleEnsure(", "async function handleTrayProxyStart(");
     expect(helper).toContain("claudeDesktopIntegrationEnabled(config)");
     expect(helper).toContain("deps.removeDesktop3pStandardPivot(");
     expect(helper.indexOf("deps.loadConfig()")).toBeLessThan(helper.indexOf("claudeDesktopIntegrationEnabled(config)"));
-    expect(ENSURE_SOURCE).toContain("ensureClaudeDesktopMatchesDesired(deps)");
+    expect(ENSURE_SOURCE).toContain("await ensureClaudeDesktopMatchesDesired(deps)");
   });
 
   test("both ensure branches re-read persisted config after the in-flight await window", () => {
@@ -164,7 +164,9 @@ describe("Grok fence lifecycle wiring", () => {
     const stopFn = sliceFn(CLI_SOURCE, "async function handleStop(", "async function handleUninstall(");
     // process.exit() inside handleStop would strand runTrayProxyRestart's start() half.
     expect(stopFn).toContain("process.exitCode = 1");
-    expect(stopFn).toContain("return !stopFailed");
+    // The structured outcome (the stop --json summary) keeps the old boolean as ok, so
+    // the dispatcher's downtime-warning gate is byte-for-byte the pre-summary semantics.
+    expect(stopFn).toContain("return { ok: !stopFailed, summary };");
     expect(stopFn).not.toContain("process.exit(1)");
 
     const restartCase = sliceFn(DISPATCH_SOURCE, "restart: async", "health: async");
@@ -297,7 +299,7 @@ describe("Grok fence lifecycle wiring", () => {
     expect(noPidBranch).toContain("stopFailed = true;");
     expect(noPidBranch).toContain("ownershipBlocked = true;");
     const gateFn = sliceFn(CLI_SOURCE, "const abandonedTeardownIsSafeToFinish", "let stopFailed = false;");
-    expect(gateFn).toContain('probeProxyLiveness(endpoint.port, endpoint.hostname) === "dead"');
+    expect(gateFn).toContain('probeEndpointLiveness(endpoint) === "dead"');
     expect(gateFn).toContain("return false;");
   });
 

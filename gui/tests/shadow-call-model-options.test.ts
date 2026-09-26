@@ -57,9 +57,13 @@ test("shadow-call options do not append a fallback for an empty current value", 
 test("both shadow-call selects use the canonical option helper", async () => {
   const [overview, modelsPage] = await Promise.all([
     Bun.file(new URL("../src/pages/dashboard-overview-sections.tsx", import.meta.url)).text(),
-    Bun.file(new URL("../src/pages/Models.tsx", import.meta.url)).text(),
+    // Fork: the per-source replacement editor lives on the standalone #shadow page, so this
+    // pins that page instead of the Models panel the upstream select was extracted from.
+    Bun.file(new URL("../src/pages/Shadow.tsx", import.meta.url)).text(),
   ]);
 
   expect(overview).toContain("shadowCallModelOptions(models, shadowCall?.model, shadowCall?.sourceModels)");
-  expect(modelsPage).toMatch(/shadowCallModelOptions\(\s*models\.filter\(model => activeNamespaced\.has\(model\.namespaced\)\),\s*shadowCall\?\.model,\s*shadowCall\?\.sourceModels,/);
+  expect(modelsPage).toMatch(/shadowCallModelOptions\(\s*activeModels\.filter\(m => activeNamespaced\.has\(m\.namespaced\)\),\s*shadowCall\?\.model,\s*shadowCall\?\.sourceModels,/);
+  // Every per-source row also resolves its own options through the helper (#2706 self-target).
+  expect(modelsPage).toContain("shadowCallModelOptions(activeModels, current || undefined, [sourceModel])");
 });

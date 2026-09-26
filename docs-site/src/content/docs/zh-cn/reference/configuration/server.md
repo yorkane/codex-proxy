@@ -27,7 +27,7 @@ description: 监听、远程访问、准入密钥、超时、存储、侧车、�
 | `codexAutoStart?` | `boolean` | `true` | 允许 Codex shim 在启动 Codex 之前运行 `ocx ensure`。设为 false 会让 ensure 变成无操作。 |
 | `codexShimAutoRestore?` | `boolean` | `true` | 在完成外部 Codex 更新并覆盖安装的 shim 之后恢复该 shim。环境退出开关：`OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | 可逆的 Codex App 历史兼容性。原始元数据会被备份，并由 `ocx stop` / `ocx restore` 恢复。 |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 将识别出的 Codex 辅助/影子调用重定向到选定模型，并保留为请求配置的推理强度。默认源前缀为 `gpt-5.6-luna`；0.144.x 及更早客户端使用 `gpt-5.4-mini`，可通过 `sourceModels` 恢复。 |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 将识别出的 Codex 辅助/影子调用重定向到选定模型，并保留为请求配置的推理强度。默认源前缀为 `gpt-6-luna`, `gpt-5.6-luna`；0.144.x 及更早客户端使用 `gpt-5.4-mini`，可通过 `sourceModels` 恢复。 |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | 在可用时启用 | Web 搜索侧车选项。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | 在可用时启用 | 图像描述侧车选项。 |
 | `images?` | `OcxImagesConfig` | 自动选择 OpenAI | 用于 Codex `image_gen` 的独立 Images 转发选项。 |
@@ -126,15 +126,23 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 Codex 会为标题、提交信息等任务使用较小的辅助模型。启用
 `shadowCallIntercept` 后，可将识别出的源模型前缀重定向到另一个已配置模型。替换后仍会保留为请求配置的推理强度。只有当客户端使用不同的辅助 ID 时，才设置 `sourceModels`。
 
+拦截依据模型进行：裸模型 ID 与 `sourceModels` 匹配的请求（包括普通的 `request_kind: "turn"` 请求）都可以被重定向。通过 `x-openai-subagent: collab_spawn` 或 `x-codex-turn-metadata` JSON 标头中的 `subagent_kind: "thread_spawn"` 标记为已生成子代理的请求不受拦截，因此显式生成的子代理会保留其模型。
+
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
+
+### 目标不可用时
+
+替换目标是操作者选定的唯一目的地，因此无法再解析的目标会让辅助调用失败，而不是把它发到别处。当目标的提供方被禁用或删除，或其组合已不存在时，被拦截的请求会在向上游发送任何内容之前返回 `409` 和错误代码 `intercept_target_unavailable`。请求日志记录同一代码。请求不会透传给原生辅助模型，也不会回退到默认提供方，因为两者都会在你未选择的情况下改变目的地、凭据和费用。组合或路由配置档目标仍会在自身成员之间故障转移。像 `provider/model` 这样的限定目标，如果其提供方部分未指向任何已配置项，也按同样方式处理，设置 API 会拒绝保存。通过默认提供方解析的不带前缀的模型 ID 仍然有效。
+
+禁用（带 `disabled: true` 的 `PATCH /api/providers?name=<provider>`）或删除目标所解析到的提供方仍会成功；响应会加入 `dependentShadowIntercept: { model, enabled }`，仪表板会显示警告。重新启用该提供方或选择其他目标即可恢复拦截。
 
 ## 侧车
 
@@ -151,7 +159,7 @@ Codex 会为标题、提交信息等任务使用较小的辅助模型。启用
 
 | 字段 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | 在可用时启用 | 总开关。 |
+| `enabled?` | `boolean` | 在可用时启用 | 总开关。为 `false` 时，OpenCodex 停止拦截 `web_search`，并且 Codex 集成会把 `web_search = "disabled"` 写入 `~/.codex/config.toml`。 |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | 显式配置优先；省略时始终使用 `openai`。`anthropic` 和 `xai` 仅在显式配置时运行；`gemini` 和 `exa` 在 executor 发布前仍为保留值。 |
 | `model?` | `string` | 依后端而定 | OpenAI 使用 `gpt-5.6-luna`，Anthropic 使用 `claude-sonnet-5`，xAI 使用 `grok-4.6`。旧的显式 `gpt-5.4-mini` 会在启动时迁移。 |
 | `exaApiKey?` | `string` | 无 | `exa` 后端的操作员密钥。仅可写入：管理读取绝不会返回已存储的值。 |

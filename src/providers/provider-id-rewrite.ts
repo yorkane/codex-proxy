@@ -93,8 +93,11 @@ export function rewriteProviderReferences(config: OcxConfig, from: string, to: s
     if (next) owner[key] = next;
   }
 
- routeRecordValues(config.claudeCode?.tierModels as Record<string, string> | undefined);
- routeRecordValues(config.claudeCode?.modelMap as Record<string, string> | undefined);
+  routeRecordValues(config.claudeCode?.tierModels as Record<string, string> | undefined);
+  routeRecordValues(config.claudeCode?.modelMap as Record<string, string> | undefined);
+  // First-party picker bindings hold routes too; their keys are Anthropic picker ids.
+  routeRecordValues(config.claudeCode?.intercept?.modelMap);
+  // Fork: per-source shadow replacements are routes as well (shadowCallIntercept.modelMap).
   routeRecordValues(config.shadowCallIntercept?.modelMap as Record<string, string> | undefined);
 
   // Bare provider ids.

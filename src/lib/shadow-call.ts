@@ -1,13 +1,17 @@
 /**
  * Shadow-call intercept source models.
  *
- * Codex's helper calls span the ChatGPT-native lineup: gpt-5.6-luna,
- * gpt-5.6-sol, gpt-5.6-terra, the frontier gpt-5.5, and the cheap tier
- * gpt-5.4-mini (older clients). Every surface that names the intercepted
- * model (management API, GUI badges/tooltips, CLI) reads it from here instead
- * of hard-coding a slug that goes stale on the next client bump.
+ * Codex's helper calls span the ChatGPT-native lineup. Codex 0.154.0+ sends
+ * `gpt-6-luna`; clients from 0.145.0 through 0.153.x sent `gpt-5.6-luna`, and
+ * the same client generation also emits gpt-5.6-sol, gpt-5.6-terra, the
+ * frontier gpt-5.5, and — through 0.144.x — the cheap tier gpt-5.4-mini. The
+ * GPT-6 slug comes first because surfaces show the list in order. Every surface
+ * that names the intercepted model (management API, GUI badges/tooltips, CLI)
+ * reads it from here instead of hard-coding a slug that goes stale on the next
+ * client bump.
  */
 export const DEFAULT_SHADOW_SOURCE_MODELS = [
+  "gpt-6-luna",
   "gpt-5.6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
@@ -123,6 +127,10 @@ export function shadowCallTargetsIntersect(
  * intercept every configured shadow source model regardless of request kind.
  * A replacement intersecting the same provider+model source set remains a
  * no-op because rewriting it would only create self-interception (#2706).
+ *
+ * Callers skip this check entirely for spawned sub-agent turns
+ * (`isThreadSpawnRequest`): `gpt-6-luna` is both the helper slug and a default
+ * sub-agent model, and an explicitly spawned child must keep the model it chose.
  */
 export function shouldInterceptShadowCall(
   modelId: string,

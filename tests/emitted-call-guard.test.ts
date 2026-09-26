@@ -27,6 +27,17 @@ describe('resolveEmittedCall layer order', () => {
     });
     expect(v).toEqual({ kind: 'allow', name: 'collaboration__spawn_agent', repaired: true });
   });
+  test('a code-mode helper echo is repaired to exec before the phantom list is consulted', () => {
+    // Upstream #5495 made the goal helpers part of the code-mode echo vocabulary, so with
+    // exec declared these names relay as exec even when an operator kept them allowlisted.
+    for (const helper of ['update_goal', 'create_goal', 'get_goal']) {
+      expect(resolveEmittedCall(helper, {
+        declaredToolNames: new Set(['exec', 'web__run']),
+        freeformToolNames: freeform,
+        phantomNames: new Set([helper]),
+      })).toEqual({ kind: 'allow', name: 'exec', repaired: true });
+    }
+  });
 
   test('sandbox-prefixed composition is repaired to the declared tool', () => {
     const v = resolveEmittedCall('tools__web_run', { declaredToolNames: collab });
@@ -115,19 +126,19 @@ describe('resolveEmittedCall undeclared correction feedback (budget)', () => {
 
   test('an allowlisted phantom with budget becomes directive feedback', () => {
     const budget = { remaining: 2 };
-    // update_goal: not the bare form of any declared name, so shape repair
-    // cannot rescue it and the feedback layer is what answers.
-    const v = resolveEmittedCall('update_goal', {
+    // web_search: neither a declared name nor a bare form of one nor a code-mode helper
+    // echo, so shape repair cannot rescue it and the feedback layer is what answers.
+    const v = resolveEmittedCall('web_search', {
       declaredToolNames: withExec,
       freeformToolNames: freeform,
-      phantomNames: new Set(['update_goal']),
+      phantomNames: new Set(['web_search']),
       undeclaredFeedback: budget,
     });
     expect(v.kind).toBe('feedback');
     if (v.kind !== 'feedback') return;
     expect(v.reason).toBe('undeclared');
     expect(v.input).toContain('undeclared-tool repair');
-    expect(v.input).toContain('update_goal');
+    expect(v.input).toContain('web_search');
     expect(v.input).toContain('collaboration__update_plan');
     expect(budget.remaining).toBe(1);
   });
@@ -164,12 +175,12 @@ describe('resolveEmittedCall undeclared correction feedback (budget)', () => {
   });
 
   test('no budget object keeps the historical drop/fail-closed split', () => {
-    const v = resolveEmittedCall('update_goal', {
+    const v = resolveEmittedCall('web_search', {
       declaredToolNames: withExec,
       freeformToolNames: freeform,
-      phantomNames: new Set(['update_goal']),
+      phantomNames: new Set(['web_search']),
     });
-    expect(v).toEqual({ kind: 'drop', name: 'update_goal' });
+    expect(v).toEqual({ kind: 'drop', name: 'web_search' });
   });
 
   test('the suggestion names the closest declared tool for a near-miss', () => {

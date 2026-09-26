@@ -73,12 +73,15 @@ import {
 } from "../../src/codex/account-lifecycle";
 import {
   ConfigMutationLockError,
+  armClaudeCodeBaseline,
   getConfigPath,
   loadConfig,
   saveConfig,
   setPersistedConfigMutationBeforeCommitForTests,
 } from "../../src/config";
 import * as configModule from "../../src/config";
+import { setCodexAccountAutoSwitchThresholdOverride } from "../../src/codex/account-auto-switch";
+import { prepareConfigObjectChildDeletionRebase } from "../../src/config/rebase-provenance";
 import type { CatalogDisposition } from "../../src/codex/convergence-types";
 import { captureConfigGeneration, registerStateStore } from "../../src/lib/state-store-sweeper";
 import {
@@ -170,7 +173,7 @@ async function completeMockCodexOAuth(options: {
     done: true,
     loggedIn: true,
   } as ReturnType<typeof oauth.getLoginStatus>);
-  const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(() => {});
+  const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(async () => ({ status: "started" as const }));
   // Mirrors the login-status poll delay in login-flow.ts; other timers are intentionally dropped.
   const CODEX_OAUTH_LOGIN_POLL_INTERVAL_MS = 2_000;
   const timeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
@@ -4012,6 +4015,7 @@ describe("codex-auth API", () => {
     expect(accounts.find(a => a.isMain)?.priority).toBe(0);
   });
 
+
   test("GET /api/codex-auth/active reports an operator pin but not an automatic pick", async () => {
     const config = makeConfig({ activeCodexAccountId: "work" });
     seedPoolAccount(config, { id: "work", email: "work@example.test" });
@@ -4593,7 +4597,7 @@ describe("codex-auth API", () => {
       instructions: "Enter code: ABCD-EFGH",
       deviceCode: "ABCD-EFGH",
     }));
-    const openSpy = spyOn(openUrlModule, "openUrl").mockImplementation(() => {});
+    const openSpy = spyOn(openUrlModule, "openUrl").mockImplementation(async () => ({ status: "started" as const }));
     try {
       const req = new Request("http://localhost/api/codex-auth/login", {
         method: "POST",
@@ -4699,7 +4703,7 @@ describe("codex-auth API", () => {
       controller.onAuth({ url: "https://example.test/oauth" });
       throw new Error("late failure at /home/alice/.opencodex/auth.json.ocx-tmp sk-secret-provider-key");
     };
-    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(() => {});
+    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(async () => ({ status: "started" as const }));
     const timeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
       callback: (...args: unknown[]) => void,
       delay?: number,
@@ -4747,7 +4751,7 @@ describe("codex-auth API", () => {
     const { OAuthMutationBusyError } = await import("../../src/oauth/store");
     const openUrlMod = await import("../../src/lib/open-url");
     const originalLogin = oauth.OAUTH_PROVIDERS.chatgpt.login;
-    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(() => {});
+    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(async () => ({ status: "started" as const }));
     const timeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
       callback: (...args: unknown[]) => void,
       delay?: number,
@@ -4810,21 +4814,6 @@ describe("codex-auth API", () => {
     }
   });
 
-  test("POST /api/codex-auth/login/cancel expires the pending flow", async () => {
-    const flowId = "flow-cancel-test";
-    const req = new Request("http://localhost/api/codex-auth/login/cancel", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ flowId }),
-    });
-    const resp = await handleCodexAuthAPI(req, new URL(req.url), {} as any);
-    expect(resp!.status).toBe(200);
-    const statusReq = new Request(`http://localhost/api/codex-auth/login-status?flowId=${flowId}`, { method: "GET" });
-    const statusResp = await handleCodexAuthAPI(statusReq, new URL(statusReq.url), {} as any);
-    const data = await statusResp!.json() as { status: string; error?: string };
-    expect(data).toMatchObject({ status: "error", error: "Login cancelled" });
-  });
-
   describe("POST /api/codex-auth/login/code", () => {
     async function startPendingFlow() {
       const oauth = await import("../../src/oauth");
@@ -4834,7 +4823,7 @@ describe("codex-auth API", () => {
         done: false,
         loggedIn: false,
       } as ReturnType<typeof oauth.getLoginStatus>);
-      const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(() => {});
+      const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(async () => ({ status: "started" as const }));
       const req = new Request("http://localhost/api/codex-auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4842,16 +4831,13 @@ describe("codex-auth API", () => {
       });
       const resp = await handleCodexAuthAPI(req, new URL(req.url), makeConfig());
       const data = await resp!.json() as { flowId: string };
+      expect(startSpy).toHaveBeenCalledWith("chatgpt", expect.any(Object), { flowId: data.flowId });
       return {
         flowId: data.flowId,
         oauth,
         async cleanup() {
-          const cancelReq = new Request("http://localhost/api/codex-auth/login/cancel", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ flowId: data.flowId }),
-          });
-          await handleCodexAuthAPI(cancelReq, new URL(cancelReq.url), makeConfig());
+          const { codexAuthLoginState } = await import("../../src/codex/auth-api/login-state");
+          codexAuthLoginState.delete(data.flowId);
           startSpy.mockRestore();
           statusSpy.mockRestore();
           openSpy.mockRestore();
@@ -5161,7 +5147,7 @@ describe("codex-auth API", () => {
       loggedIn: false,
       error: "test-stop",
     } as ReturnType<typeof oauth.getLoginStatus>);
-    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(() => {});
+    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation(async () => ({ status: "started" as const }));
 
     try {
       const req = new Request("http://localhost/api/codex-auth/login", {

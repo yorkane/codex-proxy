@@ -18,6 +18,7 @@ export {
   isAllowedToolChoice,
   toolChoiceToolPredicate,
   declaresCodeModeExec,
+  toolRestrictsCallers,
   NAMESPACED_BARE_ALIAS_EXCLUDED_NAMES,
 } from "./types/tools";
 
@@ -28,6 +29,7 @@ export {
   OPENAI_PROVIDER_TIER_VERSION,
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   captureWireAdapterHardPins,
+  captureWireAdapterHardPinPrefixes,
   isWirePinnedModel,
   pinnedWireAdapter,
 } from "./types/wire";
@@ -44,6 +46,7 @@ export type {
   OcxToolResultMessage,
   OcxTextContent,
   OcxImageContent,
+  OcxDocumentContent,
   OcxContentPart,
   OcxThinkingContent,
   OcxToolCall,
@@ -59,6 +62,8 @@ export type {
 } from "./types/request";
 
 export type {
+  OcxApiSurfacesConfig,
+  OcxProtocolsConfig,
   OcxClaudeCodeConfig,
   OcxClaudeDesktopFamily,
   OcxClaudeDesktopAssignment,
@@ -75,6 +80,7 @@ export type {
   OcxConfig,
   OcxAccountPoolRotationStrategy,
   OcxAccountPoolQuotaWindow,
+  OcxComboCooldownWaitPolicy,
   OcxComboStrategy,
   OcxComboDefaultEffort,
   OcxComboDefaultEffortMode,
@@ -105,6 +111,7 @@ export type {
   ResponsesItemIdRepairConfig,
   RateLimitRetryPolicy,
   TransientRetryPolicy,
+  ResetReplayPolicy,
   ProviderWebSearchBridgeBackend,
   ProviderWebSearchBridgeConfig,
   ProviderCostOverlay,

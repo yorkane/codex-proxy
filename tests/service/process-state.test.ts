@@ -26,6 +26,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 
 let testDir = "";
+const previousHome = process.env.OPENCODEX_HOME;
 
 beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), "ocx-process-state-"));
@@ -38,7 +39,8 @@ afterEach(() => {
   setProcessCommandLinePlatformForTests(null);
   setTrustedWindowsSystemDirectoryResolverForTests(null);
   setOcxStartProcessCacheForTests([]);
-  delete process.env.OPENCODEX_HOME;
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
   if (testDir && existsSync(testDir)) removeTreeWithRetry(testDir);
   testDir = "";
 });
@@ -94,6 +96,23 @@ describe("proxy process-state ownership", () => {
     expect(isOcxCommandLine("bun run src/cli.ts start")).toBe(true);
     expect(isOcxStartCommandLine("bun run src/cli.ts stop")).toBe(false);
     expect(isOcxStartCommandLine("opencodex update --tag latest")).toBe(false);
+  });
+
+  test("recognizes the Windows standalone executable, whatever its case or path shape", () => {
+    // scripts/build-standalone.ts and desktop/scripts/prepare-sidecar.ts both emit ocx.exe
+    // on Windows targets, and the bundled sidecar is copied as ocx-<triple>.exe. A quoted
+    // install path with spaces is the realistic WMIC/PowerShell command line for it.
+    expect(isOcxCommandLine('"C:/Program Files/OpenCodex/bin/ocx.exe" start --port 10100')).toBe(true);
+    expect(isOcxCommandLine('"C:\\Program Files\\OpenCodex\\bin\\OCX.EXE" start')).toBe(true);
+    expect(isOcxCommandLine("C:/tools/ocx.exe stop")).toBe(true);
+    expect(isOcxCommandLine("ocx.exe")).toBe(true);
+    expect(isOcxCommandLine("opencodex.exe status")).toBe(true);
+    expect(isOcxStartCommandLine('"C:/Program Files/OpenCodex/bin/ocx.exe" start')).toBe(true);
+    // Lookalikes stay foreign: the token boundary around the executable name is the whole
+    // defence, and widening it for .exe must not widen it for neighbours.
+    expect(isOcxCommandLine("not-ocx.exe start")).toBe(false);
+    expect(isOcxCommandLine("myocx.exe")).toBe(false);
+    expect(isOcxCommandLine("ocx.exes start")).toBe(false);
   });
 
   test("the ownership probe distinguishes a real owner from a reused PID", () => {

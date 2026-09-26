@@ -32,7 +32,7 @@ test("every row maps one-to-one onto a page", () => {
   // (Shadow is the fork's standalone intercept page, added after Models.)
   expect(ids).toEqual([
     "dashboard", "codex-set", "providers", "models", "shadow", "subagents",
-    "logs", "usage", "storage", "remote", "integrations",
+    "logs", "usage", "storage", "remote", "remote-workspace", "integrations",
   ]);
   // No two rows share a page id, which is what made the correction helper necessary.
   expect(new Set(ids).size).toBe(ids.length);

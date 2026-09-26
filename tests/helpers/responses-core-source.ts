@@ -28,15 +28,19 @@ export const RESPONSES_CORE_MODULES = [
   "core-auth.ts",
   "core-normalize.ts",
   "core-combo.ts",
+  "core-combo-native.ts",
   "request-prepare.ts",
+  "shadow-target-availability.ts",
+  // Fork-owned: resolveShadowRoute / shadowPhantomScope (reached from request-prepare.ts).
+  "shadow-call-route.ts",
   "compaction-routing.ts",
   "request-transport.ts",
   "request-sidecar-auth.ts",
   "response-effects.ts",
   "request-send-budget.ts",
-  "request-spend.ts",
   "passthrough-execution.ts",
   "passthrough-dispatch.ts",
+  "reset-replay.ts",
   "passthrough-delivery.ts",
   "sidecar-execution.ts",
   "completion-policy.ts",
@@ -44,6 +48,7 @@ export const RESPONSES_CORE_MODULES = [
   "adapter-dispatch.ts",
   "adapter-continuation.ts",
   "adapter-delivery.ts",
+  "policy-refusal.ts",
 ] as const;
 
 export type ResponsesCoreModule = typeof RESPONSES_CORE_MODULES[number];

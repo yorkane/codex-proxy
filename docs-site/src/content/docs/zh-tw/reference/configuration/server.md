@@ -25,7 +25,7 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | `codexAutoStart?` | `boolean` | `true` | 讓 Codex shim 在啟動 Codex 前執行 `ocx ensure`。False 使 ensure 為 no-op。 |
 | `codexShimAutoRestore?` | `boolean` | `true` | 在完成的外部 Codex 更新取代已安裝的 shim 後還原它。環境退出：`OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | 可逆的 Codex App 歷史相容性。原始中繼資料由 `ocx stop` / `ocx restore` 備份並還原。 |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 將識別的 Codex helper/shadow call 重定向到所選模型，並保留為請求設定的 reasoning effort。預設來源前綴為 `gpt-5.6-luna`；0.144.x 及更舊的客戶端使用 `gpt-5.4-mini`，可透過 `sourceModels` 恢復。 |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 將識別的 Codex helper/shadow call 重定向到所選模型，並保留為請求設定的 reasoning effort。預設來源前綴為 `gpt-6-luna`, `gpt-5.6-luna`；0.144.x 及更舊的客戶端使用 `gpt-5.4-mini`，可透過 `sourceModels` 恢復。 |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | 可用時開啟 | 網頁搜尋 sidecar 選項。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | 可用時開啟 | 圖片描述 sidecar 選項。 |
 | `images?` | `OcxImagesConfig` | 自動 OpenAI 選擇 | Codex `image_gen` 的獨立 Images 中繼選項。 |
@@ -142,21 +142,29 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 | `claudeCode.authModeMigratedAt?` | `string` | 未設定 | 內部一次性升級標記。請勿手動設定。 |
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | 繼承 | 寫入生成的 `~/.claude/agents/ocx-*.md` 的 effort；與 Codex guidance 與代理上限分開。透過 `ocx claude` 重啟以重新生成。 |
 
-自動認證在找到已儲存的 Claude 認證時選擇訂閱，無認證時選擇 proxy，偵測不明確時選擇訂閱並附帶警告。請見[Claude Code 認證模式](/zh-tw/guides/claude-code/#auth-mode)。
+自動認證在找到已儲存的 Claude 認證時選擇訂閱，無認證時選擇 proxy，偵測不明確時選擇訂閱並附帶警告。請見[Claude Code 認證模式](/zh-tw/guides/claude-code/#認證模式)。
 
 ## Shadow call
 
 Codex 使用小型 helper 模型處理如標題與 commit 訊息等任務。啟用 `shadowCallIntercept` 以將識別的來源模型前綴重定向到另一個已設定的模型。替換後仍會保留為請求設定的 reasoning effort。僅在客戶端使用不同的 helper id 時設定 `sourceModels`。
+
+攔截依模型判定：裸模型 ID 符合 `sourceModels` 的請求（包括一般的 `request_kind: "turn"` 請求）都可以被重定向。由 `x-openai-subagent: collab_spawn` 或 `x-codex-turn-metadata` JSON 標頭中的 `subagent_kind: "thread_spawn"` 標記為已產生子代理的請求不受攔截，因此明確產生的子代理會保留其模型。
 
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
+
+### 目標無法使用時
+
+替換目標是操作者選定的唯一目的地，因此無法再解析的目標會讓輔助呼叫失敗，而不是把它送到別處。當目標的供應商被停用或刪除，或其組合已不存在時，被攔截的請求會在向上游送出任何內容之前回傳 `409` 與錯誤代碼 `intercept_target_unavailable`。請求記錄會記下相同代碼。請求不會直通給原生輔助模型，也不會退回預設供應商，因為兩者都會在你未選擇的情況下改變目的地、憑證與費用。組合或路由設定檔目標仍會在自身成員之間容錯移轉。像 `provider/model` 這樣的限定目標，若其供應商部分未指向任何已設定項目，也以相同方式處理，設定 API 會拒絕儲存。透過預設供應商解析的不帶前綴模型 ID 仍然有效。
+
+停用（帶 `disabled: true` 的 `PATCH /api/providers?name=<provider>`）或刪除目標所解析到的供應商仍會成功；回應會加入 `dependentShadowIntercept: { model, enabled }`，儀表板會顯示警告。重新啟用該供應商或選擇其他目標即可恢復攔截。
 
 ## Sidecar
 
@@ -173,7 +181,7 @@ Codex 使用小型 helper 模型處理如標題與 commit 訊息等任務。啟�
 
 | 欄位 | 型別 | 預設值 | 意義 |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | 可用時開啟 | 主開關。 |
+| `enabled?` | `boolean` | 可用時開啟 | 主開關。為 `false` 時，OpenCodex 停止攔截 `web_search`，且 Codex 整合會把 `web_search = "disabled"` 寫入 `~/.codex/config.toml`。 |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | 明確設定優先；省略時一律使用 `openai`。`anthropic` 與 `xai` 僅在明確設定時執行；`gemini` 與 `exa` 在 executor 推出前仍為保留值。 |
 | `model?` | `string` | 視 backend 而定 | OpenAI 為 `gpt-5.6-luna`、Anthropic 為 `claude-sonnet-5`、xAI 為 `grok-4.6`。舊版明確 `gpt-5.4-mini` 在啟動時遷移。 |
 | `exaApiKey?` | `string` | 無 | `exa` backend 的操作員金鑰。僅可寫入：管理讀取永遠不會傳回已儲存的值。 |

@@ -13,6 +13,17 @@ import { statusCodeInfo } from "../src/status-codes";
 const FR_CATALOG_URL = new URL("../src/i18n/fr.ts", import.meta.url);
 const PLACEHOLDER_RE = /\{([a-zA-Z0-9_]+)\}/g;
 
+/**
+ * A value carrying no letters once its placeholders are removed has nothing to translate.
+ * An em dash, a unit symbol and "{position} / {total}" are identical in every locale by
+ * construction, so matching English is evidence of nothing. Deriving that from the value
+ * keeps the allowlist below for real words instead of growing it each time the UI gains
+ * another symbol.
+ */
+function carriesTranslatableWords(value: string): boolean {
+  return /\p{L}/u.test(value.replace(/\{[a-zA-Z0-9_]+\}/g, " "));
+}
+
 const INTENTIONAL_ENGLISH = new Set<TKey>([
   // Units, symbols, protocol values, machine labels, and product names.
   "integrations.cursor.noControl",
@@ -47,6 +58,9 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "claude.pageTitle",
   "claude.tabCode",
   "claude.tabDesktop",
+  // A literal Claude Desktop picker model id shown as the input placeholder; model ids are
+  // identical in every locale.
+  "claudeDesktop.firstParty.bindings.pickerPlaceholder",
   "claudeDesktop.title",
   "dash.backendAnthropic",
   "dash.backendOpenAI",
@@ -182,6 +196,9 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "api.colSource",
   "api.testSucceeded",
   "cws.count.total",
+  // Both labels are ordinary French words with the same spelling and meaning.
+  "cws.jev.stats.efforts",
+  "cws.jev.stats.total",
   "claudeDesktop.alias",
   "lab.filter.verdict",
   "lab.col.suite",
@@ -196,6 +213,11 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   // untranslated `~$`); the templates are pure placeholders on purpose.
   "logs.cost.approximate",
   "logs.cost.lowerBound",
+  // Protocol wire names on the Logs protocol path, and the IR acronym beside them.
+  "logs.protocol.wire.responses",
+  "logs.protocol.wire.chat",
+  "logs.protocol.wire.messages",
+  "logs.protocol.hop.ir",
 ]);
 
 function placeholders(value: string): string[] {
@@ -223,7 +245,9 @@ describe("French base catalog", () => {
 
     const french = (await import("../src/i18n/fr")).fr;
     const accidental = (Object.keys(DICTS.en) as TKey[]).filter(key =>
-      french[key] === DICTS.en[key] && !INTENTIONAL_ENGLISH.has(key)
+      french[key] === DICTS.en[key]
+      && !INTENTIONAL_ENGLISH.has(key)
+      && carriesTranslatableWords(String(DICTS.en[key]))
     );
 
     expect(accidental).toEqual([]);

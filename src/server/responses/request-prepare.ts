@@ -13,6 +13,7 @@ import {
 } from "./core-errors";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveComboId, comboIdFromRawBody, NoAvailableComboTargetsError } from "../../combos";
+import { INTERCEPT_TARGET_UNAVAILABLE_CODE, interceptTargetUnavailableResponse, resolveShadowCallTarget } from "./shadow-target-availability";
 import { recallComboForLane } from "./combo-session-recall";
 import {
   sessionLaneIdFromRequest,
@@ -20,6 +21,7 @@ import {
   sessionIdHeaderFromRequest,
   reasoningReplayConversationIdFromResponsesRequest,
 } from "../request-log-conversation";
+import { resolveContextPrincipal } from "../auth-cors";
 import {
   isShadowSourceModel,
   shadowCallReplacementFor,
@@ -38,6 +40,7 @@ import {
   applyCodexAuthContextToProvider,
   hasCallerCodexBearer,
   requestOwnedMainPinState,
+  requestOwnedMainCredentialIsLive,
 } from "../../codex/auth-context";
 import {
   copyPreviousResponseReplayProvenance,
@@ -53,7 +56,7 @@ import { parseRequest } from "../../responses/parser";
 import { anthropicSessionKeyFromParts } from "../../oauth/anthropic-routing";
 import { isTranslatorBudgetExceededError } from "../../lib/translator-budget";
 import { bindTurnTerminationScope, rememberDeliveredFinalAnswer } from "../../responses/turn-termination";
-import { requestLogSpeedLabel, readConfiguredCodexServiceTier } from "../request-log";
+import { observeCacheDiagnosticInbound, rebindCacheDiagnosticBody, requestLogSpeedLabel, readConfiguredCodexServiceTier } from "../request-log";
 import type { RouteResult } from "../../router";
 import {
   captureRouteStaticPolicy,
@@ -111,6 +114,13 @@ import {
   CODEX_RESERVE_OPT_IN_REQUIRED_MESSAGE,
 } from "../../codex/loopback-target";
 import { checkComboTargetInputAdmission, checkInputAdmission } from "./input-admission";
+import {
+  admissionModelDeniedResponse,
+  AdmissionModelDeniedError,
+  assertRouteAllowedByScope,
+  resolveAdmissionModelScope,
+  routeAllowedByScope,
+} from "../admission-model-scope";
 import { nativeContextLimits } from "../../codex/catalog";
 import { streamingContextOverflowResponse } from "./context-overflow";
 import {
@@ -151,6 +161,14 @@ export async function prepareResponsesRequest(
     }
     return decodeRequestErrorResponse(err, "responses");
   }
+  observeCacheDiagnosticInbound(
+    logCtx,
+    body,
+    req.headers,
+    options.promptCacheKeyIsSharedCohort === true
+      ? "system-derived"
+      : options.promptCacheKeyIsSharedCohort === false ? "metadata-derived" : "caller",
+  );
   if (!options.comboAttempt && !options.compactionRoutingOverride && inboundWire === "responses") {
     options.compactionRoutingOverride = applyCompactionRoutingOverride(body, req.headers, config, {
       endpoint: "responses",
@@ -211,7 +229,11 @@ export async function prepareResponsesRequest(
   // hops — which only exist inside that loop — are unreachable (#4129). Rewrite the selector
   // here instead, before comboIdFromRawBody reads `model`, and identify the combo by CONFIG
   // LOOKUP so the check can never observe a one-candidate collapse.
-  if (!options.comboAttempt && !options.compactionRoutingOverride && body && typeof body === "object" && !Array.isArray(body)) {
+  let shadowCallIntercepted = false;
+  // A spawned sub-agent turn names its model on purpose; gpt-6-luna is both the helper
+  // slug and a default sub-agent model, so neither intercept site may rewrite that turn.
+  const threadSpawn = isThreadSpawnRequest(req.headers);
+  if (!options.comboAttempt && !options.compactionRoutingOverride && !threadSpawn && body && typeof body === "object" && !Array.isArray(body)) {
     const shadowIntercept = config.shadowCallIntercept;
     const rawShadowModel = (body as { model?: unknown }).model;
     const shadowReplacement = shadowIntercept?.enabled && typeof rawShadowModel === "string"
@@ -224,6 +246,7 @@ export async function prepareResponsesRequest(
       const shadowComboId = resolveComboId(config, shadowReplacement);
       if (shadowComboId && Object.hasOwn(config.combos ?? {}, shadowComboId)) {
         (body as Record<string, unknown>).model = shadowReplacement;
+        shadowCallIntercepted = true;
         // Same rule as the late intercept site: record the operator-configured prefix that
         // matched, never the caller's raw model string. Matching is by prefix, so the raw
         // value is caller-controlled and reaches usage.jsonl and /api/logs.
@@ -238,6 +261,9 @@ export async function prepareResponsesRequest(
     options.onRequestBodyRead?.();
     return requestDispatchers.handleComboResponses(req, body, comboId, config, logCtx, {
       ...options,
+      // Concrete combo child selectors no longer match the shadow source model. Carry the
+      // interception decision explicitly so provider-specific helper isolation still applies.
+      shadowCallIntercepted,
       // The original request body was accepted above. Combo children are synthetic
       // replays and must not repeat the caller-owned timeout transition.
       onRequestBodyRead: undefined,
@@ -299,6 +325,10 @@ export async function prepareResponsesRequest(
   try {
     parsed = parseRequest(body);
     parsed._promptCacheKeyIsSharedCohort = options.promptCacheKeyIsSharedCohort;
+    // The body may have been rebuilt since the inbound observation (previous-response
+    // expansion); alias the parsed raw body to the same draft so the outbound
+    // observation at the adapter seam still finds it.
+    rebindCacheDiagnosticBody(parsed._rawBody, logCtx.cacheDiagnosticDraft);
     // Captured before any parser mutates it, so both grammars see the client's id.
     const { fastRow, effortRow } = parseSyntheticRowId(parsed.modelId, config);
     if (fastRow) {
@@ -356,6 +386,7 @@ export async function prepareResponsesRequest(
       }
     }
     if (cursorClientThreadId) parsed._cursorClientThreadId = cursorClientThreadId;
+    if (options.shadowCallIntercepted === true) parsed._cursorIsolateConversation = true;
   } catch (err) {
     if (isTranslatorBudgetExceededError(err)) {
       return formatErrorResponse(413, "request_too_large", "request translation buffer exceeded the safe limit", {
@@ -394,6 +425,17 @@ export async function prepareResponsesRequest(
       parsed._reasoningReplayScope = { clientThreadId: reasoningReplayConversationId };
     }
   }
+  if (parsed._reasoningReplayScope) {
+    // Scope replay cells to the caller principal. On loopback, admission carries no identity,
+    // so resolve it from an opencodex API key the caller volunteered (same rule as context
+    // history ownership). A caller that presents none has no principal, and none is invented:
+    // every keyless local process would otherwise share one bucket, and a client-visible cell id
+    // would become enough to read another caller's retained search result. Without a principal
+    // bridgeSearchReplayScope yields no scope, so nothing is recorded or restored for it. The
+    // field is always rewritten so an absent principal also clears one a reused holder carried.
+    const clientPrincipalId = resolveContextPrincipal(req, config, options.admission);
+    parsed._reasoningReplayScope = { ...parsed._reasoningReplayScope, clientPrincipalId };
+  }
   // Prefer a pre-populated id (routed Claude) over Responses headers that may be
   // absent or synthetically injected (session_id from prompt_cache_key).
   if (!logCtx.conversationId) {
@@ -417,7 +459,18 @@ export async function prepareResponsesRequest(
 
   let route: RouteResult;
   let credentialDomainWasRewritten = false;
+  // The selector the caller actually sent, captured before shadow interception
+  // or a subagent fallback rewrites it, so a refusal names the client's own
+  // request rather than a destination it never asked for.
+  const inboundSelector = parsed.modelId;
+  const admissionScope = resolveAdmissionModelScope(config, options.admission);
   const captureInboundRoutePolicy = (candidate: RouteResult): RouteResult => {
+    // Every route this request path produces passes through here: the direct
+    // name, an alias, a policy or combo selection, a compaction override, a
+    // shadow-intercept target and both subagent-fallback re-routes. Checking
+    // the key's scope at this one point is what stops a rewrite from reaching
+    // a destination the front door would have refused.
+    assertRouteAllowedByScope(admissionScope, inboundSelector, candidate);
     candidate.staticPolicy = captureRouteStaticPolicy(
       candidate.providerName,
       candidate.modelId,
@@ -441,12 +494,17 @@ export async function prepareResponsesRequest(
     // shadow-call-route.ts so upstream edits to this file never re-conflict with the
     // intercept block. A shadow rewrite changes the credential domain, so the final
     // auth resolution must strip caller bearer headers (#4102 semantics).
-    // A compaction routing override owns the request's route; the shadow intercept
-    // must not fire on top of it (upstream 2.60 semantics).
-    const shadowRoute = options.compactionRoutingOverride
-      ? undefined
-      : resolveShadowRoute({ parsed, config, logCtx, options, resolveRoute });
-    if (shadowRoute !== undefined) credentialDomainWasRewritten = true;
+    // A compaction routing override owns the request's route, and a spawned sub-agent
+    // turn names its model on purpose (gpt-6-luna is both the helper slug and a default
+    // sub-agent model): neither case may be rewritten by the intercept.
+    let shadowRoute: RouteResult | undefined;
+    if (!options.compactionRoutingOverride && !threadSpawn) {
+      const shadowOutcome = resolveShadowRoute({ parsed, config, logCtx, options, resolveRoute });
+      // A target that stopped resolving is refused before any send (#5618).
+      if (shadowOutcome.response !== undefined) return shadowOutcome.response;
+      shadowRoute = shadowOutcome.route;
+      if (shadowRoute !== undefined) credentialDomainWasRewritten = true;
+    }
     if (parsed._compactionRequest === true || options.compactionRoutingOverride) parsed._cursorIsolateConversation = true;
     route = shadowRoute ?? resolveRoute(parsed.modelId);
     if (options.compactionRoutingOverride && !compactionRoutingKeepsProviderIdentity(config, options.compactionRoutingOverride, route)) {
@@ -460,6 +518,7 @@ export async function prepareResponsesRequest(
     }
     logCtx.routeDecision = route.routeDecision;
   } catch (err) {
+    if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
     if (err instanceof NoAvailableComboTargetsError) {
       return comboUnavailable(err.comboId);
     }
@@ -476,7 +535,6 @@ export async function prepareResponsesRequest(
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
   // also fail closed without polling quota upstream. Cached fallback state can still select a
   // provider with native continuation support below.
-  const threadSpawn = isThreadSpawnRequest(req.headers);
   const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
     ? resolveSubagentFallbackChain(parsed, config)
     : null;
@@ -523,7 +581,19 @@ export async function prepareResponsesRequest(
     options.codexAuthPolicy ?? config,
     previewRequestScopedMainCredential,
     route.codexAccountId,
+    codexQuotaScopeForModel(route.modelId),
   ).preserve;
+  // Final auth's own liveness answer for a request-owned bearer, from its own shared expression
+  // (#5019). Predicting the pin alone dropped main here and handed subagent fallback a different
+  // account than the one that serves.
+  const previewRequestOwnedMainCredentialLive = requestOwnedMainCredentialIsLive({
+    preserveRequestOwnedMainPin: previewRequestOwnedMainPin,
+    requestScopedMainCredential: previewRequestScopedMainCredential,
+    nativeMainTrafficBlocked: nativeMainRecoveryBlocked,
+    mainProfileDraining: previewSelectionAdmission?.mainProfileDraining === true,
+    // Final-auth-only, and stated rather than defaulted: see the field's own note.
+    callerOwnsCooledPoolSubscription: false,
+  });
   // Deliberately NOT fenced on ownership: final auth derives `nativeMainSelectionOnly` from the
   // drain alone, and adding a term here would diverge from it in the other direction.
   const previewSelectionOptions = {
@@ -535,12 +605,13 @@ export async function prepareResponsesRequest(
     // spawn, because subagent fallback re-enters the preview through the callback below.
     //
     // Scoped to ownership, and carrying final auth's value rather than a constant, because
-    // preview exists to predict final auth. Under an effective main pin the request really is
-    // served by its own main credential, so main must stay eligible; without the pin final auth
-    // scores main `main_credential_unavailable` and drops it, so preview has to drop it too. A
-    // hardcoded `true` would be wrong in the second case and `false` in the first.
+    // preview exists to predict final auth. The request really is served by its own main
+    // credential whenever that bearer is forwardable, so main stays eligible; while retained
+    // recovery or a profile drain fences the physical identity, final auth drops main and preview
+    // has to drop it too. A hardcoded `true` would be wrong in the second case and `false` in
+    // the first.
     isMainAccountTokenLive: previewRequestScopedMainCredential
-      ? () => previewRequestOwnedMainPin
+      ? () => previewRequestOwnedMainCredentialLive
       : undefined,
     // Preview must reach the same answer as the final resolution, including the uploaded-file
     // retention (#4778): a preview that reported a quota move the request will not make would
@@ -659,6 +730,7 @@ export async function prepareResponsesRequest(
         credentialDomainWasRewritten = true;
         logCtx.routeDecision = route.routeDecision;
       } catch (err) {
+        if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
         if (err instanceof NoAvailableComboTargetsError) {
           return comboUnavailable(err.comboId);
         }
@@ -778,12 +850,22 @@ export async function prepareResponsesRequest(
                 options.codexAuthPolicy ?? config,
                 recoveryRequestScopedMainCredential,
                 route.codexAccountId,
+                codexQuotaScopeForModel(route.modelId),
               ).preserve;
+              // Same shared expression as the first preview and as final auth (#5019), recomputed
+              // against the route recovery may have moved to.
+              const recoveryRequestOwnedMainCredentialLive = requestOwnedMainCredentialIsLive({
+                preserveRequestOwnedMainPin: recoveryRequestOwnedMainPin,
+                requestScopedMainCredential: recoveryRequestScopedMainCredential,
+                nativeMainTrafficBlocked: recoveryNativeMainBlocked,
+                mainProfileDraining: recoverySelectionAdmission?.mainProfileDraining === true,
+                callerOwnsCooledPoolSubscription: false,
+              });
               const recoverySelectionOptions = {
                 nativeMainSelectionOnly: !recoveryNativeMainBlocked
                   && recoverySelectionAdmission?.mainProfileDraining === true,
                 isMainAccountTokenLive: recoveryRequestScopedMainCredential
-                  ? () => recoveryRequestOwnedMainPin
+                  ? () => recoveryRequestOwnedMainCredentialLive
                   : undefined,
                 // #4778, same reason as `previewSelectionOptions` above: this preview decides
                 // which account subagent fallback scores against, and final auth passes the
@@ -859,6 +941,7 @@ export async function prepareResponsesRequest(
               credentialDomainWasRewritten = true;
               logCtx.routeDecision = route.routeDecision;
             } catch (err) {
+              if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
               if (err instanceof NoAvailableComboTargetsError) {
                 return comboUnavailable(err.comboId);
               }
@@ -1007,6 +1090,14 @@ export async function prepareResponsesRequest(
     inboundTransport: options.inboundTransport,
     claudeGoAffinity: options.claudeGoAffinity,
   });
+  // Normalization is the last thing that can move the destination: resolving an
+  // OpenAI virtual model rewrites route.modelId to the wire id that will
+  // actually be billed. A scope checked only before this would authorize the
+  // public selector and send the wire model, so the settled route is checked
+  // once more here.
+  if (!routeAllowedByScope(admissionScope, route)) {
+    return admissionModelDeniedResponse(new AdmissionModelDeniedError(inboundSelector, route));
+  }
   // Attribute local auth/cooldown failures to the public selector too; exact auth may fail before
   // the normal post-resolution provider label is assigned.
   if (route.codexAccountNamespace) {

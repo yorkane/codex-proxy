@@ -1,6 +1,5 @@
 import { remoteWorkspaceEnabled } from "../remote-control/workspace-activation";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeContextLimits, nativeModelRows, uniqueCatalogModelsForPublicList } from "../codex/catalog";
 import {
@@ -51,6 +50,7 @@ import {
 import type { OcxClaudeCodeConfig, OcxClaudeDesktopProfile, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../types";
 import type { DesktopProfileModel } from "../claude/desktop-profile";
 import { drainAndShutdown } from "./lifecycle";
+import { noteExplicitShutdownRequested } from "./management/system-restart";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "./request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../usage/cost";
 import type { PersistedUsageAttempt } from "../usage/log";
@@ -71,12 +71,16 @@ import { handleOauthAccountRoutes } from "./management/oauth-account-routes";
 import { handleComboRoutes } from "./management/combo-routes";
 import { handleSystemRoutes } from "./management/system-routes";
 import { handleSidebarRoutes } from "./management/sidebar-routes";
+import { handleUsageTimelineRoutes } from "./management/usage-timeline-routes";
+import { handleCompanionRoutes } from "./management/companion-routes";
 import { handleCodexPromptRoutes } from "./management/codex-prompt-routes";
 import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
+import { handleClaudeDesktopPickerRoutes } from "./management/claude-desktop-picker-routes";
 import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
 import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
+import type { ManagementRequestIngress } from "./management/context";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
@@ -84,15 +88,11 @@ import type { CatalogDisposition, ConvergeCodex } from "../codex/convergence-typ
 import { normalizeCatalogDisposition } from "../codex/catalog-refresh-status";
 import { managementBodyTooLargeResponse } from "./management/body";
 import { handleSessionRoutes } from "./management/session-routes";
+import { packageVersion } from "../lib/package-version";
 
 // installed npm version instead of a stale hardcode.
-export const VERSION = (() => {
-  try {
-    return JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version as string;
-  } catch {
-    return "0.0.0";
-  }
-})();
+const MANAGEMENT_VERSION_FALLBACK = "0.0.0";
+export const VERSION = packageVersion(MANAGEMENT_VERSION_FALLBACK);
 
 const managementConvergenceBindings = new WeakMap<object, Readonly<{
   factory: (config: Readonly<OcxConfig>) => ConvergeCodex;
@@ -156,10 +156,26 @@ async function handleWorkflowBudgetRoutesOnDemand(ctx: ManagementContext): Promi
   return handleWorkflowBudgetRoutes(ctx);
 }
 
+/**
+ * Lazy like the Lab and routing-profile handlers: the protocol planner reaches the router and
+ * the ingress eligibility rules, which no other dashboard request needs.
+ */
+async function handleProtocolRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/protocols")) return null;
+  const { handleProtocolRoutes } = await import("./management/protocol-routes");
+  return handleProtocolRoutes(ctx);
+}
+
 async function handleGrokCouponRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
   if (!pathInManagementNamespace(ctx.url.pathname, "/api/grok/reset-coupons", true)) return null;
   const { handleGrokCouponRoutes } = await import("./management/grok-coupon-routes");
   return handleGrokCouponRoutes(ctx);
+}
+
+async function handleAnthropicResetGrantRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/anthropic/reset-grants", true)) return null;
+  const { handleAnthropicResetGrantRoutes } = await import("./management/anthropic-reset-grant-routes");
+  return handleAnthropicResetGrantRoutes(ctx);
 }
 
 async function handleRemoteWorkspaceRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
@@ -169,11 +185,20 @@ async function handleRemoteWorkspaceRoutesOnDemand(ctx: ManagementContext): Prom
       status: ctx.req.method === "GET" ? 200 : 404, headers: { "cache-control": "no-store" },
     });
   }
-  if (ctx.req.method !== "GET" && ctx.principal !== "gui-session") {
-    return Response.json({ error: "A dashboard session is required for Remote Workspace changes." }, { status: 403 });
+  if (ctx.req.method !== "GET" && (
+    ctx.principal !== "gui-session"
+    || ctx.sessionControl?.isPaired(ctx.req, ctx.config) !== true
+  )) {
+    return Response.json({ error: "A paired dashboard session is required for Remote Workspace changes." }, { status: 403 });
   }
   const { handleRemoteWorkspaceRoutes } = await import("./management/remote-workspace-routes");
   return handleRemoteWorkspaceRoutes(ctx);
+}
+
+async function handleLinkRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/link")) return null;
+  const { handleLinkRoutes } = await import("./management/link-routes");
+  return handleLinkRoutes(ctx);
 }
 
 export async function handleManagementAPI(
@@ -183,6 +208,7 @@ export async function handleManagementAPI(
   deps: ManagementApiDeps = {},
   principal?: ManagementPrincipal,
   sessionControl?: ManagementSessionControl,
+  requestIngress: ManagementRequestIngress = { trustedLoopback: false },
 ): Promise<Response | null> {
   if (!isAllowedManagementOrigin(req, config)) {
     return jsonResponse({ error: "cross-origin request blocked" }, 403, req, config);
@@ -265,10 +291,16 @@ export async function handleManagementAPI(
       }
     } catch { /* best-effort */ }
   }
-  const ctx: ManagementContext = { req, url, config, deps, version: VERSION, principal, sessionControl, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
-  let routed: Response | null;
+  const ctx: ManagementContext = {
+    req, url, config, deps, version: VERSION, principal, sessionControl,
+    trustedLoopbackIngress: requestIngress.trustedLoopback,
+    guiSessionIssuance: requestIngress.guiSessionIssuance ?? null,
+    convergeCodexCatalog, syncClaudeAgentDefsBestEffort,
+  };
+  let routed: Response | null | undefined;
   try {
     routed = handleSessionRoutes(ctx)
+    ??     (await handleLinkRoutesOnDemand(ctx))
     ??     (await handleRemoteWorkspaceRoutesOnDemand(ctx))
     ??     (await handleConfigRoutes(ctx))
     ??     (await handleStorageLogGuardRoutes(ctx))
@@ -276,7 +308,9 @@ export async function handleManagementAPI(
     ??     (await handleRequestHistoryRoutes(ctx))
     ??     (await handleQuotaResetRoutesOnDemand(ctx))
     ??     (await handleWorkflowBudgetRoutesOnDemand(ctx))
+    ??     (await handleProtocolRoutesOnDemand(ctx))
     ??     (await handleGrokCouponRoutesOnDemand(ctx))
+    ??     (await handleAnthropicResetGrantRoutesOnDemand(ctx))
     ??     handleMetricsRoutes(ctx)
     ??     (await handleRoutingAnalyticsRoutes(ctx))
     ??     (await handleRoutingProfileRoutesOnDemand(ctx))
@@ -285,12 +319,15 @@ export async function handleManagementAPI(
     ??     (await handleIntegrationRoutes(ctx))
     ??     (await handleNativeIntegrationRoutes(ctx))
     ??     (await handleCursorIntegrationRoutes(ctx))
+    ??     (await handleClaudeDesktopPickerRoutes(ctx))
     ??     (await handleAgentSettingsRoutes(ctx))
     ??     (await handleCodexPromptRoutes(ctx))
     ??     (await handleOauthAccountRoutes(ctx))
     ??     (await handleComboRoutes(ctx))
     ??     (await handleSystemRoutes(ctx))
     ??     (await handleLabRoutesOnDemand(ctx))
+      ?? (await handleUsageTimelineRoutes(ctx))
+      ?? (await handleCompanionRoutes(ctx))
       ?? (await handleSidebarRoutes(ctx));
   } catch (error) {
     const tooLarge = managementBodyTooLargeResponse(error, req, config);
@@ -396,6 +433,9 @@ export async function handleManagementAPI(
     // syncCleanup skips this when OCX_SERVICE is set (so a crash/respawn keeps the fence),
     // which is exactly why an intentional stop has to do it here — unless the caller is
     // `ocx stop`, which does it itself once the proxy is proven down.
+    // Mark the stop before the first await after acceptance, so an automatic restart draining
+    // concurrently cannot reach its handoff while teardown is still pending.
+    noteExplicitShutdownRequested();
     const teardown = await performStopTeardown(url, { ownsReceipt: deferralMatchesReceipt });
     setTimeout(async () => {
       let shutdownSucceeded = false;

@@ -37,7 +37,6 @@ import {
   restartLaunchdJob,
   reusePreviousPlistPathVariable,
   runLaunchctl,
-  stableLauncherEntry,
 } from "../../src/service";
 import type {
   LaunchdLoadProbe,
@@ -143,7 +142,7 @@ function fixturePlist(): string {
 
 /** The plist `installLaunchd` will render in this process, for the byte-identical case. */
 function renderedPlist(): string {
-  return buildPlist(resolvedProxyEnv(), { launcher: stableLauncherEntry() });
+  return buildPlist(resolvedProxyEnv());
 }
 
 /** Collect `console.log` lines for the one case whose contract IS the printed line. */
@@ -1052,7 +1051,10 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
     expect(filter).toContain("isProtectedHomeUnderTest(dirname(path))");
     expect(filter).toContain("paths.filter(");
     expect(filter).toContain("refusing to write service install state");
-    expect(slice(state, "function writeServiceInstallState(", "function readServiceInstallState("))
+    // The fail-loud path resolution moved into the compare-and-swap writer when ownership
+    // became a preserved field. Same invariant, one layer down: nothing commits the record
+    // without resolving the write paths that refuse to write nowhere.
+    expect(slice(state, "export function swapServiceInstallState(", "/** The recorded owner of ONE"))
       .toContain("serviceStateWritePaths()");
   });
 
@@ -1089,17 +1091,18 @@ describe("the surfaces around the repair (#4236 defects 1f, 1h, 2)", () => {
   });
 
   /**
-   * Review nit 8. `stableLauncherEntry` is shared with `installSystemd`, so "the recorded
-   * launcher wins over a fresh PATH walk" changed Linux too. The behavioural half lives in
-   * `tests/service/service.test.ts`; this pins that the two installers really do call the
-   * same resolver, which is what makes that coverage transferable.
+   * Review nit 8, updated for the launchd pinning change. `stableLauncherEntry` remains
+   * the systemd resolver — "the recorded launcher wins over a fresh PATH walk" is a
+   * Linux-only contract now: launchd deliberately never resolves one, because a mutable
+   * PATH shim would inherit the service token and proxy environment. The behavioural
+   * halves live in `tests/service/service.test.ts`; this pins the split itself.
    */
-  test("the recorded-launcher preference is shared with the systemd installer (nit 8)", () => {
+  test("the recorded-launcher preference is systemd-only — launchd resolves none (nit 8)", () => {
     const systemdInstall = slice(systemd, "function installSystemd()", "function startSystemd(");
     expect(systemdInstall).toContain("stableLauncherEntry()");
     expect(systemdInstall).toContain("buildUnit(resolvedProxyEnv(), { launcher })");
     expect(slice(launchd, "export function installLaunchd(", " * Deps are named for the layer they replace"))
-      .toContain("stableLauncherEntry()");
+      .not.toContain("stableLauncherEntry");
   });
 });
 

@@ -26,7 +26,7 @@ description: リスナー、リモート アクセス、アドミッション �
 | `codexAutoStart?` | `boolean` | `true` | Codex を起動する前に、Codex シムで `ocx ensure` を実行させます。 False を指定すると、操作が行われないことが保証されます。 |
 | `codexShimAutoRestore?` | `boolean` | `true` |完了した外部 Codex アップデートによってインストールされたシムが置き換えられた後、インストールされているシムを復元します。環境オプトアウト: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | Codex App 履歴の互換性を元に戻すことができます。元のメタデータは `ocx stop` / `ocx restore` によってバックアップおよび復元されます。 |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` |オフ |認識された Codex ヘルパー/シャドウ呼び出しを、リクエストに設定された推論エフォートを維持したまま選択したモデルにリダイレクトします。デフォルトのソースプレフィックスは `gpt-5.6-luna` です。0.144.x 以前のクライアントでは `gpt-5.4-mini` が使われており、`sourceModels` で復元できます。 |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` |オフ |認識された Codex ヘルパー/シャドウ呼び出しを、リクエストに設定された推論エフォートを維持したまま選択したモデルにリダイレクトします。デフォルトのソースプレフィックスは `gpt-6-luna`, `gpt-5.6-luna` です。0.144.x 以前のクライアントでは `gpt-5.4-mini` が使われており、`sourceModels` で復元できます。 |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` |使用可能な場合はオン | Web 検索サイドカー オプション。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` |使用可能な場合はオン |画像説明サイドカー オプション。 |
 | `images?` | `OcxImagesConfig` | OpenAI の自動選択 | Codex `image_gen` のスタンドアロン イメージ リレー オプション。 |
@@ -114,15 +114,23 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 
 Codex は、タイトルやコミット メッセージなどのタスクに小さなヘルパー モデルを使用します。 `shadowCallIntercept` を有効にして、認識されたソース モデル プレフィックスを別の構成済みモデルにリダイレクトします。置換後も、リクエストに設定された推論エフォートは維持されます。クライアントが異なるヘルパー ID を使用する場合にのみ、`sourceModels` を設定します。
 
+モデルによるインターセプトです。裸のモデル ID が `sourceModels` に一致するリクエストは、通常の `request_kind: "turn"` も含めてリダイレクトできます。`x-openai-subagent: collab_spawn` または `x-codex-turn-metadata` の JSON ヘッダー内の `subagent_kind: "thread_spawn"` で生成された子としてマークされたリクエストは対象外となり、明示的に生成されたサブエージェントはモデルを維持します。
+
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
+
+### ターゲットが利用できないとき
+
+置き換え先はオペレーターが選んだ唯一の宛先なので、解決できなくなったターゲットは別の宛先に送らず、補助呼び出しを失敗させます。ターゲットのプロバイダーが無効化または削除された場合、あるいはそのコンボが存在しなくなった場合、傍受されたリクエストはアップストリームに何も送る前に `409` とエラーコード `intercept_target_unavailable` を返します。リクエストログにも同じコードが記録されます。リクエストはネイティブの補助モデルへ素通しされず、既定のプロバイダーにもフォールバックしません。どちらも、あなたが選んでいない宛先・認証情報・コストに変わってしまうためです。コンボまたはルーティングプロファイルのターゲットは、引き続き自身のメンバー間でフェイルオーバーします。`provider/model` のような修飾付きターゲットで、プロバイダー部分が設定済みのものを指していない場合も同様に扱われ、設定 API はその保存を拒否します。既定のプロバイダー経由で解決される修飾なしのモデル ID は引き続き有効です。
+
+ターゲットが解決されるプロバイダーを無効化（`disabled: true` を指定した `PATCH /api/providers?name=<provider>`）または削除しても操作は成功し、レスポンスに `dependentShadowIntercept: { model, enabled }` が加わり、ダッシュボードに警告が表示されます。プロバイダーを再度有効にするか別のターゲットを選ぶと、傍受が再開します。
 
 ## サイドカー
 
@@ -139,7 +147,7 @@ Codex は、タイトルやコミット メッセージなどのタスクに小�
 
 |フィールド |タイプ |デフォルト |意味 |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` |使用可能な場合はオン |マスタースイッチ。 |
+| `enabled?` | `boolean` |使用可能な場合はオン |マスタースイッチ。`false` のとき OpenCodex は `web_search` への介入をやめ、Codex 統合は `~/.codex/config.toml` に `web_search = "disabled"` を書き込みます。 |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | 明示設定が優先され、未設定なら常に `openai` です。`anthropic` と `xai` は明示設定時のみ実行され、`gemini` と `exa` は executor が提供されるまで予約値です。 |
 | `model?` | `string` |バックエンド依存 | OpenAI は `gpt-5.6-luna`、Anthropic は `claude-sonnet-5`、xAI は `grok-4.6`。従来の明示的な `gpt-5.4-mini` は開始時に移行されます。 |
 | `exaApiKey?` | `string` | なし | `exa` バックエンドのオペレーターキー。書き込み専用で、管理 API の読み取りでは保存値を返しません。 |

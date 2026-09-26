@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import type { Server } from "bun";
 import { loadConfig } from "../config";
 import { browserSecurityHeaders } from "../server/auth-cors";
@@ -12,15 +11,15 @@ import {
 } from "../server/management-auth";
 import type { OcxClientConnectionConfig, OcxConfig } from "../types";
 import { disconnectClient, syncConnectedClient } from "./connect";
-import { readClientConnectionState } from "./state";
+import { isLinkConnection, readClientConnectionState } from "./state";
 import { handleMachineApi, type HubReachability, type MachineApiDeps } from "./machine-api";
 import { MACHINE_GUI_ORIGIN_HEADER, requireMachineAuth } from "./machine-auth";
-import { relayHubManagementRequest } from "./hub-relay";
+import { HUB_RELAY_REQUEST_BODY_MAX_BYTES, relayHubManagementRequest } from "./hub-relay";
+import { relayLinkDataRequest } from "./link-relay";
+import { packageVersion } from "../lib/package-version";
+import { linkRouteAllowed } from "../link/routes";
 
-const VERSION = (() => {
-  try { return JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version as string; }
-  catch { return "0.0.0"; }
-})();
+const VERSION = packageVersion("0.0.0");
 const GUI_SPA_PATHS = new Set([
   "/dashboard", "/startup", "/providers", "/models", "/subagents",
   "/logs", "/usage", "/storage", "/codex-set", "/integrations",
@@ -42,8 +41,9 @@ function machinePolicyConfig(config: OcxConfig): OcxConfig {
   return { ...config, hostname: "127.0.0.1" };
 }
 
-export function machineRouteAllowed(url: URL, req: Request, relayEnabled: boolean): boolean {
+export function machineRouteAllowed(url: URL, req: Request, relayEnabled: boolean, linkMode = false): boolean {
   if (req.headers.get("upgrade")) return false;
+  if (linkMode && linkRouteAllowed(url, req)) return true;
   const path = url.pathname;
   if (req.method === "GET" && (path === "/healthz" || path === "/readyz" || path === "/" || path === "/opencodex-session")) return true;
   if ((req.method === "GET" || req.method === "HEAD") && (path === "/api/machine/status" || path === "/api/machine/clients" || path === "/api/machine/shim")) return true;
@@ -70,6 +70,8 @@ export function startMachineListener(
     if (state.kind !== "connected") throw new Error(`machine listener requires connected client state, got ${state.kind}`);
     return state.value;
   })();
+  const linkMode = isLinkConnection(connection);
+  if (linkMode && !connection.link) throw new Error("link machine listener requires link transport metadata");
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   let hubReachability: HubReachability = "unknown";
   const machineApiDeps: MachineApiDeps = {
@@ -81,14 +83,18 @@ export function startMachineListener(
     hubReachability: deps.machineApi?.hubReachability ?? (() => hubReachability),
     setHubReachability: deps.machineApi?.setHubReachability ?? (value => { hubReachability = value; }),
   };
-  const relayEnabled = connection.managementTransport === "relay";
+  const relayEnabled = !linkMode && connection.managementTransport === "relay";
 
   return Bun.serve({
     port: port ?? config.port ?? 10100,
     hostname: "127.0.0.1",
+    maxRequestBodySize: HUB_RELAY_REQUEST_BODY_MAX_BYTES,
     async fetch(req, server) {
       const url = new URL(req.url);
-      if (!machineRouteAllowed(url, req, relayEnabled)) return json404(req);
+      if (!machineRouteAllowed(url, req, relayEnabled, linkMode)) return json404(req);
+      if (linkMode && linkRouteAllowed(url, req)) {
+        return relayLinkDataRequest(req, { tunnelPort: connection.link!.tunnelPort }, { fetchImpl: deps.fetchImpl });
+      }
       if (url.pathname === "/healthz" && req.method === "GET") {
         return Response.json({ service: "opencodex", version: VERSION, role: "client", uptime: process.uptime(), pid: process.pid, port: server.port });
       }

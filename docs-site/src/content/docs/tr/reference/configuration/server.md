@@ -27,7 +27,7 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | `codexAutoStart?` | `boolean` | `true` | Codex dolgusunun Codex'i başlatmadan önce `ocx ensure` çalıştırmasına izin verin. False, ensure'ı bir işlem yapmayan (no-op) hale getirir. |
 | `codexShimAutoRestore?` | `boolean` | `true` | Tamamlanan harici bir Codex güncellemesi değiştirdikten sonra kurulu bir dolguyu geri yükleyin. Ortam vazgeçmesi: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`. |
 | `syncResumeHistory?` | `boolean` | `true` | Tersine çevrilebilir Codex App geçmişi uyumluluğu. Orijinal meta veriler yedeklenir ve `ocx stop` / `ocx restore` tarafından geri yüklenir. |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | kapalı | Tanınan Codex yardımcı/gölge çağrılarını, istek için yapılandırılan akıl yürütme çabasını koruyarak seçilen bir modele yeniden yönlendirin. Varsayılan kaynak öneki `gpt-5.6-luna`'dır; 0.144.x'e kadar olan eski istemciler `sourceModels`'ın geri yükleyebileceği `gpt-5.4-mini` kullanmıştır. |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | kapalı | Tanınan Codex yardımcı/gölge çağrılarını, istek için yapılandırılan akıl yürütme çabasını koruyarak seçilen bir modele yeniden yönlendirin. Varsayılan kaynak öneki `gpt-6-luna`, `gpt-5.6-luna`'dır; 0.144.x'e kadar olan eski istemciler `sourceModels`'ın geri yükleyebileceği `gpt-5.4-mini` kullanmıştır. |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | kullanılabilir olduğunda açık | Web arama sidecar seçenekleri. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | kullanılabilir olduğunda açık | Görsel açıklama sidecar seçenekleri. |
 | `images?` | `OcxImagesConfig` | otomatik OpenAI seçimi | Codex `image_gen` için bağımsız Görseller aktarma seçenekleri. |
@@ -197,7 +197,7 @@ ve Claude kontrol paneli sayfasını yönetir.
 Otomatik kimlik doğrulama saklanan Claude kimlik doğrulaması bulunduğunda
 subscription'ı, hiçbiri bulunmadığında proxy'yi ve algılama yetersiz olduğunda
 bir uyarı ile subscription'ı seçer. Bkz. [Claude Code kimlik doğrulama
-modu](/tr/guides/claude-code/#auth-mode).
+modu](/tr/guides/claude-code/#kimlik-doğrulama-modu-auth-mode).
 
 ## Gölge çağrılar
 
@@ -208,17 +208,25 @@ akıl yürütme çabasını korur.
 `sourceModels`'ı yalnızca bir istemci farklı yardımcı kimlikleri kullandığında
 ayarlayın. Yakalama model tabanlıdır: çıplak model kimliği `sourceModels` ile
 eşleşen her istek, normal `request_kind: "turn"` istekleri dahil, yeniden
-yönlendirilebilir. `x-codex-turn-metadata` eşleşen bir isteği muaf tutmaz.
+yönlendirilebilir. `x-openai-subagent: collab_spawn` veya `x-codex-turn-metadata` JSON üst bilgisindeki
+`subagent_kind: "thread_spawn"` ile oluşturulmuş çocuk olarak işaretlenen istekler muaftır; açıkça oluşturulan
+bir alt aracının modeli korunur.
 
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
+
+### Hedef kullanılamadığında
+
+Yerine geçen model, operatörün seçtiği tek hedeftir; bu yüzden artık çözümlenemeyen bir hedef, çağrıyı başka yere göndermek yerine yardımcı çağrıyı başarısız kılar. Hedefin sağlayıcısı devre dışı bırakılmış ya da silinmişse veya kombosu artık yoksa, yakalanan istek üst kaynağa bir şey gönderilmeden önce `409` ve `intercept_target_unavailable` hata koduyla döner. İstek günlüğü de aynı kodu kaydeder. İstek yerel yardımcı modele aktarılmaz ve varsayılan sağlayıcıya geri düşmez; ikisi de sizin seçiminiz olmadan hedefi, kimlik bilgilerini ve maliyeti değiştirirdi. Bir kombo veya yönlendirme profili hedefi kendi üyeleri arasında yük devretmeye devam eder. Sağlayıcı kısmı yapılandırılmış hiçbir şeyi göstermeyen `provider/model` gibi nitelikli bir hedef de aynı şekilde ele alınır ve ayarlar API'si bunu kaydetmeyi reddeder. Varsayılan sağlayıcı üzerinden çözümlenen yalın bir model kimliği geçerli kalır.
+
+Hedefin çözümlendiği sağlayıcıyı devre dışı bırakmak (`disabled: true` ile `PATCH /api/providers?name=<provider>`) veya silmek yine başarılı olur; yanıta `dependentShadowIntercept: { model, enabled }` eklenir ve pano bir uyarı gösterir. Sağlayıcıyı yeniden etkinleştirmek veya başka bir hedef seçmek yakalamayı geri getirir.
 
 ## Sidecar'lar
 
@@ -238,7 +246,7 @@ Images API yollarını ve yanıt şeklini uygulamalıdır.
 
 | Alan | Tip | Varsayılan | Anlamı |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | kullanılabilir olduğunda açık | Ana anahtar. |
+| `enabled?` | `boolean` | kullanılabilir olduğunda açık | Ana anahtar. `false` olduğunda OpenCodex `web_search` yakalamayı bırakır ve Codex entegrasyonu `~/.codex/config.toml` dosyasına `web_search = "disabled"` yazar. |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | Açık değer kazanır; ayarlanmadığında her zaman `openai` seçilir. `anthropic` ve `xai` yalnızca açıkça yapılandırıldığında çalışır; `gemini` ve `exa` executor'ları sunulana kadar ayrılmıştır. |
 | `model?` | `string` | arka uca bağlı | OpenAI için `gpt-5.6-luna`, Anthropic için `claude-sonnet-5` veya xAI için `grok-4.6`. Eski açık `gpt-5.4-mini` başlangıçta geçirilir. |
 | `exaApiKey?` | `string` | yok | `exa` arka ucu için operatör anahtarı. Yalnızca yazılır; yönetim okumaları saklanan değeri asla döndürmez. |

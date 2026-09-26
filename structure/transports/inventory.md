@@ -12,10 +12,11 @@ The existing Responses transport is divided by responsibility in the
 The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged. Cursor's localized native-shell names follow the [routing-commentary guard contract](../providers/cursor.md#cursor-native-exec).
 
-The Chat adapter's [OpenCode Go instruction ordering](../providers/chat-compat.md#opencode-go-chronological-instructions)
-changes translated message placement only; endpoint selection and transport stay with their existing owners.
+The Chat adapter's [chronological instruction ordering](../providers/chat-compat.md#chronological-in-conversation-instructions)
+changes translated message placement and the developer wire role only; endpoint selection and transport
+stay with their existing owners.
 
-Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](responses.md#passthrough-sse-stream-shapes-314).
+Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314).
 
 [Anthropic seed image metadata](../runtime.md#capability-aware-image-admission) supplies missing capability evidence; transport selection and image wire handling remain unchanged.
 
@@ -31,13 +32,13 @@ surface is listed here so a maintainer can find the owner without grepping:
 | Meta Muse Responses tool names | `src/responses/muse-tool-name-alias.ts`, `src/adapters/openai-responses.ts` | `api.meta.ai` only: function names over 64 characters or containing characters outside `[a-zA-Z0-9_-]` become collision-safe wire aliases and are restored before the client sees them. |
 | Google / Vertex / Antigravity | `src/adapters/google.ts`, `src/adapters/google-http.ts`, `src/adapters/google-wire-compiler.ts`, `src/adapters/google-tool-schema.ts`, `src/adapters/google-truncation.ts`, `src/adapters/google-errors.ts`, `src/adapters/google-antigravity-wire.ts`, `src/adapters/google-antigravity-replay.ts`, `src/adapters/google-wire-shape.ts` | Vertex and Antigravity install a Google-family `fetchResponse` and so own their retry policy, while AI Studio Gemini leaves it undefined and uses the default server fetch path. The Google-family wrapper reuses shared abort/deadline helpers, upstream error normalization, and policy-aware wire-body repair: strict initial schema loss sends nothing, while strict repair withholding returns the original 400 without a changed send. The final compiler produces the [content-free tool-schema loss contract](../providers/google.md#google-tool-schema-loss-reporting). `google-wire-shape.ts` remains diagnostic-only. |
 | Mimo Free | `src/adapters/mimo-free.ts` | Client identity and JWT handling are transport-local; the per-install client id lives in the opencodex state root. |
-| Anthropic image ingress | `src/adapters/anthropic-image-guard.ts`, `src/adapters/anthropic-image-normalize.ts`, `src/adapters/anthropic-image-codec.ts` | Oversized or unsupported images are normalized or rejected before reaching upstream. An image's ladder position is pinned to its own identity (content hash + media type) rather than recomputed from recency each request (#4532); appending a newer image therefore cannot demote and re-encode older images and bust Anthropic's prompt prefix cache. Unseen images still take the age-tier pyramid's first position, the total byte budget still binds, and a 413 `tierBias` retry still applies. Recorded positions only move down the ladder, so the store is monotonic. |
+| Anthropic image ingress | `src/adapters/anthropic-image-guard.ts`, `src/adapters/anthropic-image-normalize.ts`, `src/adapters/anthropic-image-codec.ts` | Oversized or unsupported images are normalized or rejected before reaching upstream. An image's ladder position is pinned to its own fixed-size digest of content and canonical media type rather than recomputed from recency each request (#4532); appending a newer image therefore cannot demote and re-encode older images and bust Anthropic's prompt prefix cache. Position bytes count toward the shared retained-memory budget but are pinned — the shared evictor clears normalization cache slots first and never drops a position mid-request; positions shrink only through the store's own entry-count cap at request end. Unseen images still take the age-tier pyramid's first position, the total byte budget still binds, and a 413 `tierBias` retry still applies. Recorded positions only move down the ladder, so the store is monotonic. |
 | Adapter execution support | `src/adapters/run-turn-queue.ts`, `src/adapters/tool-catalog-nudge.ts`, `src/adapters/identity.ts`, `src/adapters/image.ts`, `src/adapters/upstream-http-error.ts` | Shared machinery: turn ordering, tool-catalog nudging, client fingerprinting, image conversion, upstream error normalization. |
 | Cursor (beyond the sections above) | `src/adapters/cursor/live-transport.ts`, `src/adapters/cursor/http1-bidi.ts`, `src/adapters/cursor/live-models.ts`, `src/adapters/cursor/transport-retry.ts`, `src/adapters/cursor/mcp-manager.ts`, `src/adapters/cursor/thread-continuity.ts`, `src/adapters/cursor/checkpoint-store.ts` | Thread continuity is the point: a retry must not start a new Cursor thread, and a validated checkpoint must not rebuild the full root history. HTTP/2 remains the default; an explicit `http1.1`/`h1` pin maps the bidi run onto Cursor's `RunSSE` receive stream plus sequenced `BidiAppend` sends, and applies to live discovery too. |
 | Claude Messages | `src/server/claude-messages.ts` | Routed translation, a native Anthropic passthrough branch, and `count_tokens`. |
-| Chat Completions inbound | `src/server/chat-completions.ts`, `src/server/chat-native.ts`, `src/chat/`, `src/adapters/openai-chat.ts` | Inbound translation onto the same routing pipeline. The content mapper preserves image URLs and supported detail, including screenshot-bearing tool results; target adapters own image placement on their wire. Image-free tool results stay strings. The native handler owns pin/cap normalization; the adapter wire builder removes effort only for explicit empty declarations or no-reasoning models, preserving unknown raw declarations. On the response side, the upstream `service_tier` echo relays on every delivery shape (`src/chat/outbound.ts` projections, `src/server/chat-native-sse.ts` chunks); an upstream without the field gets no injected key. |
-| Hosted search relay | `src/server/search.ts` | Verbatim ChatGPT relay, or an explicitly configured web-search sidecar backend when no forward provider exists; distinct from the web-search sidecar loop below. |
-| Image/video generation loop | `src/images/loop.ts`, `src/images/plan.ts`, `src/images/fulfill.ts`, `src/images/xai-client.ts`, `src/images/xai-video-client.ts`, `src/images/artifacts.ts` | A provider-returned image URL is downloaded into a local artifact once, then served locally; warnings stay URL-free because provider CDN URLs may embed credentials. |
+| Chat Completions inbound | `src/server/chat-completions.ts`, `src/server/chat-native.ts`, `src/chat/`, `src/adapters/openai-chat.ts` | Inbound translation onto the same routing pipeline. The content mapper preserves image URLs and supported detail, including screenshot-bearing tool results; target adapters own image placement on their wire. Image-free tool results stay strings. The native handler owns pin/cap normalization; both adapter builders share explicit gateway-object and tool-bearing effort-omission policy, while the native builder preserves unknown or undeclared raw behavior and removes effort for explicit empty declarations or no-reasoning models. On the response side, the upstream `service_tier` echo relays on every delivery shape (`src/chat/outbound.ts` projections, `src/server/chat-native-sse.ts` chunks); an upstream without the field gets no injected key. |
+| Hosted search relay | `src/server/search.ts`, `src/web-search/devin-executor.ts` | A resolved Devin route uses Cognition's bounded non-inference `GetWebSearchResults` RPC with the active account's credential and allowlisted tenant; other routes use the verbatim ChatGPT relay, or an explicitly configured web-search sidecar backend when no forward provider exists. Distinct from the web-search sidecar loop below. |
+| Image/video generation loop | `src/images/loop.ts`, `src/images/plan.ts`, `src/images/fulfill.ts`, `src/images/xai-client.ts`, `src/images/xai-video-client.ts`, `src/images/artifacts.ts` | A provider-returned image URL is downloaded into a local artifact once, then served locally; warnings stay URL-free because provider CDN URLs may embed credentials. Artifact downloads go through the pinned-IP transport with a 10 s connect deadline (`DOWNLOAD_CONNECT_TIMEOUT_MS`) that bounds TCP/TLS setup on its own, in addition to the 60 s idle timer, and `pinnedHttpsGet` accepts a per-call `connectTimeoutMs`. |
 | GitHub Copilot | `src/providers/xai-transport.ts` (`resolveProviderTransport`), `src/providers/github-copilot-transport.ts` | `resolveProviderTransport` selects the Copilot transport when the routed provider name is `github-copilot`; the Copilot module then resolves its headers and base URL, and the registry seeds the provider row and model fallback. |
 | API-key pools | `src/providers/api-key-selection.ts`, `src/providers/key-failover.ts` | A configured `apiKeyPoolStrategy` plus a cooling committed key rotates before the first send (`selectProactiveApiKeyTransport`); a 429 still rotates after the send and records a cooldown. `provider.apiKey` keeps mirroring the active entry so routing stays single-key. The pick is inert without a strategy or while the committed key is healthy. |
 | OAuth account failover | `src/oauth/generic-account-failover.ts`, `src/oauth/anthropic-routing.ts` | Reactive pre-output 429 recovery is presence-driven with 2+ eligible accounts. Pool and `oauthAccountFailover` flags govern proactive routing, not the reactive retry: a disabled Anthropic pool recovers through quota ordering rather than its dormant strategy, a per-provider `enabled` beats the global default in either direction, and a non-positive fill-first threshold disables proactive usage-based rotation. |
@@ -97,6 +98,24 @@ promises are observed, and a cancellation that never settles cannot extend the r
 After an attached read, cleanup removes the abort listener, cancels any inactivity timer, and
 attempts to release the reader lock. `tests/server/bounded-body.test.ts` covers these paths.
 
+Both bounded readers give abort and deadline callbacks one current-read settlement slot. The slot
+is cleared after every read; completed read results and transport chunks are not retained by
+reactions on shared pending promises. An interruption is latched across the gap between reads,
+and a pending read's late rejection remains observed after cancellation. The geometric payload
+buffer remains bounded by the byte cap independently of this constant-size wait bookkeeping.
+The focused tests check live-chunk collection with `WeakRef`/`Bun.gc` while a read is stalled,
+and bound per-promise reaction attachment independently of garbage-collector timing.
+
+> Decision record: [ADR-0101](../decisions/ADR-0101-bounded-response-ownership.md)
+
+`readBoundedResponseBody` accepts `reportUtf8Validity`: the body decodes with replacement
+characters instead of rejecting, and a result that reached EOF carries `utf8Valid`. Combined with
+`fatalUtf8`, a returned body is valid by construction and reports `true`. Timeout and oversized
+results omit the field. `consumeComboFailure` uses it for 5xx bodies: only a valid body supplies
+quota evidence, usage, or classification, and a malformed body keeps the status-only fallback
+unless its lenient decode identifies a cyber-policy refusal, which must still stop the combo
+(`tests/providers/cyber-policy-error-fidelity.test.ts`).
+
 `src/oauth/orcarouter.ts` applies this reader to a successful `POST /api/v1/auth/keys` response
 with a 65,536-byte (64 KiB) ceiling. One 30-second signal, combined with caller cancellation,
 covers both fetching the response headers and consuming the body; no separate body or inactivity
@@ -117,6 +136,39 @@ transport budgets, so the 64 KiB login ceiling never caps Responses inference pa
 rejected body returns no credentials, an oversized, malformed, or aborted key response ends the
 login before credential persistence or dashboard convergence, leaving only the fixed size-limit or
 invalid-JSON message described above.
+
+`src/adapters/devin/cloud-direct/chat.ts` cancels a non-2xx `GetChatMessage` response body
+before throwing its status-only `CloudChatError`. The same error object is the cancellation
+reason. Cancellation is attempted once without draining, cloning, or waiting; a synchronous
+throw, rejection, or never-settling cancellation cannot replace or delay the status error.
+A bodyless error follows the same status path. `tests/providers/devin-hardening.test.ts`
+covers these cases with a synthetic executor, without provider credentials or network traffic.
+
+## Per-provider egress coverage
+
+`src/lib/provider-egress.ts` resolves a provider route for one destination. The route is carried only
+by transports that can preserve that request-local decision:
+
+| Request path | Per-provider route | Current contract |
+| --- | --- | --- |
+| Main routed inference through `providerFetch` in `src/server/responses/fetch-helpers.ts` | Honoured | Applied at the physical send in `sendWithConnectionPolicy`, so a request rebuilt against a different destination or a reselected provider transport resolves its route against the destination actually used. The built-in executor passes direct, HTTP(S)-proxy, and SOCKS5(H)-proxy choices through `configuredOutboundFetch` in `src/lib/proxy-env.ts`; an inherited route leaves the global decision unchanged. Native Chat in `src/server/chat-native.ts` and the Responses transport in `src/server/responses/request-transport.ts` bind their own sends. |
+| Every caller of `providerOutboundGet` or `providerOutboundPost` in `src/lib/provider-outbound.ts` | Honoured | This includes provider discovery and model-catalog gathering in `src/codex/catalog/provider-models.ts`, management provider tests in `src/server/management/provider-routes.ts`, and the Ollama show probe in `src/providers/ollama-show.ts`. |
+| API-key quota probes in `src/providers/quota/vendor-probes-key.ts` | Honoured | Each probe receives its provider config and sends through `configuredOutboundFetch` with the resolved route, so a quota reading and the inference it describes leave by the same exit. |
+| OAuth token exchange and refresh under `src/oauth/` | Not honoured | These reach fixed vendor endpoints from modules that hold no provider config, so no provider route is in scope at the call site. A provider pinned to its own proxy or to direct still refreshes credentials by the process-wide route. |
+| OAuth-backed quota probes in `src/providers/quota/vendor-probes-oauth.ts` | Not honoured | `fetchXaiQuota`, `fetchAnthropicQuota`, `fetchCursorQuota` and their neighbours receive a provider name and a token rather than a provider config. |
+| API-key validation probes in `src/oauth/key-providers.ts` | Not honoured | `validateApiKey` receives a `KeyLoginProvider` derived preset, which carries no egress fields, and its caller builds the real provider record afterwards. |
+| Responses WebSocket upstream in `src/server/responses/ws-upstream.ts` | Not directly | The WebSocket dial selects its proxy from the process environment. An explicit provider route therefore serves that provider's turns over HTTP/SSE instead and emits one warning per provider per process. |
+| Caller-supplied `provider.fetch` executor | Not honoured | The caller owns that executor's transport. An explicit provider route is refused instead of being ignored. |
+| Cursor's default HTTP/2 transport in `src/adapters/cursor/live-transport.ts` | Not honoured | The native HTTP/2 dial does not consume the provider route. |
+| Coding-agent subprocess providers in `src/adapters/coding-agent/turn.ts` | Not honoured | Their scoped child environment omits proxy variables, so a provider route is not projected into the subprocess. |
+| Compatibility Lab pinned sender in `src/lib/lab-live-pinned-sender.ts` | Not honoured | The sender uses the approved pinned address and does not resolve a provider route. |
+
+The following authenticated data-plane endpoints do not resolve a provider route because they do
+not route a model through the router: `/v1/images/generations`, `/v1/images/edits`,
+`/v1/audio/transcriptions` and `/v1/audio/transcriptions/stream`, `/v1/live`,
+`/v1/realtime/calls`, the standalone realtime WebSocket routes, and the non-account-qualified
+branch of `/v1/alpha/search`. Their dispatch remains with the endpoint owners in
+`src/server/index/serve-options.ts`.
 
 ## Provider diagnostic outbound safety
 
@@ -163,9 +215,9 @@ to `https://api.inference.crusoecloud.com/v1/models`, rejects redirects, and app
 256 KiB response and 256-row ceilings before catalog admission. A same-named custom destination
 does not inherit this policy.
 
-Usage consumers preserve positive incomplete-history metadata as specified in [usage accounting](../gui-and-management-api.md#usage-accounting); readable totals are not represented as a complete ledger. Upstream API-key usage follows the [physical-attempt account attribution contract](../gui-and-management-api.md#upstream-key-account-attribution), independently of subscription quota observations.
+Usage consumers preserve positive incomplete-history metadata as specified in [usage accounting](../dashboard-and-usage.md#usage-accounting); readable totals are not represented as a complete ledger. Upstream API-key usage follows the [physical-attempt account attribution contract](../dashboard-and-usage.md#upstream-key-account-attribution), independently of subscription quota observations.
 
-Connected CLI usage follows the [client-scoped hub usage contract](../gui-and-management-api.md#usage-accounting); local management and account data remain separate.
+Connected CLI usage follows the [client-scoped hub usage contract](../dashboard-and-usage.md#usage-accounting); local management and account data remain separate.
 
 The shared atomic replacement publisher also identifies explicit Remote Workspace file writes as `remote-workspace`; its isolated owner and support limits are documented in [Remote Workspace](../remote-workspace.md).
 
@@ -179,9 +231,9 @@ claims stored main, after terminal vision, routed vision and search exclusions.
 Quota publication distinguishes display reports from explicitly supplied inference projections; a credential-bound cache read validates the current destination and key. See [scoped provider quota](../runtime.md#scoped-provider-quota-for-combo-selection).
 
 The management quota DTO keeps Combo editing aligned with scoped inference evidence;
-see [Combo editor routing quota](../gui-and-management-api.md#combo-editor-routing-quota).
+see [Combo editor routing quota](../dashboard-and-usage.md#combo-editor-routing-quota).
 
-Codex pool settings and their consumers follow the [reset-first ordering contract](../providers/openai-tiers.md#reset-first-account-ordering), including independent-quota fallback and preserved affinity.
+Codex pool settings and their consumers follow the [reset-first ordering contract](../providers/openai-accounts.md#reset-first-account-ordering), including independent-quota fallback and preserved affinity.
 
 Canonical Spark Lite metadata follows the final serialized model and surviving nonempty Lite tool catalog; see [Responses transport](../transports/responses.md).
 
@@ -195,7 +247,7 @@ privately to final dispatch; preliminary route selection does not inject Go-only
 Devin CLI credential path composition in `src/oauth/devin/cli-import.ts` follows the selected platform: Windows uses Win32 APPDATA paths, other platforms use POSIX XDG-data paths. The explicit absolute override remains verbatim; credential parsing and login behavior are unchanged.
 
 Native Chat applies qualifying effort ceilings independently of model pins; pin selection precedes the cap and only pins or cap rewrites enter wire mapping. The [catalog effort contract](../catalog.md#ultra-reasoning-level) records the V1/compaction exemptions and caller-preservation boundary.
-Pool quota producers and account commands follow the [bounded raw-observation contract](../providers/openai-tiers.md#bounded-pool-quota-observations), separate from the latest display snapshot and capacity estimates.
+Pool quota producers and account commands follow the [bounded raw-observation contract](../providers/openai-accounts.md#bounded-pool-quota-observations), separate from the latest display snapshot and capacity estimates.
 
 ## Account quota failure diagnostics
 
@@ -272,7 +324,9 @@ Response constructor; this tunnel assembles the body from a socket, so a respons
 its upstream headers hands the coded bytes to whatever parses them. The request therefore asks
 for `identity` unless the caller chose an `accept-encoding` itself, a `gzip` or `deflate`
 response is decoded and stops advertising the coding and the coded length, and any other coding
-is refused by name rather than surfaced as bytes no caller can read.
+is refused by name rather than surfaced as bytes no caller can read. Buffered decoded SOCKS5
+bodies stop at 32 MiB; event streams may continue beyond that while decoded bytes stay within
+the greater of 32 MiB or 128 times the coded bytes consumed, so highly compressed bombs stop.
 
 ## Raw transport null-body statuses
 
@@ -306,4 +360,4 @@ is left to the HTTP agent, which may pool or destroy it.
 
 Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).
 
-The [compaction routing override](responses.md#compaction-routing-overrides) selects a target before the existing native compact or routed Responses transport is resolved.
+The [compaction routing override](responses-failover.md#compaction-routing-overrides) selects a target before the existing native compact or routed Responses transport is resolved.
