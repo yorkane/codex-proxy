@@ -597,7 +597,7 @@ async function shadowApiResponse(config: OcxConfig, body: unknown): Promise<Resp
 }
 
 describe("shadow-call settings API reports the intercepted source models", () => {
-  test("GET reports the helper-model defaults, GPT-6 Luna first", async () => {
+  test("GET reports the helper-model defaults, Q38-Flash-Next first", async () => {
     await withTempHome(async () => {
       const body = await shadowApi({ port: 0, defaultProvider: "xai", providers: {} } as OcxConfig, "GET");
       expect(body.sourceModels).toEqual([

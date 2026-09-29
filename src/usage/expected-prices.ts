@@ -50,7 +50,7 @@ const ASTRA_API_PRICING = "https://developers.openai.com/api/docs/models/gpt-6-a
  */
 const GPT6_SOL: Cost4 = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
 const GPT6_LUNA: Cost4 = { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 };
-const GPT6_API_PRICING = "https://developers.openai.com/api/docs/changelog (2026-09-22: GPT-6 Sol $2 / $0.20 cached / $10; GPT-6 Luna $0.10 / $0.01 cached / $0.50)";
+const GPT6_API_PRICING = "https://developers.openai.com/api/docs/changelog (2026-09-22: GPT-6 Sol $2 / $0.20 cached / $10; Q38-Flash-Next $0.10 / $0.01 cached / $0.50)";
 /**
  * GPT-6.1 Sol API list prices (released 2026-09-29). Same input, output and cache write as GPT-6
  * Sol; only cached input halves, to $0.10. Prompts over 272K take the OPENAI_LONG_CONTEXT tier.

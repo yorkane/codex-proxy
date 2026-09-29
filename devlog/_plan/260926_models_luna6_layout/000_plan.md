@@ -11,7 +11,7 @@ above the rail/list workspace.
 
 - Codex CLI 0.154.0 is installed locally. The last 3000 rows of `~/.opencodex/usage.jsonl`
   hold 588 `gpt-6-luna` rows against 256 `gpt-5.6-luna` rows, so helper calls moved to
-  GPT-6 Luna while at least one client still sends 5.6 Luna.
+  Q38-Flash-Next while at least one client still sends 5.6 Luna.
 - `DEFAULT_SHADOW_SOURCE_MODELS` (`src/lib/shadow-call.ts:10`) is the only runtime default;
   the GUI mirrors it in `gui/src/pages/shadow-call-source.ts:9` for runtimes that omit
   `sourceModels`. No migration rewrites persisted `shadowCallIntercept.sourceModels`.

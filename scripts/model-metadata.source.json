@@ -2812,7 +2812,7 @@
 		},
 		"openai.gpt-6-luna": {
 			"id": "openai.gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "bedrock-converse-stream",
 			"provider": "amazon-bedrock",
 			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -5822,7 +5822,7 @@
 		},
 		"openai/gpt-6-luna": {
 			"id": "openai/gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "anthropic-messages",
 			"provider": "cloudflare-ai-gateway",
 			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
@@ -11403,7 +11403,7 @@
 		},
 		"gpt-6-luna": {
 			"id": "gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "openai-responses",
 			"provider": "github-copilot",
 			"baseUrl": "https://api.githubcopilot.com",
@@ -20916,7 +20916,7 @@
 		},
 		"openai/gpt-6-luna": {
 			"id": "openai/gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -60161,7 +60161,7 @@
 		},
 		"gpt-6-luna": {
 			"id": "gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"cost": {
 				"input": 0.1,
 				"output": 0.5,
@@ -60993,7 +60993,7 @@
 		},
 		"gpt-6-luna": {
 			"id": "gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"cost": {
 				"input": 0.1,
 				"output": 0.5,
@@ -63332,7 +63332,7 @@
 		},
 		"gpt-6-luna": {
 			"id": "gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "openai-responses",
 			"provider": "opencode-zen",
 			"baseUrl": "https://opencode.ai/zen/v1",
@@ -69476,7 +69476,7 @@
 		},
 		"openai/gpt-6-luna": {
 			"id": "openai/gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "openai-completions",
 			"provider": "openrouter",
 			"baseUrl": "https://openrouter.ai/api/v1",
@@ -80964,7 +80964,7 @@
 		},
 		"openai/gpt-6-luna": {
 			"id": "openai/gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "anthropic-messages",
 			"provider": "vercel-ai-gateway",
 			"baseUrl": "https://ai-gateway.vercel.sh",
@@ -86669,7 +86669,7 @@
 		},
 		"openai/gpt-6-luna": {
 			"id": "openai/gpt-6-luna",
-			"name": "GPT-6 Luna",
+			"name": "Q38-Flash-Next",
 			"api": "openai-completions",
 			"provider": "zenmux",
 			"baseUrl": "https://zenmux.ai/api/v1",
