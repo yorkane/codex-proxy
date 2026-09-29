@@ -12,11 +12,11 @@ runs helper features around provider requests.
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Proxy listen port. |
 | `hostname?` | `string` | `"127.0.0.1"` | Bind address. A non-loopback bind requires a data-admission token, resolved from `OPENCODEX_API_AUTH_TOKEN`, then `OCX_API_TOKEN_FILE`, then the installed owner-only `service-api-token` — nothing has to be exported by hand. See [Remote access](#remote-access). |
-| `proxy?` | `string` | — | Outbound HTTP(S) or SOCKS5 proxy URL (`socks5://host:port`), `${ENV_VAR}`, or `"auto"`. HTTP URLs apply to `HTTP_PROXY` / `HTTPS_PROXY` when those are unset. SOCKS5 URLs use OpenCodex's real SOCKS5 transport and are also exposed through `ALL_PROXY` (`ocx start --socks5`); inherited `HTTP(S)_PROXY` is cleared in this process. Loopback stays in `NO_PROXY`. `"auto"` reads the Windows system proxy (WinINET `ProxyEnable`/`ProxyServer`) once at process start, preserves distinct `http=` and `https=` entries, and logs the hosts it chose. A bare `ProxyServer` value applies to both schemes. On other platforms, or when the system proxy is off, SOCKS-only, or unreadable, it uses direct egress and says so. PAC/WPAD and live proxy changes are not followed; restart the service after changing the system proxy. |
+| `proxy?` | `string` | — | Outbound HTTP(S) or SOCKS5 proxy URL (`socks5://host:port`), `${ENV_VAR}`, or `"auto"`. HTTP URLs apply to `HTTP_PROXY` / `HTTPS_PROXY` when those are unset. SOCKS5 URLs use OpenCodex's real SOCKS5 transport and are also exposed through `ALL_PROXY` (`ocx start --socks5`); inherited `HTTP(S)_PROXY` is cleared in this process. Loopback stays in `NO_PROXY`. `"auto"` reads Windows WinINET or macOS static HTTP/HTTPS settings once at startup. Inherited HTTP(S) proxy variables skip discovery; on macOS, inherited `ALL_PROXY`/`all_proxy` also skips it. Windows keeps separate `http=` and `https=` entries; a bare `ProxyServer` applies to both. macOS translates IP literals, `*`, and a valid `*.<domain>` glob to Bun's `.<domain>` bypass. That glob also bypasses the bare apex `<domain>`. The exact link-local ranges `169.254/16`, `169.254.0.0/16`, and `fe80::/10` are omitted with a diagnostic: link-local IP literals use the proxy. Other CIDRs, globs, and simple-host exceptions refuse discovery without changing the proxy environment. Disabled, malformed, PAC/WPAD, SOCKS-only, and live changes are not followed. Restart after changing system settings. |
 | `noProxy?` | `string \| string[]` | — | Hosts that bypass `proxy`, merged with inherited `NO_PROXY` and loopback entries. A string may use comma-separated `NO_PROXY` syntax or `${ENV_VAR}`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Opt in to one identical Responses retry when a turn has no text or tool call, including a stream that ends before a terminal event. The retry may be billable. `OCX_EMPTY_COMPLETION_RETRY=0` disables it without changing config; combo and routed-compaction turns remain excluded. |
 | `dropCodexSafetyBuffering?` | `boolean` | `false` | Remove optional client-facing hints from canonical Codex Responses passthrough: the two `x-codex-safety-buffering-enabled` / `x-codex-safety-buffering-faster-model` response headers, `response.metadata` events whose metadata type is `safety_buffering`, and top-level `safety_buffering` fields. Other headers, response data, policy refusals and failures are preserved. This does not disable provider safety enforcement or upstream buffering. Native `codex.response.metadata.headers` WebSocket metadata and `/responses/compact` are outside this filter. |
-| `stallTimeoutSec?` | `number` | `300` | Seconds without meaningful upstream progress (Responses and native Chat). Minimum 1. |
+| `stallTimeoutSec?` | `number` | `300` (public) / disabled (local) | Seconds without meaningful upstream progress (Responses and native Chat) before the stream is cut. Unset, a **local** upstream (loopback, private, or a `.local`/`.lan` name) defaults to disabled and a public upstream to 300 s; a positive value applies to both (minimum 1 s); `0` disables the silence watchdog everywhere. Disabled leaves a silent-but-healthy local model connected (keep-alives still flow). Canonical ChatGPT Responses folded from SSE into non-streaming JSON retain a separate 15-minute whole-turn ceiling even when the silence watchdog is disabled. Pending `/v1/responses/compact` body reads share this budget but default to 300 s even for a local upstream — the route buffers the complete body while holding an active-turn lease — and an explicit value, including `0`, still wins. |
 | `oauthOpenBrowser?` | `boolean` | `true` | Whether a login may open a browser on the machine running the proxy. Absent and `true` both open, so an existing install is unchanged; only an explicit `false` declines. Decline when you need the authorization link in a different browser profile, or when the dashboard is not on the proxy's machine — the login still starts and the URL is still returned and displayed. `POST /api/oauth/login` and `POST /api/codex-auth/login` accept a per-request `openBrowser` boolean that overrides this, and the dashboard exposes the same choice beside the login button. Device-code flows never open a browser either way. |
 | `connectTimeoutMs?` | `number` | `200000` | Per-attempt DNS/TCP/TLS/final-header deadline; it ends before body generation. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
@@ -41,6 +41,7 @@ runs helper features around provider requests.
 | `resetCreditAutoRedeem?` | `{ enabled?: boolean; leadTimeMinutes?: number }` | off | Opt-in: redeem the main Codex account's soonest-expiring reset credit `leadTimeMinutes` (1–60, default 10) before it expires. Every attempt re-reads the upstream credit list first and skips when the credit is gone (for example, redeemed by hand); the `redeem_request_id` is journaled in `$OPENCODEX_HOME/reset-credit-auto-redeem.json` before the call so a crash replays the same idempotent request instead of spending a second credit. Servers sharing this configuration directory coordinate reservations and settlements so one process does not replace another's request record. Logs carry a hashed account key only. |
 | `syncResumeHistory?` | `boolean` | `true` | Reversible Codex App history compatibility. Original metadata is backed up and restored by `ocx stop` / `ocx restore`. |
 | `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Redirect recognized Codex helper/shadow calls to a chosen model while preserving the request's configured reasoning effort. The default source prefixes are `gpt-6-luna` and `gpt-5.6-luna`; older clients through 0.144.x used `gpt-5.4-mini`, which `sourceModels` can restore. |
+| `memoryModels?` | `{ extract?: { model: string; reasoningEffort?: string }; consolidation?: { model: string; reasoningEffort?: string } }` | off | Route Codex's two memory phases to a chosen model, with an optional reasoning effort per phase. See [Memory routing](#memory-routing). |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on when usable | Web-search sidecar options. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on when usable | Image-description sidecar options. |
 | `images?` | `OcxImagesConfig` | automatic OpenAI selection | Standalone Images relay options for Codex `image_gen`. |
@@ -90,6 +91,11 @@ refusal returns as soon as that grant is spent, the leg has no send left, or a r
 for any other reason. A request that already emitted output or a tool call keeps the refusal
 regardless. A caller that cancels mid-replacement gets the cancellation, not the refusal.
 
+For WebSocket recovery, “before the first Responses event” is stricter than “before the
+first text”: even `response.created`, a tool event or a usage-bearing response closes the
+replacement window. Ping/pong and quota metadata alone do not. A later socket close cannot
+turn an already settled cancellation or connect/silence timeout into an HTTP retry.
+
 `noProxy` accepts either a comma-separated string or an array. Both forms add entries without
 replacing an inherited `NO_PROXY`:
 
@@ -116,7 +122,7 @@ history; review the full-scope warning in the lifecycle reference before running
 
 ### Native Chat timeouts and completion
 
-Native Chat also uses `stallTimeoutSec` while waiting for upstream output. Nonempty text, reasoning, refusal, tool updates, and finish frames renew the allowance; keepalive comments, role-only frames, and usage alone do not. Waiting for a slow client to read pauses the allowance. A stall produces `upstream_stall_timeout`: an error frame for streaming clients, or HTTP 502 for non-streaming clients. Cancellation before a terminal result returns a cancellation error instead of a successful partial answer. Buffered Chat results accept both LF and CRLF SSE framing, including multiline data.
+Native Chat also uses `stallTimeoutSec` while waiting for upstream output, with the same local-vs-public default: an unset budget is disabled for a local upstream and 300 s for a public one, and `0` disables it everywhere. Nonempty text, reasoning, refusal, tool updates, and finish frames renew the allowance; keepalive comments, role-only frames, and usage alone do not. Waiting for a slow client to read pauses the allowance. A stall produces `upstream_stall_timeout`: an error frame for streaming clients, or HTTP 502 for non-streaming clients. Cancellation before a terminal result returns a cancellation error instead of a successful partial answer. Buffered Chat results accept both LF and CRLF SSE framing, including multiline data.
 
 ## Codex quota network diagnostics
 
@@ -159,8 +165,14 @@ terminal does not update an already running service.
 
 An unset `proxy` leaves inherited proxy variables unchanged. An explicit HTTP(S)
 proxy URL fills `HTTP_PROXY` and `HTTPS_PROXY` only where they are unset.
-`"proxy": "auto"` reads the Windows static WinINET proxy once at startup; existing
-proxy environment variables take precedence. Auto discovery does not resolve
+`"proxy": "auto"` reads Windows static WinINET or macOS static HTTP/HTTPS
+settings once at startup. Existing proxy environment variables take precedence;
+macOS discovery also skips inherited `ALL_PROXY`/`all_proxy`. A macOS `*.<domain>`
+exception becomes `.<domain>`: `foo.local` bypasses for `*.local`, `xlocal`
+does not, and the bare `local` apex also bypasses. Exact link-local CIDRs
+are dropped with a warning, so link-local IP literals use the proxy. Other
+unrepresentable exceptions refuse discovery without changing proxy variables.
+Auto discovery does not resolve
 PAC/WPAD, SOCKS-only settings or live proxy changes. Use a supported static HTTP
 proxy setting or an explicit HTTP(S) proxy URL when needed.
 
@@ -652,6 +664,55 @@ instead, so the summary stays readable when the conversation resumes on its own 
 caller's credential does not cross to the other provider. The selected model must support the
 input size and content. Restart the proxy after editing
 `config.json` by hand. Dashboard saves apply immediately.
+
+## Memory routing
+
+In **Dashboard → Overview → Memory routing**, choose a model and an optional reasoning effort for
+each of Codex's two memory phases, then click **Save**. Select **Off** and save to
+remove the override. Changes apply to the next memory request without restarting the proxy.
+
+Set `memoryModels` in OpenCodex `config.json` to route those requests. With the block omitted,
+both phases keep their existing route. The phases are independent: configuring one leaves the
+other alone.
+
+```json
+{
+  "memoryModels": {
+    "extract": { "model": "provider/model-id", "reasoningEffort": "low" },
+    "consolidation": { "model": "provider/model-id", "reasoningEffort": "medium" }
+  }
+}
+```
+
+`extract` is the pass that summarizes one finished session into a raw memory; `consolidation` is the
+single agent run that merges those raw memories into the files under `$CODEX_HOME/memories`.
+`model` accepts native model IDs, provider-qualified model IDs, and configured combos.
+`reasoningEffort` is optional; omit it to keep the effort Codex asked for. Supported declarations are
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. Codex hard-codes `low` for
+extract and `medium` for consolidation, so a configured effort replaces that value.
+
+OpenCodex recognizes these requests from Codex's own turn metadata: `request_kind: "memory"` in
+the `x-codex-turn-metadata` header marks an extract pass, and `thread_source:
+"memory_consolidation"` marks the consolidation thread. On HTTP, a request whose
+`x-openai-subagent` header names `memory_consolidation` counts as a consolidation pass only when
+turn metadata is absent. Explicit non-memory metadata wins over that fallback. The model id is
+deliberately not a signal: the extract pass runs on the same helper model
+Codex uses for titles and commit messages, so a model-based rule would also capture ordinary
+helper calls. Missing, malformed, or conflicting metadata does not activate the override; when
+several copies of the metadata are supplied they must name the same phase. WebSocket requests use
+each frame's metadata rather than the connection's earlier handshake metadata — the bridge
+re-attaches the handshake's `x-openai-subagent` header to every frame, so that header names the
+connection, not the current pass, and is not a websocket signal.
+
+A configured phase wins when `shadowCallIntercept` would match the same request. A phase left off
+keeps its current routing, including any existing shadow-call rule that matches its model. The
+selected model's provider receives the session text Codex summarizes for memory, including
+sessions that normally run on another provider; the dashboard panel states this next to the model
+pickers. A phase whose target stopped resolving — the provider is
+disabled or deleted, or its combo no longer exists — fails that memory call with `409` and error code
+`memory_model_target_unavailable` instead of falling back to the default provider. The request log
+names the phase (`memory-extract` or `memory-consolidation`) as the routing reason. Restart the
+proxy after editing `config.json` by hand. Dashboard saves apply immediately.
 
 ## Shadow calls
 

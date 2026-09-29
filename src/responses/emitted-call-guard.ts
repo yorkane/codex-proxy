@@ -76,6 +76,12 @@ export interface EmittedCallGuardOptions {
   /** Allowlisted hallucinated names to drop on sight (shadow-scoped phantomToolAllowlist). */
   phantomNames?: ReadonlySet<string>;
   /**
+   * Names of the custom (function) tools in the request catalog. Passed through to
+   * normalizeDeclaredToolName so a direct mcp__<server>__<tool> emission inside a
+   * code-mode catalog normalizes to exec (upstream #5925).
+   */
+  bareCustomToolNames?: ReadonlySet<string>;
+  /**
    * Mutable per-request budget for undeclared-tool correction feedback. When
    * present and positive, an undeclared call (allowlisted phantom or fresh
    * hallucination) becomes a directive exec error teaching the model the
@@ -110,7 +116,7 @@ export function resolveEmittedCall(
     return { kind: "allow", name: emitted, repaired: false };
   }
 
-  const normalized = normalizeDeclaredToolName(emitted, declared);
+  const normalized = normalizeDeclaredToolName(emitted, declared, undefined, options.bareCustomToolNames);
   const effective = repairEmittedToolName(normalized, declared);
 
   const report = (decision: EmittedCallDecision): void => {

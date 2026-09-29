@@ -62,12 +62,13 @@ ocx login anthropic
 透過執行中的代理列出並切換供應商帳號與 API-key 池。隨附的說明介面如下：
 
 ```text
-Usage: ocx account <list|history|current|use|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
+Usage: ocx account <list|history|current|use|clear|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
 
 list [provider]     Codex 帳號池、OAuth 帳號與 API 金鑰（識別碼依 API 回傳遮罩顯示）。
 history openai <pool-account-id> [--limit <1-200>]  單一 Codex 帳號池帳號的近期路由決策。
 current <provider>  顯示現用帳號或金鑰。
-use <provider> <id|alias|main|auto> 切換現用憑證；'main' 選擇 Codex App 登入，'auto' 清除選擇。
+use <provider> <id|alias|main|auto> 切換現用憑證；'main' 選擇 Codex App 登入，'auto' 清除選擇，除非有帳號的 id 恰為此值。
+clear <provider>  無條件清除 Codex 帳號的手動選擇。
 refresh <provider>  強制重新整理 Codex 或供應商配額報告。
 auto-switch <provider> <on|off|status|threshold N>  控制 Codex 池閾值。
 alias <provider> <id|alias> <display-name|->  設定或清除帳號顯示名稱；'-' 表示清除。
@@ -75,7 +76,7 @@ priority <provider> <id|alias|main> [first|earlier|normal|later|last|-100..100|r
 pause <provider> <id|alias|main>  將帳號移出自動選擇。
 resume <provider> <id|alias|main>  將暫停的帳號放回自動選擇。
 pause-exhausted <provider>  暫停所有配額已用盡的帳號。
-clear-cooldown <provider> <id|alias|main>  清除上游失敗後設定的冷卻。
+clear-cooldown <openai|anthropic> <id|alias|main>  清除上游失敗後設定的冷卻。
 strategy <provider> [<quota|round-robin|fill-first|reset-first>]  帳號池放置策略；省略取值即讀取目前值。
 sticky <provider> [<1-100>]  已綁定執行緒在同一帳號上保留的請求數；省略取值即讀取目前值。
 remove <provider> <id|alias|main> --yes  在存在檢查後移除已儲存的帳號或金鑰。
@@ -126,7 +127,7 @@ Codex 池選擇套用於清除既有親和性後的下一個請求；進行中�
 
 ### `ocx account use <provider> <account-or-key-id|alias|main|auto> [--json]`
 
-`auto` 會清除手動選擇，讓池重新依自身策略分配工作。Codex 帳號可以用 `ocx account alias` 設定的別名代替 id 來指定；`priority`、`pause`、`resume`、`clear-cooldown`、`remove` 與 `alias` 亦然。對於 Codex 帳號，`auto`、`main` 和 `__main__` 為保留字（不區分大小寫），不能設為別名。OAuth 帳號與 API 金鑰的顯示名稱仍遵循原有規則。
+`auto` 會清除手動選擇，讓池重新依自身策略分配工作 — 但若 Codex 帳號的 id 恰為 `auto`，則精確 id 比對優先；`ocx account clear <provider>` 一律還原自動選擇。Codex 帳號可以用 `ocx account alias` 設定的別名代替 id 來指定；`priority`、`pause`、`resume`、`clear-cooldown`、`remove` 與 `alias` 亦然。對於 Codex 帳號，`auto`、`main` 和 `__main__` 為保留字（不區分大小寫），不能設為別名。OAuth 帳號與 API 金鑰的顯示名稱仍遵循原有規則。
 
 選擇既有的 Codex 帳號、OAuth 帳號或 API 金鑰。對於 `openai`，`main` 選擇 Codex App 登入。Codex 池選擇清除行程本地親和性並套用於下一個請求，包含來自既有可見任務的請求；代理重啟或親和性驅逐也可能使任務未綁定，而進行中的請求保留其擷取的帳號。這僅控制池路由；Direct 模式繼續使用呼叫者擁有／原生的 main 憑證。基於用量的主動切換、401/403 重新認證、429/retry-after 冷卻、排除，以及 pre-output 429/402 失敗復原稍後可能選擇另一個合格的池帳號。當基於用量的切換關閉時，這些復原路徑仍然活躍。OpenCodex 在帳號變更後重播對話，但供應商端的 prompt cache 可能是冷的。未知的供應商或 id 離開 1。
 在 **401/403** 時，App 登入清除該帳號的行程本地親和性並要求重新認證。
@@ -136,6 +137,43 @@ Codex 池選擇套用於清除既有親和性後的下一個請求；進行中�
 ```text
 { ok: true, provider, type, activeId }
 ```
+
+### `ocx account clear <provider> [--json]`
+
+不解析帳號 id 即清除 Codex 帳號的手動選擇，即使存在名為 `auto` 的帳號仍有效。僅適用於 Codex 池；其他提供者類型沒有可還原的自動選擇。
+
+### `ocx account pause|resume <provider> <id|alias|main> [--json]`
+
+暫停或恢復 Codex、Anthropic 或通用 OAuth 供應商池中的單一帳號，包括
+`google-antigravity`。在 Codex 池中，`main` 僅代表 Codex 內建帳號；OAuth 帳號必須用 id 或唯一別名識別。
+已暫停的 OAuth 帳號不會參與請求選帳、429 輪替或主動 Token 刷新，也不能手動選取。
+若暫停目前使用中的帳號，系統會在有其他可用帳號時切換過去。若全部帳號都已暫停，
+需要該池的請求會回覆 403，直到恢復其中一個帳號。
+
+Anthropic 和通用 OAuth 供應商可用帳號 id，或唯一且完全相符／不區分大小寫的別名識別帳號。
+JSON 回應會提供帳號 id、暫停狀態與目前 active 帳號 id。
+
+Anthropic 暫停不受帳號池啟用開關影響，包含工作階段綁定與 429 後繼選帳。
+重新啟動或登入仍保留暫停，憑證與健康狀態不會清除，已送出的請求不會中斷。
+刪除帳號會一併刪除暫停狀態；個別帳號的自動切換門檻不在此功能範圍內。
+
+```bash
+ocx account pause google-antigravity <account-id-or-alias>
+ocx account resume google-antigravity <account-id-or-alias>
+```
+
+### `ocx account clear-cooldown <openai|anthropic> <id|alias|main> [--json]`
+
+清除行程本地的失敗冷卻，但不變更已儲存的憑證。Codex 池帳號使用 `openai`，Anthropic
+OAuth 帳號使用 `anthropic`；其他供應商會被拒絕。兩種形式都接受帳號 id 或唯一別名，
+而 `main` 僅適用於 Codex 池。
+
+```bash
+ocx account clear-cooldown anthropic <id-or-alias>
+```
+
+即使沒有作用中的冷卻，命令也會成功，JSON 中的 `cleared` 為 `false`。清除 Anthropic
+冷卻也會推進帳號 generation，因此舊的 quota probe 無法恢復已清除狀態或發布過期的配額資格。
 
 ### `ocx account refresh <provider> [--json]`
 
@@ -147,7 +185,11 @@ Codex 池選擇套用於清除既有親和性後的下一個請求；進行中�
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-控制 `openai` Codex 帳戶池閾值，或儲存通用 OAuth 帳戶池閾值。`on` 儲存 80%，`off` 儲存 0%，`threshold <n>` 接受 0–100。通用池的閾值只有在 `pool.kernel` 開啟且 `strategy: "fill-first"` 時才參與選擇；旗標關閉時，儲存閾值不會啟用閾值切換。兩種情況下都不會改變供應商啟用設定或停用 429 錯誤後的輪替。通用池的查詢與修改結果使用伺服器確認值。通用池的 `poolEnabled` 是已儲存的供應商設定，`null` 表示未指定，並不代表繼承後的實際狀態。`inert: true` 表示閾值已儲存但未套用，`inert: false` 表示帳戶池正在套用它。沒有 `inert` 欄位表示能力未知，此時同樣不會回報 `enabled: true`。API 金鑰供應商、Anthropic 與無效值會被拒絕。
+控制 `openai` Codex 帳戶池閾值，或儲存通用 OAuth 帳戶池閾值。`on` 儲存 80%，`off` 儲存 0%，`threshold <n>` 接受 0–100。通用池的閾值只有在 `pool.kernel` 開啟且 `strategy: "fill-first"` 時才參與選擇；旗標關閉時，儲存閾值不會啟用閾值切換。兩種情況下都不會改變供應商啟用設定或停用 429 錯誤後的輪替。通用池的查詢與修改結果使用伺服器確認值。通用池的 `poolEnabled` 是已儲存的供應商設定，`null` 表示未指定，並不代表繼承後的實際狀態。`inert: true` 表示閾值已儲存但未套用，`inert: false` 表示帳戶池正在套用它。沒有 `inert` 欄位表示能力未知，此時同樣不會回報 `enabled: true`。API 金鑰供應商與無效值會被拒絕。
+
+### `ocx account auto-switch anthropic … --account <id>`
+
+Anthropic OAuth 使用 `ocx account auto-switch anthropic threshold 90 --account <id>` 儲存帳戶專屬整數 0–100。`off --account <id>` 設為 0，`on --account <id>` 設為 80，`inherit --account <id>` 恢復繼承，`status --account <id>` 唯讀查詢；可加 `--json`。帳戶卡片提供相同控制。未設定/null 繼承 `anthropicAccountPool.autoSwitchThreshold`（預設 80）；0 只停用該帳戶依用量切換。設定在重啟和重新登入後保留，刪除帳戶時移除。手動選擇、affinity、未知或全部耗盡時的後備行為與模型路由限制不變。集區停用時不套用門檻；暫停與 429 復原仍有效。
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }

@@ -15,7 +15,7 @@ description: 监听、远程访问、准入密钥、超时、存储、侧车、�
 | `proxy?` | `string` | — | 出站 HTTP(S) 或 SOCKS5 代理 URL（`socks5://host:port`），或 `${ENV_VAR}`。HTTP URL 仅在未设置时写入 `HTTP_PROXY` / `HTTPS_PROXY`。SOCKS5 URL 使用内置的真实 SOCKS5 隧道，也会写入 `ALL_PROXY`（`ocx start --socks5`）；并清除本进程继承的 `HTTP(S)_PROXY`。回环地址始终保留在 `NO_PROXY` 中。 |
 | `emptyCompletionRetry?` | `boolean` | `false` | 显式启用：当 Responses turn 既无文本也无工具调用时，使用相同请求重试一次，包括流在终止事件之前结束的情况。重试可能产生费用。`OCX_EMPTY_COMPLETION_RETRY=0` 可在不修改配置的情况下禁用；combo 与 routed-compaction turn 不参与。 |
 | `dropCodexSafetyBuffering?` | `boolean` | `false` | 从 Codex Responses 透传响应中移除 Codex safety-buffering 提示：`x-codex-safety-buffering-enabled` / `x-codex-safety-buffering-faster-model` 响应头、类型为 `safety_buffering` 的 `response.metadata` SSE 事件，以及其他 SSE 事件中的 `safety_buffering` 字段。Codex TUI 会将这些提示显示为“使用更快模型重试”的提示框，其默认操作会把会话切换到较弱的模型。其他 `x-codex-*` 响应头和其他所有 SSE 事件内容均保持不变，但会移除该字段。默认关闭。 |
-| `stallTimeoutSec?` | `number` | `300` | 上游无有效进展的秒数，适用于 Responses 和原生 Chat；最小 1 秒。 |
+| `stallTimeoutSec?` | `number` | `300`（public）/ 禁用（local） | 上游无有效进展（Responses 和原生 Chat）多少秒后切断流。未设置时**本地**上游（loopback、private、`.local`/`.lan` 名称）默认禁用，公网上游默认 300 秒；正值对两者生效（最小 1 秒）；`0` 全面禁用静默 watchdog。对于把 canonical ChatGPT SSE 折叠为非流式 JSON 的 Responses 请求，即使 watchdog 已禁用，仍保留独立的 15 分钟整轮上限。`/v1/responses/compact` 的挂起响应体读取共享此预算，但即使本地上游也默认 300 秒；显式值（含 `0`）优先。 |
 | `connectTimeoutMs?` | `number` | `200000` | 每次尝试的 DNS/TCP/TLS/最终响应头截止时间；它在正文生成之前结束。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 优雅停机截止时间，超过后会中止仍在进行中的请求。 |
 | `websockets?` | `boolean` | `false` | 声明并允许面向客户端的 Responses WebSocket 路径。设为 false 时客户端使用 HTTP/SSE；它不会禁用符合条件的 canonical ChatGPT 上游 WS 优化。 |
@@ -198,6 +198,6 @@ Anthropic OAuth 侧车会复用 opencodex 现有的 Claude Code OAuth 指纹。�
 
 ## Codex 额度网络诊断
 
-主 Codex 账户行中的 `quotaRefresh` 描述额度查询结果，并不代表剩余额度或模型访问权限。读取缓存或未执行查询时，该字段可能省略。查询使用正在运行的代理服务的环境，而不是当前终端的环境。未设置 `proxy` 时保留现有环境；`"auto"` 只在启动时读取 Windows 静态代理设置，不自动处理 PAC/WPAD、仅 SOCKS 的设置或运行中的更改。TUN 测试成功并不能单独证明 HTTP 代理路径正常。命令和状态说明见[英文网络诊断章节](/reference/configuration/server/#codex-quota-network-diagnostics)。
+主 Codex 账户行中的 `quotaRefresh` 描述额度查询结果，并不代表剩余额度或模型访问权限。读取缓存或未执行查询时，该字段可能省略。查询使用正在运行的代理服务的环境，而不是当前终端的环境。未设置 `proxy` 时保留现有环境；`"auto"` 在启动时读取 Windows 或 macOS 静态 HTTP/HTTPS 设置；macOS 上若有继承代理则跳过读取。macOS 将有效的 `*.<domain>` 转为 `.<domain>`：`*.local` 使 `foo.local` 和裸域名 `local` 直连，但不匹配 `xlocal`。精确的 `169.254/16`、`169.254.0.0/16`、`fe80::/10` 网段会跳过并给出诊断，因此链路本地 IP 地址使用代理。IP 地址和 `*` 仍可用；其他 CIDR、通配形式和简单主机名例外会在修改环境前拒绝自动发现。不自动处理 PAC/WPAD、仅 SOCKS 的设置或运行中的更改。TUN 测试成功并不能单独证明 HTTP 代理路径正常。命令和状态说明见[英文网络诊断章节](/reference/configuration/server/#codex-quota-network-diagnostics)。
 
 `dropCodexSafetyBuffering`: 不会改变供应商安全策略或拒绝响应。原生 WebSocket `codex.response.metadata.headers` 和 `/responses/compact` 不在过滤范围内。

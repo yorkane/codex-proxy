@@ -79,19 +79,20 @@ ocx login anthropic
 実行中のプロキシを介してプロバイダー アカウントと API キー プールを一覧表示し、切り替えます。出荷されたヘルプ画面は次のとおりです。
 
 ```text
-Usage: ocx account <list|history|current|use|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
+Usage: ocx account <list|history|current|use|clear|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 history openai <pool-account-id> [--limit <1-200>]  Recent routing decisions for one Codex pool account.
 current <provider>  Show the active account or key.
-use <provider> <id|alias|main|auto> Switch the active credential; 'main' selects the Codex App login, 'auto' clears the selection.
+use <provider> <id|alias|main|auto> Switch the active credential; 'main' selects the Codex App login, 'auto' clears the selection unless an account carries that id.
+clear <provider>  Clear the manual Codex account selection unconditionally.
 refresh <provider>  Force-refresh Codex or provider quota reports.
 auto-switch <provider> <on|off|status|threshold N>  Control the Codex pool threshold.
 alias <provider> <id|alias> <display-name|->  Set or clear an account's display name; '-' clears it.
 pause <provider> <id|alias|main>  Hold an account out of automatic selection.
 resume <provider> <id|alias|main>  Return a paused account to automatic selection.
 pause-exhausted <provider>  Pause every account whose quota is spent.
-clear-cooldown <provider> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
+clear-cooldown <openai|anthropic> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
 strategy <provider> [<quota|round-robin|fill-first|reset-first>]  Pool placement strategy; omit the value to read it.
 sticky <provider> [<1-100>]  Requests a bound thread keeps on one account; omit the value to read it.
 priority <provider> <id|alias|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
@@ -144,7 +145,7 @@ Codex pool selection applies to the next request after clearing existing affinit
 
 ### `ocx account use <provider> <account-or-key-id|alias|main|auto> [--json]`
 
-`auto` は手動の選択を解除し、プールが自身の戦略で再び配置するようにします。Codex アカウントは id の代わりに `ocx account alias` で付けたエイリアスでも指定でき、`priority`、`pause`、`resume`、`clear-cooldown`、`remove`、`alias` でも同様です。Codex アカウントでは `auto`、`main`、`__main__` は大文字・小文字を区別せず予約語として扱われるため、エイリアスとして設定できません。OAuth アカウントと API キーの表示名には従来のルールが適用されます。
+`auto` は手動の選択を解除し、プールが自身の戦略で再び配置するようにします — ただし id が `auto` の Codex アカウントが存在する場合は完全一致の id が優先され、`ocx account clear <provider>` が常に自動選択を復元します。Codex アカウントは id の代わりに `ocx account alias` で付けたエイリアスでも指定でき、`priority`、`pause`、`resume`、`clear-cooldown`、`remove`、`alias` でも同様です。Codex アカウントでは `auto`、`main`、`__main__` は大文字・小文字を区別せず予約語として扱われるため、エイリアスとして設定できません。OAuth アカウントと API キーの表示名には従来のルールが適用されます。
 
 既存の Codex アカウント、OAuth アカウント、または API key を選びます。`openai` で `main` は Codex App ログインを
 選択します。Codex Pool の選択は process-local affinity を消去し、既存の表示タスクを含む次のリクエストから適用されます。プロキシ再起動や affinity eviction 後もタスクは未紐付けになり得ますが、処理中のリクエストは取得済みアカウントを維持します。この選択は Pool routing のみを制御し、Direct mode は caller-owned/native main credential を使い続けます。使用量ベースのプロアクティブ切り替え、401/403 再認証、429/retry-after cooldown、除外、出力前 429/402 の障害回復により、後で別の適格 Pool アカウントが選ばれる場合があります。これらの回復経路は使用量ベース切り替えが off でも有効です。アカウント変更後も OpenCodex は会話コンテキストを再生しますが、provider prompt cache は再ウォームアップが必要な場合があります。
@@ -158,6 +159,29 @@ Codex pool selection applies to the next request after clearing existing affinit
 { ok: true, provider, type, activeId }
 ```
 
+### `ocx account pause|resume anthropic <id|alias> [--json]`
+
+CLI コマンドは Anthropic OAuth アカウントを id または一意の別名で一時停止・再開します。別名は完全一致を優先し、次に大文字と小文字を区別せず照合します。ダッシュボードと同じ `PUT /api/oauth/accounts/pause` に `{ provider: "anthropic", accountId, paused }` を送信します。`paused` はアカウントに保存され、`GET /api/oauth/accounts` にも表示されます。プロアクティブなプールが無効でも、停止中のアカウントは選択、セッションの紐付け、429 の切り替え候補から除外されます。全アカウントが停止中なら、再開するまでリクエストは 403 を返します。送信済みのリクエストは継続し、認証情報と健全性の状態は保持されます。再起動や再ログインでも停止は維持され、アカウント削除時に消えます。アカウント別のしきい値はこの操作に含まれません。
+
+### `ocx account clear <provider> [--json]`
+
+アカウント id を解決せずに Codex アカウントの手動選択を解除するため、`auto` という id のアカウントが存在しても機能します。Codex プール専用です。他のプロバイダー種別には復元する自動選択がありません。
+
+### `ocx account clear-cooldown <openai|anthropic> <id|alias|main> [--json]`
+
+保存済み認証情報を変更せず、プロセスローカルな障害 cooldown を解除します。Codex Pool
+アカウントには `openai`、Anthropic OAuth アカウントには `anthropic` を使い、その他の
+provider は拒否されます。どちらもアカウント id または一意の alias を受け付けますが、
+`main` は Codex Pool 専用です。
+
+```bash
+ocx account clear-cooldown anthropic <id-or-alias>
+```
+
+有効な cooldown がなくても成功し、JSON では `cleared: false` になります。Anthropic の
+cooldown を解除するとアカウント generation も進むため、古い quota probe が解除済み状態を
+復元したり、古い quota ベースの eligibility を公開したりできません。
+
 ### `ocx account refresh <provider> [--json]`
 
 Codex プールの場合は、`ocx account refresh openai [--json]` を使用します。アカウント クォータを強制的に更新し、利用可能な週次/月次のパーセンテージとリセット時間を出力します。不足しているクォータ データは、0% ではなく不明として報告されます。その JSON エンベロープは `{ accounts: AccountRow[] }` で、Codex の各行に `quota` があります。
@@ -166,7 +190,11 @@ OAuth プロバイダーと API キー プロバイダーの場合、これに�
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-`openai` Codex プールのしきい値を制御するか、汎用 OAuth プールのしきい値を保存します。`on` は 80%、`off` は 0%、`threshold <n>` は 0–100 を保存します。汎用プールのしきい値は `pool.kernel` が有効で `strategy: "fill-first"` の場合にのみ選択へ反映されます。フラグが無効なら、保存してもしきい値による切り替えは有効になりません。いずれの場合もプロバイダーの有効化設定と 429 エラー時のローテーションは変更されません。汎用プールの照会と変更の結果はサーバーの確認値を使用します。汎用プールの `poolEnabled` は保存された設定で、`null` は未指定です。継承後の実効状態ではありません。`inert: true` は保存済みで未適用、`inert: false` はプールが適用中であることを示します。`inert` が無い場合は機能が不明であり、その場合も `enabled: true` とは表示しません。API キープロバイダー、Anthropic、不正な値は拒否されます。
+`openai` Codex プールのしきい値を制御するか、汎用 OAuth プールのしきい値を保存します。`on` は 80%、`off` は 0%、`threshold <n>` は 0–100 を保存します。汎用プールのしきい値は `pool.kernel` が有効で `strategy: "fill-first"` の場合にのみ選択へ反映されます。フラグが無効なら、保存してもしきい値による切り替えは有効になりません。いずれの場合もプロバイダーの有効化設定と 429 エラー時のローテーションは変更されません。汎用プールの照会と変更の結果はサーバーの確認値を使用します。汎用プールの `poolEnabled` は保存された設定で、`null` は未指定です。継承後の実効状態ではありません。`inert: true` は保存済みで未適用、`inert: false` はプールが適用中であることを示します。`inert` が無い場合は機能が不明であり、その場合も `enabled: true` とは表示しません。API キープロバイダー、不正な値は拒否されます。
+
+### `ocx account auto-switch anthropic … --account <id>`
+
+Anthropic OAuth では `ocx account auto-switch anthropic threshold 90 --account <id>` でアカウント別の整数 0–100 を保存します。`off --account <id>` は 0、`on --account <id>` は 80、`inherit --account <id>` は継承へ戻し、`status --account <id>` は読み取り専用です。`--json` も使えます。カードにも同じカスタム設定があります。未設定/null は `anthropicAccountPool.autoSwitchThreshold`（既定 80）を継承し、0 はそのアカウントの使用量による切り替えのみ無効にします。再起動・再ログインで保持され、削除時に消えます。手動選択、affinity、使用量不明・全候補消耗時のフォールバック、モデルルート制限は維持されます。プール無効時は適用されず、一時停止と 429 復旧は引き続き有効です。
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }

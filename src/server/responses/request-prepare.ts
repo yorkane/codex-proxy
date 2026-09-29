@@ -13,7 +13,14 @@ import {
 } from "./core-errors";
 import { parseSyntheticRowId } from "../fast-row";
 import { resolveComboId, comboIdFromRawBody, NoAvailableComboTargetsError } from "../../combos";
-import { INTERCEPT_TARGET_UNAVAILABLE_CODE, interceptTargetUnavailableResponse, resolveShadowCallTarget } from "./shadow-target-availability";
+import { INTERCEPT_TARGET_UNAVAILABLE_CODE, interceptTargetUnavailableResponse, resolveChosenTarget, resolveShadowCallTarget } from "./shadow-target-availability";
+import {
+  MEMORY_MODEL_TARGET_UNAVAILABLE_CODE,
+  configuredMemoryModel,
+  detectMemoryModelPhase,
+  memoryModelRouteReason,
+  memoryModelTargetUnavailableResponse,
+} from "./memory-models";
 import { recallComboForLane } from "./combo-session-recall";
 import {
   sessionLaneIdFromRequest,
@@ -22,6 +29,7 @@ import {
   reasoningReplayConversationIdFromResponsesRequest,
 } from "../request-log-conversation";
 import { resolveContextPrincipal } from "../auth-cors";
+import { resolveSkillsSnapshotScopeKey, snapshotSkillsCatalogInBody } from "./skills-snapshot";
 import {
   isShadowSourceModel,
   shadowCallReplacementFor,
@@ -175,6 +183,20 @@ export async function prepareResponsesRequest(
       transport: options.inboundTransport,
     });
   }
+  // Codex's memory pipeline names a destination per phase. The phase is read from Codex's own turn
+  // metadata, never from the model id: Phase 1 shares `gpt-5.6-luna` with the app's title/commit
+  // helper calls. Read here, ahead of the shadow intercept below, because the phase decision is the
+  // more specific of the two settings and must be the one that survives when both match one request.
+  const memoryModelPhase = options.memoryModelPhase
+    ?? ((config.memoryModels?.extract || config.memoryModels?.consolidation)
+      && !options.comboAttempt && !options.compactionRoutingOverride && inboundWire === "responses"
+      ? detectMemoryModelPhase(body, req.headers, { transport: options.inboundTransport }) ?? undefined
+      : undefined);
+  const memoryModelTarget = memoryModelPhase ? configuredMemoryModel(config, memoryModelPhase) : undefined;
+  // A combo child is a synthetic replay of the parent's decision: its model is already the target's
+  // concrete provider/model, so neither site below may rewrite or re-resolve it. It keeps the phase
+  // through `options.memoryModelPhase` instead, which is what applies the phase effort.
+  const memoryModelApplies = memoryModelTarget !== undefined && options.comboAttempt !== true;
   options.onRequestBodyParsed?.(body);
   // An effort row naming a table-less combo (`combo/x--high`) must reach the combo dispatcher
   // as its base id, so the selector is normalized here, before comboIdFromRawBody reads model.
@@ -229,11 +251,22 @@ export async function prepareResponsesRequest(
   // hops — which only exist inside that loop — are unreachable (#4129). Rewrite the selector
   // here instead, before comboIdFromRawBody reads `model`, and identify the combo by CONFIG
   // LOOKUP so the check can never observe a one-candidate collapse.
+  // A memory target that names a combo has to reach the combo dispatcher as `model`, or its own
+  // failover loop is unreachable (#4129) — the same reason the shadow intercept rewrites its combo
+  // target here. Every other target is resolved at the late site, where the admission scope exists.
+  let memoryModelComboRouted = false;
+  if (memoryModelApplies && memoryModelTarget && body && typeof body === "object" && !Array.isArray(body)) {
+    const memoryComboId = resolveComboId(config, memoryModelTarget.model);
+    if (memoryComboId && Object.hasOwn(config.combos ?? {}, memoryComboId)) {
+      memoryModelComboRouted = true;
+      (body as Record<string, unknown>).model = memoryModelTarget.model;
+    }
+  }
   let shadowCallIntercepted = false;
   // A spawned sub-agent turn names its model on purpose; gpt-6-luna is both the helper
   // slug and a default sub-agent model, so neither intercept site may rewrite that turn.
   const threadSpawn = isThreadSpawnRequest(req.headers);
-  if (!options.comboAttempt && !options.compactionRoutingOverride && !threadSpawn && body && typeof body === "object" && !Array.isArray(body)) {
+  if (!options.comboAttempt && !options.compactionRoutingOverride && !threadSpawn && !memoryModelApplies && body && typeof body === "object" && !Array.isArray(body)) {
     const shadowIntercept = config.shadowCallIntercept;
     const rawShadowModel = (body as { model?: unknown }).model;
     const shadowReplacement = shadowIntercept?.enabled && typeof rawShadowModel === "string"
@@ -264,6 +297,9 @@ export async function prepareResponsesRequest(
       // Concrete combo child selectors no longer match the shadow source model. Carry the
       // interception decision explicitly so provider-specific helper isolation still applies.
       shadowCallIntercepted,
+      // Same handoff for a memory phase whose target is a combo: the child keeps the phase's effort
+      // override and stays out of the parent conversation.
+      memoryModelPhase: memoryModelComboRouted ? memoryModelPhase : undefined,
       // The original request body was accepted above. Combo children are synthetic
       // replays and must not repeat the caller-owned timeout transition.
       onRequestBodyRead: undefined,
@@ -319,6 +355,15 @@ export async function prepareResponsesRequest(
         `[opencodex] rewrote ${rewritten} plaintext encrypted_content part(s) to input_text (spawn-message compatibility)`,
       );
   }
+
+  const skillsSnapshotScopeKey = resolveSkillsSnapshotScopeKey({
+    req,
+    config,
+    admission: options.admission,
+        promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort,
+  });
+  // Substitutes a known snapshot now; a new catalog is only stored once the request is prepared.
+  const commitSkillsSnapshot = snapshotSkillsCatalogInBody(body, skillsSnapshotScopeKey, config);
 
   let parsed: OcxParsedRequest;
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
@@ -387,6 +432,10 @@ export async function prepareResponsesRequest(
     }
     if (cursorClientThreadId) parsed._cursorClientThreadId = cursorClientThreadId;
     if (options.shadowCallIntercepted === true) parsed._cursorIsolateConversation = true;
+    if (options.memoryModelPhase !== undefined) {
+      parsed._memoryModelPhase = options.memoryModelPhase;
+      parsed._cursorIsolateConversation = true;
+    }
   } catch (err) {
     if (isTranslatorBudgetExceededError(err)) {
       return formatErrorResponse(413, "request_too_large", "request translation buffer exceeded the safe limit", {
@@ -490,15 +539,35 @@ export async function prepareResponsesRequest(
       : parsed._compactionRequest === true
         ? routeCompactionModel(config, modelId, evidenceFromBody(parsed._rawBody))
         : routeModel(config, modelId, evidenceFromBody(parsed._rawBody)));
+    // The phase's destination. Resolved through the admission-scoped resolver every other route
+    // uses, and it fails closed exactly like the shadow target: falling back to the native model
+    // would spend the quota the operator routed away from, without their choosing it.
+    let memoryRoute: RouteResult | undefined;
+    if (memoryModelApplies && memoryModelPhase && memoryModelTarget) {
+      const memoryTarget = resolveChosenTarget(memoryModelTarget.model, resolveRoute);
+      if ("unavailable" in memoryTarget) {
+        logCtx.errorCode = MEMORY_MODEL_TARGET_UNAVAILABLE_CODE;
+        return memoryModelTargetUnavailableResponse(memoryModelPhase);
+      }
+      credentialDomainWasRewritten = true;
+      parsed.modelId = memoryModelTarget.model;
+      if (parsed._rawBody && typeof parsed._rawBody === "object") {
+        (parsed._rawBody as { model?: string }).model = memoryModelTarget.model;
+      }
+      parsed._memoryModelPhase = memoryModelPhase;
+      parsed._cursorIsolateConversation = true;
+      memoryRoute = memoryTarget.route;
+    }
     // Fork: shadow intercept (per-source replacement + combo-aware routing) lives in
     // shadow-call-route.ts so upstream edits to this file never re-conflict with the
     // intercept block. A shadow rewrite changes the credential domain, so the final
     // auth resolution must strip caller bearer headers (#4102 semantics).
-    // A compaction routing override owns the request's route, and a spawned sub-agent
-    // turn names its model on purpose (gpt-6-luna is both the helper slug and a default
-    // sub-agent model): neither case may be rewritten by the intercept.
+    // A compaction routing override owns the request's route, a memory-model phase owns
+    // its destination, and a spawned sub-agent turn names its model on purpose (the
+    // helper slug is also a default sub-agent model): none of these may be rewritten
+    // by the intercept.
     let shadowRoute: RouteResult | undefined;
-    if (!options.compactionRoutingOverride && !threadSpawn) {
+    if (!memoryRoute && !options.memoryModelPhase && !options.compactionRoutingOverride && !threadSpawn) {
       const shadowOutcome = resolveShadowRoute({ parsed, config, logCtx, options, resolveRoute });
       // A target that stopped resolving is refused before any send (#5618).
       if (shadowOutcome.response !== undefined) return shadowOutcome.response;
@@ -506,7 +575,20 @@ export async function prepareResponsesRequest(
       if (shadowRoute !== undefined) credentialDomainWasRewritten = true;
     }
     if (parsed._compactionRequest === true || options.compactionRoutingOverride) parsed._cursorIsolateConversation = true;
-    route = shadowRoute ?? resolveRoute(parsed.modelId);
+    route = memoryRoute ?? shadowRoute ?? resolveRoute(parsed.modelId);
+    // Name the phase in the persisted route decision, so the request log says why this turn went to
+    // the memory destination instead of leaving it looking like a plain user selection. Set here, on
+    // the resolved route, so a combo child's own route carries it too.
+    if (parsed._memoryModelPhase) {
+      const reason = memoryModelRouteReason(parsed._memoryModelPhase);
+      route.routeReason = reason;
+      if (route.routeDecision) {
+        route.routeDecision = {
+          ...route.routeDecision,
+          selected: { ...route.routeDecision.selected, reason },
+        };
+      }
+    }
     if (options.compactionRoutingOverride && !compactionRoutingKeepsProviderIdentity(config, options.compactionRoutingOverride, route)) {
       credentialDomainWasRewritten = true;
       // The destination does not share the conversation's credential domain, so it can neither
@@ -1246,6 +1328,7 @@ export async function prepareResponsesRequest(
     ? admissionState.authCtx.accountId
     : config.activeCodexAccountId ?? null;
 
+  commitSkillsSnapshot?.();
   return {
     inboundWire,
     translatorBudget,

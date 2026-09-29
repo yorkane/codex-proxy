@@ -579,6 +579,7 @@ function normalizeUsageValue(usage: OcxUsage | undefined): OcxUsage | undefined 
     ...(typeof usage.cacheReadInputTokens === "number" ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
     ...(typeof usage.cacheCreationInputTokens === "number" ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
     ...(typeof usage.reasoningOutputTokens === "number" ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
+    ...(isNonNegativeFiniteNumber(usage.providerCredits) ? { providerCredits: usage.providerCredits } : {}),
     ...(usage.estimated ? { estimated: true } : {}),
   };
 }
@@ -622,6 +623,7 @@ function normalizeAttemptUsage(raw: unknown): OcxUsage | null {
     "cacheReadInputTokens",
     "cacheCreationInputTokens",
     "reasoningOutputTokens",
+    "providerCredits",
   ] as const) {
     if (key in usage && !isNonNegativeFiniteNumber(usage[key])) return null;
   }
@@ -654,6 +656,7 @@ function normalizeAttemptTierOutcome(raw: unknown): AttemptTierOutcome | null {
   if ("callerFastSuppressedByConfig" in outcome
     && typeof outcome.callerFastSuppressedByConfig !== "boolean") return null;
   if ("responseServiceTier" in outcome && typeof outcome.responseServiceTier !== "string") return null;
+  if ("responseTierAuthoritative" in outcome && typeof outcome.responseTierAuthoritative !== "boolean") return null;
   const wireValue = sanitizeLogMetadataString(outcome.wireValue);
   const responseServiceTier = sanitizeLogMetadataString(outcome.responseServiceTier);
   return {
@@ -676,6 +679,9 @@ function normalizeAttemptTierOutcome(raw: unknown): AttemptTierOutcome | null {
       ? { callerFastSuppressedByConfig: outcome.callerFastSuppressedByConfig }
       : {}),
     confirmation: outcome.confirmation as AttemptTierOutcome["confirmation"],
+    ...(typeof outcome.responseTierAuthoritative === "boolean"
+      ? { responseTierAuthoritative: outcome.responseTierAuthoritative }
+      : {}),
     ...(responseServiceTier ? { responseServiceTier } : {}),
   };
 }

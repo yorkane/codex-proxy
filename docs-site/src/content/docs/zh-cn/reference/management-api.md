@@ -183,8 +183,8 @@ Aside 配置档的变更在这种情况下仍会保存一件事：确认之后�
 | `GET /api/debug/usage-logs` | 读取有上限的 usage-debug 条目 | — |
 | `GET /api/debug/injection-logs` | 读取有上限的 guidance-injection 调试条目 | — |
 | `GET /api/claude/inbound-debug` | 读取 Claude 入站调试状态和条目 | — |
-| `GET /api/usage` | 按范围和客户端界面汇总使用情况 | 若无法读取存储，则返回带有 `error: "read_failed"` 的摘要 |
-| `GET /api/metrics` | 返回进程本地的 Prometheus 文本指标，涵盖逻辑请求、实际发送、恢复类型、持续时间和 TTFT。标签仅使用协议、结果和恢复类别的封闭集合；绝不导出请求或凭据标识。 | 启动时 `metricsExport.enabled` 不为 true 则返回 404；需要普通管理认证，数据平面凭据不能访问 |
+| `GET /api/usage` | 按范围和客户端界面汇总使用情况 | 若无法读取存储，则返回 500 `{ "error": "read_failed" }` |
+| `GET /api/metrics` | 返回进程本地的 Prometheus 文本指标，涵盖逻辑请求、实际发送、恢复类型、持续时间和 TTFT。请求指标使用封闭标签集合；Kiro 指标仅增加有上限的不透明账户标签；绝不导出请求或凭据标识。 四个 Kiro 配额指标 `opencodex_kiro_quota_{used_credits,limit_credits,used_percent,seconds_to_reset}` 只读取缓存，最多使用 32 个不透明账户标签；抓取时不发起网络请求。 | 启动时 `metricsExport.enabled` 不为 true 则返回 404；需要普通管理认证，数据平面凭据不能访问 |
 | `GET /api/storage` | 按桶扫描 Codex 存储使用情况 | 扫描失败时返回带有 `error: "scan_failed"` 的载荷 |
 | `POST /api/storage/cleanup/preview` | 预览已归档会话清理并返回绑定摘要 | 400 `invalid_json` 或 `invalid_percent` |
 | `POST /api/storage/cleanup` | 隔离或永久移除预览出的归档集合 | 400 输入无效；409 过期/忙碌/被引用状态；500 文件系统/数据库失败 |
@@ -233,17 +233,22 @@ Aside 配置档的变更在这种情况下仍会保存一件事：确认之后�
 | `POST /api/oauth/login/cancel` | 取消一个公开进行中的 OAuth 流程 | 400 provider 未知 |
 | `GET /api/oauth/status` | 轮询某个 provider 的 OAuth 流程 | 400 provider 未知 |
 | `POST /api/oauth/logout` | 移除选定的 provider 凭证 | 400 provider 未知；`oauth_mutation_busy` |
-| `GET, DELETE /api/oauth/accounts` | 列出已脱敏账户或移除一个账户 | 400 provider/id 无效；404 账户缺失；`oauth_mutation_busy` |
+| `GET, DELETE /api/oauth/accounts` | 列出已脱敏账户或移除一个账户 Kiro 行包含自动选择状态 `autoSelectable`，被排除时还包含封闭集合的 `skipReason`。唯一的活动账户仍可发送请求，配额查询仍为可选。 | 400 provider/id 无效；404 账户缺失；`oauth_mutation_busy` |
 | `PUT /api/oauth/accounts/active` | 选择当前活跃的 OAuth 账户 | 400 provider/账户无效；`oauth_mutation_busy` |
 | `GET, PUT, PATCH /api/oauth/accounts/pool` | 读取或更新 Anthropic OAuth 池策略 | 400 非 Anthropic provider 或策略无效 |
 | `POST /api/oauth/accounts/clear-cooldown` | 清除一个 OAuth 账户的运行时冷却 | 400 provider/账户无效 |
 | `PUT /api/oauth/accounts/alias` | 设置或清除 OAuth 账户别名 | 400 provider/账户/别名无效 |
+| `PUT /api/oauth/accounts/pause` | 暂停或恢复 Anthropic 或通用 OAuth 账户。Body `{ provider, accountId, paused }`；暂停活跃账户时，如有其他可用账户则切换过去。 | 400 不支持的 provider 或无效 body；404 账户不存在；`oauth_mutation_busy` |
 | `GET, POST, DELETE /api/providers/keys` | 列出已脱敏的 provider 密钥，添加/激活一个，或移除一个 | 400 输入无效；404 provider/密钥缺失 |
 | `PUT /api/providers/keys/active` | 选择某个 provider 的活跃密钥 | 400 输入无效；404 provider/密钥缺失 |
 | `PUT /api/providers/keys/alias` | 设置或清除 provider 密钥别名 | 400 输入无效；404 provider/密钥缺失 |
 | `GET, POST, PATCH, DELETE /api/keys` | 列出、创建、编辑或删除数据平面准入密钥 | 400 请求体/id 无效；404 密钥缺失 |
 
 凭证列表响应会刻意脱敏。OAuth 访问令牌和完整的 provider API 密钥不会返回给仪表板客户端。
+
+#### Anthropic OAuth: `pause` / `resume`
+
+CLI 命令通过 id 或唯一别名暂停或恢复 Anthropic OAuth 账户。别名先精确匹配，再进行不区分大小写的匹配。CLI 和仪表板使用同一个 `PUT /api/oauth/accounts/pause`，请求体为 `{ provider: "anthropic", accountId, paused }`。`paused` 保存在账户中，并通过 `GET /api/oauth/accounts` 返回。即使主动账户池已关闭，暂停账户也会从选择、会话绑定和 429 后继候选中排除。所有账户暂停时，请求返回 403，直到恢复一个账户。已经发送的请求继续执行，凭证和健康状态保持不变。重启或重新登录仍保留暂停，删除账户时一并清除。此操作不包含账户级自动切换阈值。
 
 ### Providers
 
@@ -343,3 +348,13 @@ OpenAI 也遵循此规则：开关不会选择特殊的 922k 模式。有效上�
 ## 远程会话与数据密钥轮换
 
 `POST /api/keys/rotate {id}` 开始十分钟重叠期，并只返回一次新密钥。`POST /api/keys/rotate/commit {id,rotationId}` 提交，`DELETE /api/keys/rotate {id,rotationId}` 中止。它们都需要管理认证，数据密钥不能调用。`POST /api/session/logout` 需要当前 `gui-session`、匹配的 Origin 和 CSRF。Admin token 会收到 403，永远不能创建用户同意会话。
+
+## Anthropic 账户用量阈值
+
+`PUT /api/oauth/accounts/auto-switch`
+
+仅 Anthropic OAuth。`{ provider: "anthropic", accountId, threshold }`：整数 0–100 或 null 继承；缺少字段无效。重启后保留，随账户删除。
+
+DTO 包含 `autoSwitchThresholdOverride`（整数/null）、`autoSwitchThreshold`（池默认值）、`effectiveAutoSwitchThreshold`。0 只禁用按用量切换；暂停和 429 恢复不变。
+
+HTTP: 400 invalid/unsupported; 404 missing account; `oauth_mutation_busy` on lock contention.

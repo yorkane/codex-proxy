@@ -9,8 +9,11 @@ import type { ProviderModelDiscoverySpec } from "./types";
 // 260923 Claude Opus 5.5 (`claude-opus-5-5`, released 2026-09-22): 1M context / 128K output /
 // adaptive thinking always on / effort low..max with a medium default, per the Opus 5.5
 // overview, effort and pricing pages (platform.claude.com).
-export const ANTHROPIC_MODELS = ["claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
-export const ANTHROPIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = { "claude-fable-5-1": 1_000_000, "claude-sonnet-5": 1_000_000, "claude-fable-5": 1_000_000, "claude-opus-5-5": 1_000_000, "claude-opus-5": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-haiku-4-5": 200_000 };
+// 260929 Claude Sonnet 5.5 (`claude-sonnet-5-5`, released 2026-09-28): 1M context / 128K output /
+// adaptive thinking / effort low..max with a high default, same price as Sonnet 5, per the Sonnet 5.5
+// overview, migration guide, effort and pricing pages (platform.claude.com).
+export const ANTHROPIC_MODELS = ["claude-fable-5-1", "claude-fable-5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
+export const ANTHROPIC_MODEL_CONTEXT_WINDOWS: Record<string, number> = { "claude-fable-5-1": 1_000_000, "claude-sonnet-5-5": 1_000_000, "claude-sonnet-5": 1_000_000, "claude-fable-5": 1_000_000, "claude-opus-5-5": 1_000_000, "claude-opus-5": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-opus-4-7": 1_000_000, "claude-opus-4-6": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-haiku-4-5": 200_000 };
 // All seeded Claude models support vision: https://platform.claude.com/docs/en/models/overview
 export const ANTHROPIC_MODEL_INPUT_MODALITIES: Record<string, string[]> = Object.fromEntries(
   ANTHROPIC_MODELS.map(id => [id, ["text", "image"]]),
@@ -161,8 +164,12 @@ export const OPENAI_API_GPT56_REASONING_EFFORTS = ["low", "medium", "high", "xhi
  * GPT-6 Sol and Luna on the OpenAI API (released 2026-09-22,
  * https://developers.openai.com/api/docs/changelog). Added 2026-09-23 ahead of live discovery; the
  * API window is not published yet, so the rows mirror gpt-6-astra's 1,050,000 / 922,000 API seed.
+ *
+ * GPT-6.1 Sol (released 2026-09-29) publishes the same numbers on its own model page:
+ * 1,050,000 context, 922,000 max input, 128,000 max output, efforts low..max
+ * (https://developers.openai.com/api/docs/models/gpt-6.1-sol, checked 2026-09-30).
  */
-export const OPENAI_GPT6_MODELS = ["gpt-6-sol", "gpt-6-luna"];
+export const OPENAI_GPT6_MODELS = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"];
 /*
  * Meta Model API (https://api.meta.ai/v1) — published ladder, deliberately NOT the
  * house set. dev.meta.ai/docs/reasoning lists "none", "minimal", "low", "medium",
@@ -251,6 +258,8 @@ export const OPENROUTER_GPT56_CONTEXT_WINDOWS = {
   // 260923 preemptive: GPT-6 Sol/Luna ahead of OpenRouter's own listing; same window as GPT-5.6.
   "openai/gpt-6-sol": OPENROUTER_GPT56_CONTEXT_WINDOW,
   "openai/gpt-6-luna": OPENROUTER_GPT56_CONTEXT_WINDOW,
+  // Live /api/v1/models on 2026-09-30: context_length 1,050,000, max_completion_tokens 128,000.
+  "openai/gpt-6.1-sol": OPENROUTER_GPT56_CONTEXT_WINDOW,
 };
 
 /**

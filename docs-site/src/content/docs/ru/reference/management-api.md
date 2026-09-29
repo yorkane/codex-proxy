@@ -214,8 +214,8 @@ GUI-сессия в стиле loopback не выпускается.
 | `GET /api/debug/usage-logs` | Прочитать ограниченные usage-debug-записи | — |
 | `GET /api/debug/injection-logs` | Прочитать ограниченные guidance-injection debug-записи | — |
 | `GET /api/claude/inbound-debug` | Прочитать состояние и записи Claude inbound debug | — |
-| `GET /api/usage` | Сводка usage по диапазону и client surface | При сбое чтения storage вернёт summary с `error: "read_failed"` |
-| `GET /api/metrics` | Вернуть локальные для процесса текстовые метрики Prometheus: логические запросы, физические отправки, виды восстановления, длительность и TTFT. Метки ограничены закрытыми наборами protocol, result и recovery class; идентификаторы запросов и учётных данных не экспортируются. | 404, если `metricsExport.enabled` не был true при запуске; требуется обычная management-аутентификация, data-plane credentials доступа не дают |
+| `GET /api/usage` | Сводка usage по диапазону и client surface | При сбое чтения storage вернёт 500 `{ "error": "read_failed" }` |
+| `GET /api/metrics` | Вернуть локальные для процесса текстовые метрики Prometheus: логические запросы, физические отправки, виды восстановления, длительность и TTFT. Метки запросов используют закрытые наборы, а метрики Kiro добавляют только ограниченные непрозрачные метки аккаунтов; идентификаторы запросов и учётных данных не экспортируются. Четыре метрики `opencodex_kiro_quota_{used_credits,limit_credits,used_percent,seconds_to_reset}` читают только кэш и используют не более 32 непрозрачных меток аккаунтов. При сборе сетевых запросов нет. | 404, если `metricsExport.enabled` не был true при запуске; требуется обычная management-аутентификация, data-plane credentials доступа не дают |
 | `GET /api/storage` | Просканировать использование storage Codex по bucket'ам | При ошибке scan вернёт payload с `error: "scan_failed"` |
 | `POST /api/storage/cleanup/preview` | Предпросмотр cleanup archived-session и возврат binding digest | 400 `invalid_json` or `invalid_percent` |
 | `POST /api/storage/cleanup` | Поместить preview'нутый архивный набор в quarantine или удалить его навсегда | 400 invalid input; 409 stale/busy/referenced state; 500 filesystem/database failure |
@@ -270,12 +270,13 @@ Endpoint'ы storage cleanup могут перемещать или навсег�
 | `POST /api/oauth/login/cancel` | Отменить публичный OAuth-flow в progress | 400 unknown provider |
 | `GET /api/oauth/status` | Опрашивать OAuth-flow одного провайдера | 400 unknown provider |
 | `POST /api/oauth/logout` | Удалить сохранённый credential выбранного провайдера | 400 unknown provider; `oauth_mutation_busy` |
-| `GET, DELETE /api/oauth/accounts` | Показать список masked-аккаунтов или удалить один аккаунт | 400 invalid provider/id; 404 account missing; `oauth_mutation_busy` |
+| `GET, DELETE /api/oauth/accounts` | Показать список masked-аккаунтов или удалить один аккаунт Строки Kiro содержат `autoSelectable` и закрытый `skipReason` при исключении из автоматического выбора; единственный активный аккаунт всё ещё может отправлять запросы. Чтение квоты остаётся необязательным. | 400 invalid provider/id; 404 account missing; `oauth_mutation_busy` |
 | `PUT /api/oauth/accounts/active` | Выбрать активный OAuth-аккаунт | 400 invalid provider/account; `oauth_mutation_busy` |
 | `GET, PUT, PATCH /api/pool/settings` | Прочитать или обновить policy пула любого вида (codex, anthropic, generic); все три отвечают одинаковыми ключами, а поля, которые вид действительно применяет, перечислены в `supported` | 400 неизвестный provider, поле, которое вид не поддерживает, или недопустимое значение |
 | `GET, PUT, PATCH /api/oauth/accounts/pool` | Прежняя policy пула для Anthropic и обычных OAuth-провайдеров; заменена на `/api/pool/settings` и сохранена для существующих клиентов | 400 codex или api-key provider, либо недопустимая policy |
 | `POST /api/oauth/accounts/clear-cooldown` | Очистить runtime cooldown одного OAuth-аккаунта | 400 invalid provider/account |
 | `PUT /api/oauth/accounts/alias` | Задать или очистить alias OAuth-аккаунта | 400 invalid provider/account/alias |
+| `PUT /api/oauth/accounts/pause` | Приостановить/возобновить Anthropic или обычный OAuth-аккаунт. Body `{ provider, accountId, paused }`; при паузе активного аккаунта выбирается другой пригодный аккаунт, если он есть. | 400 неподдерживаемый provider или неверный body; 404 аккаунт не найден; `oauth_mutation_busy` |
 | `GET, POST, DELETE /api/providers/keys` | Показать список masked provider-key'ов, добавить/активировать один или удалить один | 400 invalid input; 404 provider/key missing |
 | `PUT /api/providers/keys/active` | Выбрать активный ключ провайдера | 400 invalid input; 404 provider/key missing |
 | `PUT /api/providers/keys/alias` | Задать или очистить alias provider-key'а | 400 invalid input; 404 provider/key missing |
@@ -283,6 +284,10 @@ Endpoint'ы storage cleanup могут перемещать или навсег�
 
 Ответы со списками credential'ов намеренно маскируются. OAuth access-token'ы и полные API-key'и
 провайдеров клиентам дашборда не возвращаются.
+
+#### Anthropic OAuth: `pause` / `resume`
+
+Команда CLI приостанавливает или возобновляет аккаунт Anthropic OAuth по id или уникальному alias: сначала точное совпадение, затем без учёта регистра. CLI и дашборд используют `PUT /api/oauth/accounts/pause` с `{ provider: "anthropic", accountId, paused }`. Поле `paused` сохраняется в аккаунте и возвращается через `GET /api/oauth/accounts`. Пауза действует и при отключённом проактивном пуле: аккаунт исключается из выбора, привязок сессий и кандидатов после 429. Если приостановлены все аккаунты, запросы получают 403 до возобновления одного из них. Уже отправленные запросы продолжаются; учётные данные и состояние здоровья сохраняются. Пауза переживает перезапуск и повторный вход, но удаляется вместе с аккаунтом. Индивидуальные пороги в эту операцию не входят.
 
 ### Провайдеры
 
@@ -397,3 +402,13 @@ fail closed, пока аккаунт отсутствует, а при повт�
 ## Удалённые сессии и ротация ключей данных
 
 `POST /api/keys/rotate {id}` начинает десятиминутный overlap и один раз возвращает новый секрет. `POST /api/keys/rotate/commit {id,rotationId}` подтверждает, `DELETE /api/keys/rotate {id,rotationId}` отменяет. Требуется management auth; ключ данных не подходит. `POST /api/session/logout` требует текущую `gui-session`, совпадающий Origin и CSRF. Admin token получает 403 и не может создать consent session.
+
+## Порог использования аккаунта Anthropic
+
+`PUT /api/oauth/accounts/auto-switch`
+
+Только Anthropic OAuth. `{ provider: "anthropic", accountId, threshold }`: целое 0–100 или null для наследования; отсутствие поля — ошибка. Сохраняется при перезапуске и удаляется вместе с аккаунтом.
+
+DTO содержит `autoSwitchThresholdOverride` (целое/null), `autoSwitchThreshold` (порог пула) и `effectiveAutoSwitchThreshold`. 0 отключает только переключение по использованию; пауза и восстановление после 429 сохраняются.
+
+HTTP: 400 invalid/unsupported; 404 missing account; `oauth_mutation_busy` on lock contention.

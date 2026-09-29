@@ -1138,6 +1138,48 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     note: "EU-hosted AI gateway: one OpenAI-compatible endpoint and one key in front of 30+ providers. Bare model ids are pools (claude-sonnet-4-6, gpt-5.5) and Opper picks the route per request; vendor/model ids (anthropic/claude-sonnet-4-6) pin one provider. The catalogue is discovered live from /v3/compat/models with your key; the public list is at opper.ai/models. Token rates are the model providers' rates with no markup; Opper charges a 3% fee when you buy credits.",
   },
   {
+    // Public contract checked 2026-09-29: https://docs.tokenlab.sh/api-reference/models/list-models
+    // A supplied key is validated and scopes the catalog; anonymous discovery is also public.
+    id: "tokenlab",
+    label: "TokenLab",
+    adapter: "openai-chat",
+    baseUrl: "https://api.tokenlab.sh/v1",
+    authKind: "key",
+    dashboardUrl: "https://tokenlab.sh/dashboard/api?tab=keys",
+    // Standard sponsor under SPONSORS.md (agreement dated 2026-09-29). Pins the row in the
+    // picker and adds the chip; nothing about routing, discovery or defaults changes.
+    sponsor: { tier: "standard", url: "https://tokenlab.sh/r/OPENCODEX" },
+    liveModels: true,
+    preserveCustomDestination: true,
+    defaultModel: "gpt-5.6-terra",
+    models: ["gpt-5.6-terra"],
+    modelContextWindows: { "gpt-5.6-terra": 1_050_000 },
+    modelMaxOutputTokens: { "gpt-5.6-terra": 128_000 },
+    modelInputModalities: { "gpt-5.6-terra": ["text", "image"] },
+    // Per-model wires from `tokenlab.accepted_request_formats` (GET /v1/models/{id}, 2026-09-30).
+    // The provider stays on Chat, the released and end-to-end verified path, and every model
+    // accepts it. Models that also declare Responses use it for Codex (Responses inbound) only,
+    // so Chat and Anthropic clients skip a translation hop; an explicit modelAdapters entry wins.
+    // Claude ids ride Anthropic Messages through the endpoint-bound pin in src/types/wire.ts.
+    // gemini-3.8-flash declares Chat + Gemini native and stays on Chat. No delivery-policy
+    // header is sent: the API key's own policy stays authoritative.
+    modelWireDefaults: Object.fromEntries([
+      "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "grok-4.7",
+      "deepseek-v4.1-flash", "deepseek-v4-pro", "kimi-k3", "glm-5.3",
+    ].map(id => [id, { wire: "openai-responses", inbound: ["responses"] }])),
+    modelDiscovery: {
+      path: "models",
+      query: { category: "chat" },
+      filter: {
+        allOf: [
+          { path: ["tokenlab", "category"], equalsAny: ["chat"] },
+          { path: ["tokenlab", "capabilities"], containsAny: ["tool-use"] },
+        ],
+      },
+    },
+    note: "OpenAI-compatible API gateway. Create a workspace API key at tokenlab.sh. Live discovery lists tool-capable chat models available to your key and delivery policy.",
+  },
+  {
     id: "opencode-free",
     label: "OpenCode Free",
     adapter: "openai-chat",
@@ -1311,7 +1353,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     featured: false,
     dashboardUrl: "https://github.com/settings/copilot",
     liveModels: true,
-    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-luna"],
+    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"],
     defaultModel: "gpt-4o",
     // Copilot fronts a mixed-wire catalog: these models reject /chat/completions for
     // real Codex-agent traffic (function tools + reasoning), so every inbound wire
@@ -1331,6 +1373,8 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
       // 260923 preemptive: GPT-6 Sol/Luna ride Responses like every GPT-5.6/6 row above.
       "gpt-6-sol": "openai-responses",
       "gpt-6-luna": "openai-responses",
+      // GPT-6.1 Sol: GA in Copilot 2026-09-29 (github.blog changelog); rides Responses like GPT-6 Sol.
+      "gpt-6.1-sol": "openai-responses",
       "grok-4.5": "openai-responses",
       "grok-4.6": "openai-responses",
       "mai-code-1.1-flash": "openai-responses",
@@ -1402,7 +1446,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     dashboardUrl: "https://www.codebuddy.ai/profile/keys",
     defaultModel: "default-model",
     models: CODEBUDDY_GLOBAL_MODELS,
-    liveModels: false,
+    liveModels: true,
     modelContextWindows: CODEBUDDY_GLOBAL_MODEL_CONTEXT_WINDOWS,
     modelMaxOutputTokens: CODEBUDDY_GLOBAL_MODEL_MAX_OUTPUT_TOKENS,
     defaultMaxOutputTokens: 32_000,
@@ -1415,7 +1459,9 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     // Official CodeBuddy Code CLI provider, CHINA / `internal` environment. Identical adapter and
     // binary as `codebuddy`; the region is fixed by the profile's CODEBUDDY_INTERNET_ENVIRONMENT
     // and this canonical baseUrl. CN key: https://copilot.tencent.com/profile/keys. The CN model
-    // roster differs from Global (see codebuddy-models.ts) and is seeded separately (§八).
+    // roster differs from Global and is discovered live from the key-authenticated product
+    // configuration roster; the seeded list in codebuddy-models.ts is only the degraded
+    // fallback (§八).
     id: "codebuddy-cn",
     label: "CodeBuddy (CN)",
     adapter: "codebuddy",
@@ -1426,7 +1472,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     dashboardUrl: "https://copilot.tencent.com/profile/keys",
     defaultModel: "default",
     models: CODEBUDDY_CN_MODELS,
-    liveModels: false,
+    liveModels: true,
     modelContextWindows: CODEBUDDY_CN_MODEL_CONTEXT_WINDOWS,
     modelMaxOutputTokens: CODEBUDDY_CN_MODEL_MAX_OUTPUT_TOKENS,
     defaultMaxOutputTokens: 32_000,

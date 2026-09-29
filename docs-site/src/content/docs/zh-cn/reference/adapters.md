@@ -109,6 +109,7 @@ interface ProviderAdapter {
 - **Extended thinking 计算：** Anthropic 要求 `max_tokens > thinking.budget_tokens`。adapter 把
   reasoning effort 映射成 budget（minimal 1024 … max 32000），再计算留有输出余量的安全
   `max_tokens`；启用 thinking 后会**移除 `temperature`/`top_p`**，因为 Anthropic 禁止此组合。
+- **自适应 thinking 显示：** 自适应 thinking 模型（Opus 4.7+、Sonnet 5、Fable）会收到 `thinking.display: "summarized"`，因此长时间思考会以 reasoning 增量送达 Chat 和 Responses 客户端，而不是几分钟的 heartbeat。隐藏推理摘要的请求（`reasoning.summary: "none"`）保持提供方默认值。
 - 始终发送 `anthropic-version: 2023-06-01`。流式输出
   `content_block_delta`（`text_delta`、`thinking_delta`、`input_json_delta`）。
 
@@ -132,6 +133,8 @@ interface ProviderAdapter {
 token。
 
 - 构建 Kiro `conversationState`，映射 Codex 工具和工具结果，并发送 Kiro wire 支持的 image block。
+- 每条消息最多保留 20 张内联图，整次请求最多 100 张；超限时先省略最早的历史图片，并在受影响的消息中留下文字标记，当前轮次的新图片继续保留。
+- 内联图片的 data URL 缺少逗号或图片字节时，会省略该图片，并在对应用户消息或工具结果中留下文字标记；远端图片引用使用另一种标记，两者都不会回显 URL。
 - 解码 `application/vnd.amazon.eventstream`，重建 text/thinking/tool event，检测被截断的工具
   JSON。上游不返回 token 数量，因此 usage 采用估算值。
 - 经 `fetchResponse` 负责有界重试和分类/脱敏后的错误；非流式 parser 会排空同一 event stream，

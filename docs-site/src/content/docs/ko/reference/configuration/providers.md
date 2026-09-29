@@ -80,7 +80,7 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` 중 하나이며, `azure`는 별칭입니다. |
 | `baseUrl` | `string` | 상위 API 기본 URL입니다. 대부분의 내장 고정 엔드포인트는 불일치를 무시합니다. 충돌 안전 키 프리셋은 같은 이름의 이전 사용자 지정 목적지를 보존합니다. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 업스트림 사용량, 과금, rate-limit 지표와 별개인 선택적 클라이언트 측 아웃바운드 요청 시작 속도 조절입니다. Provider 제한은 모든 모델에 적용되고 `models` 항목은 정확한 업스트림 모델 ID와 일치하며 지연을 더 늘릴 때만 적용됩니다. 큐 대기는 응답 헤더 타임아웃을 소모하지 않습니다. HTTP, Responses WebSocket, 명시적 어댑터 `fetchResponse`/`runTurn` 전송을 포함합니다. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, maxConcurrentRequests?, models? }` | 업스트림 사용량, 과금, rate-limit 지표와 별개인 선택적 클라이언트 측 아웃바운드 요청 시작 속도 조절입니다. `maxConcurrentRequests`는 진행 중 요청 수를 제한하는 양의 정수이며 provider 또는 model 규칙에서 단독으로 사용할 수 있습니다. Provider 제한은 모든 모델에 적용되고 `models` 항목은 정확한 업스트림 모델 ID와 일치하며 지연을 늘리거나 동시성을 줄일 수 있습니다. 큐 대기는 응답 헤더 타임아웃을 소모하지 않습니다. HTTP 및 명시적 어댑터 `fetchResponse`/`runTurn` 전송을 포함합니다. 동시성 제한이 있으면 표준 Responses WebSocket 턴은 응답 본문의 완료·오류·취소 때 점유 슬롯을 해제할 수 있도록 HTTP/SSE를 사용합니다. Cursor를 포함한 `runTurn` 어댑터에서는 물리적 전송 수가 아니라 진행 중인 턴 수를 제한합니다. 같은 턴의 RunSSE와 BidiAppend는 겹칠 수 있지만 다른 턴은 대기합니다. 후속 전송에도 시작 간격은 적용됩니다. |
 | `responsesPath?` | `string` | 키 인증 `openai-responses` 요청의 상대 리소스 경로입니다. 반드시 `/`로 시작해야 하며 스킴, query, fragment를 포함하면 안 됩니다. |
 | `chatCompletionsPath?` | `string` | `openai-chat` 요청의 상대 리소스 경로로, `responsesPath`와 동일한 형식 규칙이 적용되는 대응 항목입니다. 하나의 업스트림이 Chat Completions와 Responses를 서로 다른 접두사로 제공할 때 필요합니다. 모델별 wire override는 어댑터만 바꾸고 `baseUrl`은 그대로 두므로, 이 설정이 없으면 옵트인된 Chat 요청이 Responses base로 전송됩니다. Z.AI가 제공되는 예시입니다. |
 | `upstreamWebsocket?` | `boolean` | `openai-responses` 요청에 대한 업스트림 Responses WebSocket 전송을 선택적으로 활성화합니다(기본값 `false`). 퍼스트파티 `https://api.openai.com/v1` 업스트림에서만 적용되며, 사용자 지정 공급자 엔드포인트는 항상 제한된 HTTP/SSE를 사용합니다. Bun은 전체 메시지를 할당하기 전에는 수신 WebSocket 메시지 크기 제한을 적용할 수 없기 때문입니다. 정식 ChatGPT `openai` 공급자에서는 생략하면 대상 턴에서 업스트림 WebSocket을 사용하고, `false`는 스트리밍 턴을 HTTP/SSE로 전송하며, `true`는 거부됩니다. `false`이면 네이티브 턴 중 스티어링과 주입을 사용할 수 없습니다. 이 필드는 클라이언트 측 `websockets` 설정과 독립적이며 엔드포인트와 자격 증명을 변경하지 않습니다. HTTP 기본 URL은 SSE를 유지하고, Responses가 아닌 경로와 `openai-chat` 요청은 HTTP를 사용합니다. |
@@ -160,17 +160,17 @@ API 키 공급자는 리터럴 키나 환경 참조를 둘 수 있습니다. OAu
 
 ### 프로바이더 저장이 유지하는 것
 
-기존 프로바이더 이름으로 `POST /api/providers`를 보내면 저장된 행이 요청으로 만든 행으로 바뀝니다. 대시보드의 추가/편집 폼은 모든 필드를 보낼 수 없으므로, 요청이 빠뜨린 저장 필드 일부는 저장할 때 이어서 유지됩니다. 그중 다섯 가지는 특정 업스트림의 동작을 기록한 설정입니다: `preserveReasoningContentModels`, `requiresReasoningPlaceholderModels`, `foldDeveloperRoleToSystem`, `reasoningWireFormat`, `omitReasoningEffortWithToolsModels`.
+기존 프로바이더 이름으로 `POST /api/providers`를 보내면 저장된 행이 요청으로 만든 행으로 바뀝니다. 대시보드의 추가/편집 폼은 모든 필드를 보낼 수 없으므로, 요청이 빠뜨린 저장 필드 일부는 저장할 때 이어서 유지됩니다. 그중 여덟 가지는 특정 업스트림의 동작을 기록한 설정입니다: `preserveReasoningContentModels`, `requiresReasoningPlaceholderModels`, `foldDeveloperRoleToSystem`, `reasoningWireFormat`, `omitReasoningEffortWithToolsModels`, `retryOn429`, `transientRetryOn5xx`, `retryOnReset`.
 
-| 저장 | 다섯 가지 설정 | 저장된 `apiKeyPool` |
+| 저장 | 여덟 가지 설정 | 저장된 `apiKeyPool` |
 | --- | --- | --- |
 | 같은 목적지, 필드 생략 | 저장된 값 유지(명시적인 `[]`나 `false` 포함) | 유지 |
 | 새 목적지, 필드 생략 | 유지하지 않음. 새 목적지의 레지스트리 기본값이 적용될 수 있음 | 유지하지 않음 |
 | 요청에 필드를 보냄 | 요청의 값 | 요청의 값 |
 
-목적지는 어댑터, 기본 URL(스킴과 호스트는 대소문자를 구분하지 않고, 끝의 슬래시는 무시), 그리고 요청이 지정한 경우 인증 모드입니다. 프로바이더를 다른 목적지로 옮기면 이전 업스트림을 설명하는 다섯 가지 설정과, 그 업스트림용으로 발급된 키 풀을 가져가지 않습니다. 저장은 이전 행의 나머지를 새 행에 병합하지 않습니다.
+목적지는 어댑터, 기본 URL(스킴과 호스트는 대소문자를 구분하지 않고, 끝의 슬래시는 무시), 그리고 요청이 지정한 경우 인증 모드입니다. 프로바이더를 다른 목적지로 옮기면 이전 업스트림을 설명하는 여덟 가지 설정과, 그 업스트림용으로 발급된 키 풀을 가져가지 않습니다. 저장은 이전 행의 나머지를 새 행에 병합하지 않습니다.
 
-`PATCH /api/providers?name=<provider>`는 지정한 필드만 바꾸고, 목적지와 상관없이 나머지 저장 필드는 모두 유지합니다. 다섯 가지 설정을 모두 받고, `null`로 지웁니다. 두 추론 목록에서 빈 배열은 삭제되지 않고 명시적인 옵트아웃으로 저장됩니다.
+`PATCH /api/providers?name=<provider>`는 지정한 필드만 바꾸고, 목적지와 상관없이 나머지 저장 필드는 모두 유지합니다. 여덟 가지 설정을 모두 받고, `null`로 지웁니다. 두 추론 목록에서 빈 배열은 삭제되지 않고 명시적인 옵트아웃으로 저장됩니다.
 
 ## 공급자 진단용 외부 요청 안전성
 
@@ -499,3 +499,7 @@ source 재정의가 0이면 꺼지고, 전역 0이어도 source에 양수 재정
 후보의 양수 유효 임계값은 사용량 상한이며, 후보 0은 그 선호만 끕니다. 후보 0도 알 수 없거나
 소진된 사용량을 허용하지 않습니다. 판단에 쓰는 각 quota window는 이 프로세스에서 최근 관측되어야
 하며, credit-only 갱신이나 다른 window의 부분 갱신은 오래된 사용량을 새 관측으로 만들지 않습니다.
+
+### `anthropicAccountPool.routes`
+
+`anthropicAccountPool.routes`는 모델을 저장된 Anthropic OAuth 계정 ID에 연결합니다. 풀이 활성화되면 대소문자를 구분하는 `match` 글롭의 첫 일치가 최초 선택과 429 재시도를 제한합니다. `fallback: true`는 해당 경로에 적격 계정이 없을 때만 일반 풀로 확장합니다.

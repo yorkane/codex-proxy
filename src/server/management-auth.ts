@@ -73,6 +73,7 @@ import {
   type GuiSessionRequestContext,
 } from "./gui-session";
 import { hasLocalDesktopSnapshotCapability } from "./local-desktop-snapshot-auth";
+import { hasLocalAccountSwitchCapability } from "./local-account-switch-auth";
 export type { GuiSessionBootstrap, GuiSessionRequestContext } from "./gui-session";
 
 const LOCAL_READ_REPLAY_LIMIT = 256;
@@ -338,6 +339,7 @@ export type ManagementPrincipal =
   | "gui-pair-capability"
   | "local-read-capability"
   | "local-desktop-snapshot-capability"
+  | "local-account-switch-capability"
   | "local-provider-reload-capability"
   | "local-aside-sync-capability"
   | "system-restart-capability";
@@ -565,6 +567,7 @@ function resolveManagementAdmission(
   else if (hasLocalAsideSyncCapability(req, local)) principal = "local-aside-sync-capability";
   else if (hasLocalProviderReloadCapability(req, local)) principal = "local-provider-reload-capability";
   else if (hasLocalDesktopSnapshotCapability(req, local)) principal = "local-desktop-snapshot-capability";
+  else if (hasLocalAccountSwitchCapability(req, local)) principal = "local-account-switch-capability";
   else if (hasLocalReadCapability(req, local)) principal = "local-read-capability";
   else if (hasGuiPairCapability(req, local)) principal = "gui-pair-capability";
   else if (state.available) {

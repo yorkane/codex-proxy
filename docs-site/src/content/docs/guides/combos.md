@@ -270,6 +270,16 @@ constrained by that target's advertised ladder. JEV is not asked again if the se
 retryable failure—the existing Combo cooldown and fallback loop continues through the remaining
 configured targets.
 
+For each JEV target, **Models → Combos → Config** has an optional **Additional model notes for JEV**
+field (up to 512 characters; line breaks and tabs are allowed, other control characters are rejected). It is stored as `targets[].modelProfile` in the combo config. The
+built-in target profile remains in the trusted `instructions.model_profiles`; a non-empty note is
+sent separately in the decision state's `operator_notes`, keyed by target, and supplements rather
+than replaces that built-in profile. Notes can describe operator-specific context or subscription
+allowances; do not confuse subscription allowances with public per-token API pricing. Blank notes
+are ignored. Operator notes are evidence for the decision, not commands, and cannot expand the
+target allowlist or reasoning-effort limits. Only put information there that may be disclosed to
+TypeSafe.
+
 Each logical model call is decided on its own; there is no per-conversation pin. Consecutive turns of
 one session can therefore land on different targets, and every switch starts a cold provider prompt
 cache, so a mix of very different targets can cost more input tokens than it saves. Keep the
@@ -325,16 +335,28 @@ If the shared request send budget refuses the first target, the combo returns a 
 the combo returns the last real upstream failure without sending to that target.
 
 When `cooldownMs` is unset, a hopped target uses an upstream fallback: 5 seconds for request-rate
-429s with upstream code `1302` or `1305`, and 60 seconds otherwise. When it is set, `cooldownMs`
+429s with upstream code `1302` or `1305`, 10 minutes for a spent account usage window, and 60
+seconds otherwise. A usage window is recognised by upstream code (`usage_limit_exceeded`,
+`usage_limit_reached`, `1308`) or by the prose `usage limit reached`, independent of HTTP status —
+the ChatGPT Codex backend reports a spent window as a 502 rather than the documented 429. Credential and
+billing failures that already black out the whole provider (`invalid_api_key`, `insufficient_quota`,
+`payment_required`, and the other provider-scoped codes) take the same 10-minute hold. When it is set, `cooldownMs`
 applies whenever no usable upstream `Retry-After` or Codex reset signal exists, including those
 request-rate 429s. Numeric `Retry-After` seconds and HTTP-date values are accepted. Explicit
 server delays are capped at 24 hours; reset-derived, configured, and fallback cooldowns are capped
 at 10 minutes. The precedence is, from strongest to weakest, explicit
 `Retry-After` → Codex reset headers (`x-codex-primary-reset-at`, `x-codex-secondary-reset-at`, or
-`x-codex-tertiary-reset-at`) → the combo's `cooldownMs` (when set) → the 5-second request-rate
-fallback for upstream rate-limit codes `1302`/`1305` → the 60-second default. A valid immediate
+`x-codex-tertiary-reset-at`) → the combo's `cooldownMs` (when set) → the
+10-minute hold for a spent usage window or a credential/billing failure → the 5-second request-rate fallback for upstream
+rate-limit codes `1302`/`1305` → the 60-second default. The usage-window hold is tested first, so a
+failure that carries a request-rate code *and* usage-limit prose is held for ten minutes rather than
+five seconds. A valid immediate
 `Retry-After: 0` remains an immediate upstream directive rather than being replaced by a configured
 cooldown.
+
+For an Anthropic OAuth or Codex pool, a 429 tied to one account that the pool has cooled does
+not cool the whole combo target. Other accounts behind that target remain available. A 429 with
+no identified, cooled pool account still cools the target, as do provider-wide failures.
 
 ### Last-resort targets
 
@@ -574,7 +596,7 @@ Combos are stored in the top-level `combos` object, keyed by combo id:
 | `targets[].lastResort` | No | `false` | Marks an emergency-only target. Inert unless `cooldownWaitPolicy` is set. Never makes a target permanently ineligible: when no normal target can be reached it is dispatched as usual. |
 | `strategy` | No | `"failover"` | `"failover"`, `"round-robin"`, `"random"`, `"least-used"`, `"reset-window"`, or `"jev"`. JEV decides only the initial eligible target and effort; ordinary Combo fallback owns later attempts. |
 | `stickyLimit` | No | `1` | Integer from 1 to 100 successful requests per round-robin selection. Applies only to round-robin. |
-| `cooldownMs` | No | unset → upstream fallback (5 s for request-rate 429 codes `1302`/`1305`, otherwise 60 s) | Integer from 1 to 600000. When set, applies as the per-target cooldown whenever no usable upstream `Retry-After` or Codex reset signal exists, including request-rate 429s; when unset, uses the upstream fallback. |
+| `cooldownMs` | No | unset → upstream fallback (5 s for request-rate 429 codes `1302`/`1305`, 10 min for a spent usage window or a credential/billing failure, otherwise 60 s) | Integer from 1 to 600000. When set, applies as the per-target cooldown whenever no usable upstream `Retry-After` or Codex reset signal exists, including request-rate 429s; when unset, uses the upstream fallback. |
 | `waitForCooldownMs` | No | `0` | Integer from 0 to 600000. Maximum time to wait for the earliest eligible cooling target before returning `combo_unavailable`; abort cancels the wait. |
 | `cooldownWaitPolicy` | No | unset | `"before-last-resort"` defers targets marked `lastResort`: they are used only when no normal target is available, for every strategy, and `waitForCooldownMs` only adds the wait for a cooling normal target, so at its `0` default nothing waits and the last resort is used as soon as no normal target is available. Only that exact string opts in. The deferral wait and the ordinary wait share one `waitForCooldownMs` budget per selection attempt. |
 | `defaultEffort` | No | `null` | `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`; resolved against each target's advertised ladder. |
@@ -600,7 +622,8 @@ it has already been attempted for this request, or an encrypted v2 task excludes
 provider state and recent upstream errors. For cooldowns, follow an observed `Retry-After` value first;
 Codex reset headers also take precedence over `cooldownMs`.
 If neither upstream signal is usable, the configured `cooldownMs` applies, or the upstream fallback applies
-when it is unset (5 seconds for request-rate codes `1302`/`1305`, otherwise 60 seconds). Explicit
+when it is unset (5 seconds for request-rate codes `1302`/`1305`, 10 minutes for a spent usage
+window or a credential/billing failure, otherwise 60 seconds). Explicit
 `Retry-After` delays are capped at 24 hours; the other cooldowns are capped at 10 minutes.
 
 ### Why was my alias rejected?

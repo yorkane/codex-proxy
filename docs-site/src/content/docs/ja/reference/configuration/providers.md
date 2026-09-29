@@ -80,7 +80,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`、`openai-responses`、`anthropic`、`google`、`kiro`、`cursor`、`ollama-native`、`azure-openai` (または別名 `azure`) のいずれか。 |
 | `baseUrl` | `string` |アップストリーム API のベース URL。ほとんどの組み込み固定エンドポイントは不一致を無視します。衝突安全キー プリセットは、古い同じ名前のカスタム宛先を保持します。 |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 上流の使用量、請求、レート制限表示とは別の、クライアント側の送信開始間隔調整です。プロバイダー制限は全モデルに適用され、`models` は上流の正確なモデル ID に一致し、遅延を増やす場合のみ有効です。キュー待機は応答ヘッダーのタイムアウトを消費しません。HTTP、Responses WebSocket、明示的なアダプターの `fetchResponse`/`runTurn` 送信を対象にします。 |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, maxConcurrentRequests?, models? }` | 上流の使用量、請求、レート制限表示とは別の、クライアント側の送信開始間隔調整です。`maxConcurrentRequests` は実行中リクエスト数を制限する正の整数で、プロバイダー規則またはモデル規則だけに設定できます。プロバイダー制限は全モデルに適用され、`models` は上流の正確なモデル ID に一致し、遅延を増やすか同時実行数を減らします。キュー待機は応答ヘッダーのタイムアウトを消費しません。HTTP と明示的なアダプターの `fetchResponse`/`runTurn` 送信を対象にします。同時実行数の上限がある場合、標準の Responses WebSocket ターンは応答本文の完了・エラー・キャンセル時に枠を解放できるよう HTTP/SSE を使います。 Cursor を含む `runTurn` アダプターでは、上限は物理送信数ではなく進行中のターン数を数えます。同じターンの RunSSE と BidiAppend は重なり得ますが、別のターンは待機します。後続送信にも開始間隔は適用されます。 |
 | `responsesPath?` | `string` |キー認証 `openai-responses` リクエストの相対リソース パス。 `/` で始まり、スキーム、クエリ、またはフラグメントが含まれていない必要があります。 |
 | `chatCompletionsPath?` | `string` | `openai-chat` リクエストの相対リソース パス。 `responsesPath` の対となる設定で、同じ形式ルールが適用されます。1つのアップストリームが Chat Completions と Responses を異なるプレフィックスで提供する場合に必要です。モデルごとの wire override はアダプターのみを変更し `baseUrl` は変更しないため、この設定がないと有効化された Chat リクエストが Responses ベースへ送信されます。同梱例は Z.AI です。 |
 | `upstreamWebsocket?` | `boolean` | `openai-responses` リクエストで使用するアップストリーム Responses WebSocket トランスポート（既定値は無効）。ファーストパーティの `https://api.openai.com/v1` アップストリームでのみ有効です。カスタムプロバイダーのエンドポイントは常に制限付き HTTP/SSE を使用します。Bun はメッセージ全体を確保する前に受信 WebSocket メッセージのサイズ上限を適用できないためです。正規の ChatGPT `openai` プロバイダーでは、省略すると対象となるターンでアップストリーム WebSocket を使用し、`false` はストリーミングのターンを HTTP/SSE で送信し、`true` は拒否されます。`false` の間はネイティブのターン途中のステアリングとインジェクションを利用できません。このフィールドはクライアント側の `websockets` 設定とは独立しており、エンドポイントと認証情報のどちらも変更しません。HTTP のベース URL は SSE のままとなり、Responses 以外のパスと `openai-chat` リクエストは HTTP を使用します。 |
@@ -160,17 +160,17 @@ API キープロバイダーは、リテラルキーまたは環境参照を保�
 
 ### プロバイダーの保存で保持されるもの
 
-既存のプロバイダー名で `POST /api/providers` を送ると、保存済みの行はリクエストから組み立てた行で置き換えられます。ダッシュボードの追加・編集フォームはすべてのフィールドを送れないため、リクエストが省略した保存済みフィールドの一部は保存時に引き継がれます。そのうち次の 5 つは、特定のアップストリームの挙動を記録するものです：`preserveReasoningContentModels`, `requiresReasoningPlaceholderModels`, `foldDeveloperRoleToSystem`, `reasoningWireFormat`, `omitReasoningEffortWithToolsModels`。
+既存のプロバイダー名で `POST /api/providers` を送ると、保存済みの行はリクエストから組み立てた行で置き換えられます。ダッシュボードの追加・編集フォームはすべてのフィールドを送れないため、リクエストが省略した保存済みフィールドの一部は保存時に引き継がれます。そのうち次の 8 つは、特定のアップストリームの挙動を記録するものです：`preserveReasoningContentModels`, `requiresReasoningPlaceholderModels`, `foldDeveloperRoleToSystem`, `reasoningWireFormat`, `omitReasoningEffortWithToolsModels`, `retryOn429`, `transientRetryOn5xx`, `retryOnReset`。
 
-| 保存 | 5 つの設定 | 保存済みの `apiKeyPool` |
+| 保存 | 8 つの設定 | 保存済みの `apiKeyPool` |
 | --- | --- | --- |
 | 同じ宛先、フィールド省略 | 保存済みの値を保持（明示的な `[]` や `false` を含む） | 保持 |
 | 新しい宛先、フィールド省略 | 保持しない。新しい宛先のレジストリ既定値が適用されることがあります | 保持しない |
 | リクエストでフィールドを送信 | リクエストの値 | リクエストの値 |
 
-宛先とは、アダプター、ベース URL（スキームとホストは大文字小文字を区別せず、末尾のスラッシュは無視）、そしてリクエストが指定した場合は認証モードです。別の宛先へ移すと、以前のアップストリームを表す 5 つの設定と、そのために発行されたキーのプールは引き継がれません。保存時に古い行の残りを新しい行へマージすることはありません。
+宛先とは、アダプター、ベース URL（スキームとホストは大文字小文字を区別せず、末尾のスラッシュは無視）、そしてリクエストが指定した場合は認証モードです。別の宛先へ移すと、以前のアップストリームを表す 8 つの設定と、そのために発行されたキーのプールは引き継がれません。保存時に古い行の残りを新しい行へマージすることはありません。
 
-`PATCH /api/providers?name=<provider>` は指定したフィールドだけを変更し、宛先に関係なくほかの保存済みフィールドはすべて保持します。5 つの設定をすべて受け付け、`null` で消去します。2 つの推論リストでは、空の配列は削除されず明示的なオプトアウトとして保存されます。
+`PATCH /api/providers?name=<provider>` は指定したフィールドだけを変更し、宛先に関係なくほかの保存済みフィールドはすべて保持します。8 つの設定をすべて受け付け、`null` で消去します。2 つの推論リストでは、空の配列は削除されず明示的なオプトアウトとして保存されます。
 
 ## プロバイダーによるアウトバウンドの安全性診断
 
@@ -483,3 +483,7 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
   "visionSidecar": { "enabled": true }
 }
 ```
+
+### `anthropicAccountPool.routes`
+
+`anthropicAccountPool.routes` は Anthropic OAuth の保存済みアカウント ID をモデルに割り当てます。有効なプールでは、大文字小文字を区別する `match` グロブの最初の一致が初回選択と 429 再試行を制限します。`fallback: true` はルート内に適格なアカウントがない場合だけ通常のプールを使います。

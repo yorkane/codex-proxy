@@ -111,6 +111,8 @@ export const INTEGRATION_TAB_HASHES = [
   "integrations/raycast",
   "integrations/omo",
   "integrations/cline",
+  "integrations/kilo",
+  "integrations/droid",
 ] as const;
 
 /**
@@ -123,6 +125,7 @@ export const QUERY_HASH_PATHS: readonly string[] = ["providers", "models/compati
 export function hashBelongsToPage(rawHash: string, page: Page): boolean {
   return rawHash === page
     || (page === "logs" && rawHash === "logs/debug")
+    || (page === "usage" && rawHash === "usage/companion")
     || (page === "codex-set" && rawHash === "codex-set/prompt")
     || (page === "models" && (
       (MODELS_TAB_HASHES as readonly string[]).includes(rawHash)

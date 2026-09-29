@@ -140,8 +140,9 @@ Picker モードは 1P モードの一部です。macOS で 1P を選ぶとデ�
 `claudeCode.intercept.picker: false` を設定した場合は無効です。1P の Desktop の Code タブにある
 モデルピッカーを書き換え、利用できる opencodex モデルを名前付きで表示します。初回の有効化時は、
 macOS がログインキーチェーン内のローカル証明書認証局を信頼するよう求めることがあります。この認証局の
-制約は `claude.ai` とそのサブドメインに限られ、このダイアログはこのローカル CA に対する一度だけの
-信頼操作です。
+制約は `claude.ai` とそのサブドメインに限られます。署名鍵は実行中の OpenCodex プロセス内にだけ存在する
+ため、OpenCodex を再起動するたびに新しい認証局が発行され、macOS が再び信頼を求めます。再起動のたびに
+プロンプトを承認するか、あとから `ocx claude desktop picker trust` を実行してください。
 
 Picker モードが有効な間、Claude Desktop のネットワークは OpenCodex を経由します。OpenCodex が停止
 すると、Picker モードをオフにするか Desktop を完全に再起動するまで Desktop はオフラインになります。
@@ -160,7 +161,7 @@ Anthropic モデル ID なので、代わりにピッカーの行を opencodex �
 
 ```bash
 ocx claude desktop bind claude-sonnet-4-6 xai/grok-4.7
-ocx claude desktop bind claude-opus-4-6 native/gpt-6-sol
+ocx claude desktop bind claude-opus-4-6 native/gpt-6.1-sol
 ocx claude desktop unbind claude-opus-4-6
 ```
 
@@ -243,10 +244,10 @@ Claude Code 2.1.129 以降は `GET /v1/models?limit=1000` でゲートウェイ�
 | 画面 | 形式 | 例 |
 | --- | --- | --- |
 | Claude Code CLI | `ocx-claude-<provider>--<model>` (plain) または `ocx-claude2-…` (escaped) | `ocx-claude-native--gpt-5.6-sol` |
-| Claude Desktop 3P | `claude-opus-4-8-<code>` (3 桁の base36 ハッシュ) | `claude-opus-4-8-ncb` |
+| Claude Desktop 3P | `claude-opus-4-8-p<code>` (3 桁の base36 プロファイルスロット) | `claude-opus-4-8-p01q` |
 
 プロキシはリクエストごとに系列を選びます。`?ids=cli` または `?ids=desktop` が優先し、指定しないと
-`claude-code/*` user-agent には読みやすい CLI 形式を、他のクライアントには Desktop ハッシュを
+`claude-code/*` user-agent には読みやすい CLI 形式を、他のクライアントには Desktop コードを
 提供します。両系列は継続してデコードできるため、どちらの形式でも `settings.json` に保存したモデルは
 引き続き動作します。古い設定の `claude-ocx-<provider>--<model>` / `claude-ocx2-<provider>--<model>` も
 引き続き解決されますが、保存済みの旧 ID はルーティングされても Claude Code 側では 200k として計算されます。

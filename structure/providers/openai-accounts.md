@@ -65,10 +65,11 @@ Native Spark membership and its model-specific request/tool exceptions are remov
   a request goes upstream as `gpt-6-astra-minor`.
 
 - The flagship roster that lists unconditionally is `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
-  `gpt-6-astra`, `gpt-6-sol` and `gpt-6-luna` (Sol and Luna added 2026-09-23 from a live roster
-  probe; https://openai.com/index/introducing-gpt-6-sol-and-luna/). None of them is gated, and all
-  six are native-main drain sentinels. The confirmed-denial ordering below is still scoped to the
-  first four (`ENTITLEMENT_PREFERRED_NATIVE_OPENAI_MODELS`); Sol and Luna do not feed it yet.
+  `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` and `gpt-6.1-sol` (Sol and Luna added 2026-09-23 from a
+  live roster probe; https://openai.com/index/introducing-gpt-6-sol-and-luna/; 6.1 Sol added
+  2026-09-30 from openai/codex models.json). None of them is gated, and all seven are native-main
+  drain sentinels. The confirmed-denial ordering below is still scoped to the first four
+  (`ENTITLEMENT_PREFERRED_NATIVE_OPENAI_MODELS`); the GPT-6 Sol rows and Luna do not feed it yet.
 
 - The always-visible flagships (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-6-astra`)
   use the same rosters with the opposite polarity, and are never gated on them. Only a CONFIRMED
@@ -149,6 +150,24 @@ switch accounts, reset threads, or mutate affinity.
 
 > Decision record: [ADR-0089](../decisions/ADR-0089-process-local-affinity-diagnostics.md)
 
+## Idle-window steering
+
+`codexPool.startIdleWindows` is an optional boolean that defaults to `false`. When it is `true`,
+`src/codex/routing/idle-window.ts` may steer a new unbound real request after conversation and
+family affinity have been checked. An explicit account pin and manual account preference take
+precedence. Independent model quota scopes are excluded. The selection does not move the shared
+active cursor, and normal strategy selection continues for other conversations.
+
+An account is eligible only when its observed short quota is exactly 0%, its short window is
+explicitly 18,000 seconds, the observation is no older than five minutes, and the observed reset
+is within 60 seconds of `observation + 5h`. The synchronous process-local reservation prevents
+duplicate selection of the same window. Its deadline is at least five hours and one minute after
+selection; an observation after that deadline is required before that account can be steered again. The reservation
+map is cleared on proxy restart and has no disk persistence.
+
+This is request steering only. It sends no synthetic request and starts no timer. The ordinary
+strategy path remains responsible for subsequent unbound selections.
+
 ## Account identity and store concurrency
 
 Pool mode needs stable public names and a store that survives concurrent refresh:
@@ -156,8 +175,11 @@ Pool mode needs stable public names and a store that survives concurrent refresh
 - Public selectors are generated per account; the main login's selector is `main`, collision-suffixed
   if that name is taken, and it maps to the config-only sentinel `@main`, which sits outside the
   pool-account id grammar (`src/codex/account-namespaces.ts`, `src/codex/account-namespace-match.ts`).
-  Selectors must not collide with provider or combo ids. A user alias is display metadata; routing
-  consults credential identity, never the alias.
+  Selectors must not collide with provider or combo ids. The CLI's `auto` account control word is
+  resolved after exact stored account ids, so a legacy account with that id remains selectable
+  rather than invoking the control action; `ocx account clear` skips selector resolution entirely
+  and always clears the selection. A user alias is display metadata; routing consults
+  credential identity, never the alias.
 - The credential store is generation-guarded and refresh-locked (`src/codex/account-store.ts`): a
   refresh persists only if the generation it started from still holds, and a lost race raises a
   generation-conflict error instead of overwriting the newer credential.
@@ -260,6 +282,10 @@ materialized headers pass the proxy-credential exclusion check before owner matc
 `src/codex/account-store.ts` assigns each explicit pool credential publication a private random `quotaHistoryIdentity`. Same-account token refresh preserves it, including each alias record's own identity; replacement or deletion retires it. A refresh CAS with a changed upstream account identity rotates the tag and does not propagate that changed identity to old aliases. Credential-only projections omit this metadata.
 
 `capturePoolQuotaWriter` captures the exact dispatched access/account pair and generation. Legacy identity initialization rechecks under the credential mutation lock, persists metadata without advancing credential generation or mutation epoch, and fails to no optional evidence on read/lock/write errors. Append admission uses the captured generation and tag; history retention compares the tag across ordinary refresh. Native main is excluded from this pool proof. These interfaces supply the bounded observation layer; the identity alone is neither a quota sample nor proof of capacity.
+
+## Low-quota protection
+
+`src/codex/quota.ts` sends accepted usage observations through `src/codex/low-quota-observer.ts`; credits-only updates never replay carried usage into protection, and pool WHAM/header observations reach the policy only after raw percentages pass validation; clamped display bars cannot authorize a pause. The pool-account-only [configuration policy](../config.md#codex-pool-low-quota-protection) pauses live selection immediately, defers a bounded config save, and deduplicates account/window notices. Manual resume is respected across every qualifying window already active for that account until recovery or a new reset episode. Native main keeps its separate 98% hard lock. Each server registration owns a bounded status ledger; its authenticated management route exposes only its own account ids. The default alert is a log line plus a `logged` event, with no OS notification.
 
 ## Bounded pool quota observations
 

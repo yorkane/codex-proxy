@@ -598,6 +598,28 @@ JSON mode: `payload`.
 
 - Uses the exact upstream model ID after the first slash. Omitted cache rates default to zero; sibling model prices are preserved.
 
+### `ocx models set`
+
+Save per-model overrides for a routed model, or clear them back to the computed values.
+
+| Method | Route |
+|---|---|
+| PUT | `/api/model-settings` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--context-window` | string | Context window in tokens; 0 or - clears the override. |
+| `--modalities` | string | Comma-separated text,image,audio; - clears the override. |
+| `--reasoning-efforts` | string | Comma-separated ladder; "" for no reasoning, - to inherit. |
+| `--default-reasoning-effort` | string | Ladder member a request inherits when it omits one; - to inherit. |
+| `--reset` | boolean | Clear every override on this model; cannot be combined with the options above. |
+| `--json` | boolean | Emit the saved state as JSON. |
+
+JSON mode: `envelope`.
+
+- Addresses a routed model as provider/model. The native openai lane and combos have no per-model overrides.
+- Unlike ocx models edit, which changes a custom model's own definition, this edits a row that already exists.
+
 ### `ocx hub invite`
 
 Mint a single-use pairing code on a hub and print the exact `ocx connect` line for one more machine.
@@ -677,6 +699,25 @@ JSON mode: `payload`.
 
 - `show` (the default) reads settings; `set key=value ...` updates selected settings; `reset` restores defaults.
 - Values accepted by `set` are parsed as JSON when valid, so booleans, numbers, arrays, objects, and null can be passed directly.
+
+### `ocx account login`
+
+Log in to an OAuth provider; Kiro can add a native device account.
+
+| Method | Route |
+|---|---|
+| POST | `/api/oauth/login` |
+| GET | `/api/oauth/status` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--method` | string | For Kiro: builder-id, google, or github device login (add only). |
+| `--reauth` | boolean | Reauthenticate a selected existing account. |
+| `--id` | string | Account id for reauthentication. |
+| `--no-wait` | boolean | Return after the login flow starts. |
+| `--json` | boolean | Emit flow state as JSON. |
+
+JSON mode: `payload`.
 
 ### `ocx account main reauth`
 
@@ -762,11 +803,13 @@ JSON mode: `payload`.
 
 ### `ocx account pause`
 
-Stop routing new requests to one account in the Codex pool.
+Exclude one account in a Codex, Anthropic or supported generic OAuth pool from automatic selection.
 
 | Method | Route |
 |---|---|
 | PUT | `/api/codex-auth/accounts/pause` |
+| GET | `/api/oauth/accounts` |
+| PUT | `/api/oauth/accounts/pause` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -774,16 +817,17 @@ Stop routing new requests to one account in the Codex pool.
 
 JSON mode: `envelope`.
 
-- Pausing also unbinds threads pinned to the account and selects a fallback if it was active -- side effects of the route, not of the word `pause`.
-- The issue that requested this reported the route as POST; it is PUT.
+- Codex pause unbinds pinned threads and selects a fallback when possible; with no fallback, a paused-but-selected Codex account still receives requests. Anthropic and generic OAuth pause exclude the account from new requests, failover and refresh, and an all-paused pool answers 403. Credentials and health are preserved; already-sent turns are not cancelled.
 
 ### `ocx account resume`
 
-Return a paused account to the Codex pool.
+Return a paused account to a Codex, Anthropic or supported generic OAuth pool.
 
 | Method | Route |
 |---|---|
 | PUT | `/api/codex-auth/accounts/pause` |
+| GET | `/api/oauth/accounts` |
+| PUT | `/api/oauth/accounts/pause` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -846,6 +890,25 @@ JSON mode: `envelope`.
 
 - Only meaningful under the sticky-capable strategies; the pool strategy is the other half of this setting.
 
+### `ocx account routes`
+
+Read, replace, or clear Anthropic OAuth model account routes.
+
+| Method | Route |
+|---|---|
+| GET | `/api/pool/settings` |
+| PUT | `/api/pool/settings` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--file` | string | Read a bounded JSON route array from a local file. |
+| `--clear` | boolean | Remove the stored routes. |
+| `--json` | boolean | Emit the unified settings response as JSON. |
+
+JSON mode: `envelope`.
+
+- Only anthropic is supported. The server validates route names, patterns, and account IDs.
+
 ### `ocx account auto-switch`
 
 Show or set the usage percentage at which a pool moves to another account.
@@ -856,15 +919,19 @@ Show or set the usage percentage at which a pool moves to another account.
 | PUT | `/api/codex-auth/auto-switch` |
 | GET | `/api/oauth/accounts/pool` |
 | PUT | `/api/oauth/accounts/pool` |
+| GET | `/api/oauth/accounts` |
+| PUT | `/api/oauth/accounts/auto-switch` |
 
 | Flag | Value | Meaning |
 |---|---|---|
 | `--json` | boolean | Emit the stored threshold and whether it is applied. |
+| `--account` | string | Anthropic account ID; inherit restores the pool default, off stores zero. |
 
 JSON mode: `envelope`.
 
 - A bare invocation reads and never writes.
 - `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0-100.
+- Anthropic requires --account <id>; inherit sends null to restore its pool default. Manual/affinity precedence and pool-off recovery are unchanged.
 - For a generic OAuth pool, `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability.
 
 ### `ocx storage cleanup`
@@ -1033,7 +1100,7 @@ JSON mode: `none`.
 
 ### `ocx integration native`
 
-Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen).
+Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen) and, on request, the Private Inference installer Cursor's update channel advertises.
 
 | Method | Route |
 |---|---|
@@ -1043,6 +1110,7 @@ Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, 
 | PUT | `/api/native-integrations/codex` |
 | PUT | `/api/native-integrations/grok` |
 | GET | `/api/native-integrations/cursor` |
+| GET | `/api/native-integrations/cursor/local-installer` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -1139,6 +1207,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 64
-- of those, state-changing: 34
+- declared capabilities: 67
+- of those, state-changing: 37
 - head-resolved invocations: 2

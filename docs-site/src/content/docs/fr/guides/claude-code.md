@@ -165,8 +165,10 @@ Le mode picker fait partie du mode first-party. Sur macOS, il est activé par d�
 est sélectionné, sauf si `claudeCode.intercept.picker: false` est défini. Il modifie le sélecteur de
 modèles de l'onglet Code de Desktop first-party pour y afficher les modèles opencodex disponibles par
 leur nom. Lors de la première activation, macOS peut demander l'autorisation d'une autorité de certification
-locale dans le trousseau de connexion. Cette autorité est limitée à `claude.ai` et à ses sous-domaines ;
-la demande correspond à cette étape de confiance unique pour cette AC locale.
+locale dans le trousseau de connexion. Cette autorité est limitée à `claude.ai` et à ses sous-domaines.
+Sa clé de signature n'existe que dans le processus OpenCodex en cours : chaque redémarrage d'OpenCodex
+publie une nouvelle autorité et macOS demande donc de nouveau votre confiance — approuvez la demande,
+ou lancez ensuite `ocx claude desktop picker trust`, après chaque redémarrage.
 
 Lorsque le mode picker est actif, Claude Desktop accède au réseau par OpenCodex. Si OpenCodex s'arrête,
 Desktop reste hors ligne jusqu'à son redémarrage complet ou jusqu'à la désactivation du mode picker.
@@ -188,7 +190,7 @@ du sélecteur à une route opencodex :
 
 ```bash
 ocx claude desktop bind claude-sonnet-4-6 xai/grok-4.7
-ocx claude desktop bind claude-opus-4-6 native/gpt-6-sol
+ocx claude desktop bind claude-opus-4-6 native/gpt-6.1-sol
 ocx claude desktop unbind claude-opus-4-6
 ```
 
@@ -253,9 +255,9 @@ Support/Claude/configLibrary` sur macOS, `%APPDATA%\Claude\configLibrary` sur Wi
 `CLAUDE_USER_DATA_DIR` pour utiliser une autre racine de données Claude Desktop. L'ancien répertoire `Claude-3p` n'est
 ni lu ni supprimé automatiquement.
 
-Les routes non Anthropic reçoivent des alias stables comme `claude-opus-4-8-YYYYMMDD`, dont l'année va de 2026 à 2035. La partie qui ressemble à une date
-est un emplacement synthétique de route, et non la date de publication du modèle. Les emplacements de 2026 sont attribués en premier, de sorte que les alias
-existants conservent leur identifiant ; les années suivantes ne sont utilisées qu'une fois 2026 saturée. Les véritables routes Anthropic Claude conservent
+Les routes non Anthropic reçoivent des alias stables comme `claude-opus-4-8-p01q`, avec un code de quatre caractères préfixé par `p`. OpenCodex conserve
+un emplacement synthétique daté en interne pour stabiliser les affectations du profil, mais n'expose pas cette date comme identifiant Desktop : les versions
+actuelles de Desktop retirent les dates finales lors de la comparaison des modèles d'une session active, ce qui peut empêcher un changement. Les véritables routes Anthropic Claude conservent
 leur identité. Les nouvelles routes appartiennent par défaut à la famille Opus, mais déplacer une route ne change ni le
 fournisseur ni le modèle qu'elle appelle. Les anciens indicateurs `--static`, `--hybrid` et `--discovery-only`
 restent disponibles pour les scripts existants.
@@ -375,10 +377,10 @@ chaque ligne du CLI Claude Code (`Routed by OpenCodex to <provider>/<model>` ; l
 | Surface | Format | Exemple |
 | --- | --- | --- |
 | Claude Code CLI | `ocx-claude-<provider>--<model>` (simple) ou `ocx-claude2-…` (échappé) | `ocx-claude-native--gpt-5.6-sol` |
-| Claude Desktop 3P | `claude-opus-4-8-<code>` (hachage base36 de 3 caractères) | `claude-opus-4-8-ncb` |
+| Claude Desktop 3P | `claude-opus-4-8-p<code>` (emplacement base36 de 3 caractères) | `claude-opus-4-8-p01q` |
 
 Le proxy choisit la famille pour chaque requête : `?ids=cli` ou `?ids=desktop` est prioritaire ; à défaut, l'agent utilisateur
-`claude-code/*` reçoit la forme lisible de la CLI et les autres clients reçoivent la forme hachée de Claude Desktop.
+`claude-code/*` reçoit la forme lisible de la CLI et les autres clients reçoivent le code Claude Desktop.
 Les deux familles restent toujours décodables : un modèle enregistré sous l'une ou l'autre forme dans `settings.json` continue de fonctionner.
 Chaque entrée porte un nom d'affichage explicite, comme `gemini-3-pro (gemini)`, ainsi que toutes les capacités du modèle
 (échelle d'effort de raisonnement et types de réflexion) dans la structure officielle ModelInfo. Le mode passerelle tierce de Claude
@@ -733,3 +735,7 @@ Utilisez `"haiku"` comme valeur de remplacement pour le modèle.
 Dans `config.json`, `claudeCode.stabilizePromptCache: true` déplace les notices Claude reconnues en fin des instructions système vers un dernier message utilisateur sur les routes traduites. La valeur par défaut est `false`. Activez cette option seulement si ce changement de rôle convient à vos clients. Les exemples dans des blocs de code et le texte non reconnu sont conservés ; le transfert Anthropic natif reste inchangé. Sans métadonnées, la clé de cache suit les instructions stabilisées. Cette option ne crée pas une identité de conversation et ne garantit aucun succès du cache amont.
 
 Sur toutes les routes Chat traduites, les rappels de l’historique conservent leur position dans la conversation, après les résultats d’outils encore attendus. L’ajout d’un rappel ne réécrit donc pas le prompt système initial, et une instruction placée au milieu de la conversation n’arrive plus avant les tours qu’elle était censée suivre. Le rôle porté par cet emplacement se décide séparément : un rappel part en `system`, sauf si le fournisseur enregistre `foldDeveloperRoleToSystem: false`, ce qui indique que le service en amont accepte le rôle `developer` et le transmet à la même position. Un service qui ne l’accepte pas répond `400 role 'developer' is not allowed` et le tour ne démarre pas, d’où le repli d’une destination non enregistrée. Ce comportement s’applique avec ou sans `stabilizePromptCache` ; le transfert Anthropic natif reste inchangé. La réutilisation du cache exige toujours une identité de session stable et un cache disponible en amont. Les changements des instructions ou outils antérieurs et la compaction de la conversation peuvent aussi affecter les succès du cache ; préserver l’ordre des rappels ne suffit pas à garantir sa réutilisation.
+
+### `anthropicAccountPool.routes`
+
+Les règles `anthropicAccountPool.routes` limitent la sélection et les reprises 429 aux comptes enregistrés du premier modèle correspondant lorsque le pool est activé. Sans compte éligible, la requête échoue localement; `fallback: true` autorise alors le pool ordinaire. Les règles ne prouvent pas l’accès du compte au modèle.

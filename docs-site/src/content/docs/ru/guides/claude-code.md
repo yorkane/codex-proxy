@@ -147,7 +147,9 @@ unknown означает, что opencodex не может определить,
 если не задано `claudeCode.intercept.picker: false`. Он изменяет селектор моделей во вкладке Code
 first-party Desktop и показывает доступные модели opencodex по именам. При первом включении macOS может
 попросить доверить локальному центру сертификации в связке ключей для входа. Этот центр ограничен
-`claude.ai` и его поддоменами; запрос появляется один раз для доверия этому локальному центру.
+`claude.ai` и его поддоменами. Ключ подписи существует только внутри запущенного процесса OpenCodex,
+поэтому при каждом перезапуске OpenCodex публикуется новый центр и macOS снова просит доверие —
+подтвердите запрос или позже выполните `ocx claude desktop picker trust` после каждого перезапуска.
 
 Пока режим picker включён, Claude Desktop выходит в сеть через OpenCodex. Если OpenCodex остановится,
 Desktop будет офлайн, пока вы полностью не перезапустите его или не отключите режим picker.
@@ -191,7 +193,7 @@ Sonnet 5, Haiku 4.5 и более старые модели под **More models
 
 ```bash
 ocx claude desktop bind claude-sonnet-4-6 xai/grok-4.7
-ocx claude desktop bind claude-opus-4-6 native/gpt-6-sol
+ocx claude desktop bind claude-opus-4-6 native/gpt-6.1-sol
 ocx claude desktop unbind claude-opus-4-6
 ```
 
@@ -256,10 +258,10 @@ Claude Code 2.1.129+ обнаруживает модели шлюза через
 | Интерфейс | Формат | Пример |
 | --- | --- | --- |
 | Claude Code CLI | `ocx-claude-<provider>--<model>` (plain) или `ocx-claude2-…` (escaped) | `ocx-claude-native--gpt-5.6-sol` |
-| Claude Desktop 3P | `claude-opus-4-8-<code>` (3-символьный base36-хеш) | `claude-opus-4-8-ncb` |
+| Claude Desktop 3P | `claude-opus-4-8-p<code>` (3-символьный слот профиля base36) | `claude-opus-4-8-p01q` |
 
 Прокси выбирает семейство для каждого запроса: приоритет у `?ids=cli` или `?ids=desktop`; иначе
-user-agent `claude-code/*` получает читаемую CLI-форму, а остальные клиенты — Desktop-хеш. Оба
+user-agent `claude-code/*` получает читаемую CLI-форму, а остальные клиенты — Desktop-код. Оба
 семейства декодируются бессрочно — модель, сохранённая в `settings.json` в любой из форм,
 продолжает работать. Устаревшие id `claude-ocx-<provider>--<model>` и `claude-ocx2-<provider>--<model>`
 из старых конфигураций тоже разрешаются, но Claude Code продолжает считать такой сохранённый id как 200k.

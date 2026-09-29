@@ -180,6 +180,8 @@ export interface RequestPacingRule {
   requestsPerMinute?: number;
   /** Minimum delay between request starts. The slower configured value wins. */
   minIntervalMs?: number;
+  /** Maximum number of requests concurrently in flight. */
+  maxConcurrentRequests?: number;
 }
 
 export interface ProviderRequestPacingConfig extends RequestPacingRule {
@@ -216,6 +218,8 @@ export interface AttemptTierOutcome {
   callerFastSuppressedByConfig?: boolean;
   confirmation: "confirmed" | "assumed" | "downgraded" | "unknown";
   responseServiceTier?: string;
+  /** False retains the raw echo as evidence only, including during cost estimation. */
+  responseTierAuthoritative?: boolean;
 }
 
 /**
@@ -305,6 +309,13 @@ export interface OcxProviderConfig {
    * absence derives from the final model adapter.
    */
   fastWire?: FastWire | null;
+  /**
+   * Whether echoed service_tier can confirm or deny Fast. Set false for a relay whose
+   * response metadata cannot establish the granted tier. Absence keeps legacy authority;
+   * canonical ChatGPT Codex forwarding always treats the echo as non-authoritative.
+   * Observation only: this does not enable Fast or change request serialization.
+   */
+  responseTierAuthoritative?: boolean;
   baseUrl: string;
   /**
    * Optional relative resource path for key-auth openai-responses requests. Must start with `/`
@@ -329,6 +340,8 @@ export interface OcxProviderConfig {
    * version here instead of waiting for a code change. Absent uses the adapter's current default.
    */
   commandCodeVersion?: string;
+  /** Include bounded repository context in Command Code envelopes. Default omitted/off sends empty memory/taste/skills. */
+  projectContext?: "off" | "on";
   /**
    * Responses upstream that stores nothing server-side (DeepSeek documents "the API
    * is stateless"). Stateful request parameters are dropped, `store` is pinned false,
@@ -584,6 +597,8 @@ export interface OcxProviderConfig {
   contextWindow?: number;
   /** Per-model fallback when context metadata is absent; otherwise caps the reported window. */
   modelContextWindows?: Record<string, number>;
+  /** Per-model Copilot upstream tier; only the github-copilot route sends it. */
+  modelContextTiers?: Record<string, "default" | "long_context">;
   /** Model-specific Codex catalog input modalities, e.g. ["text"] or ["text", "image"]. */
   modelInputModalities?: Record<string, string[]>;
   modelCapabilities?: Record<string, ModelCapabilities>;
@@ -660,13 +675,15 @@ export interface OcxProviderConfig {
    * Reactive 429 rotation remains available even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
+    /** Kiro OAuth only: active serving requests per account, 1..100. */
+    maxConcurrentPerAccount?: number;
     enabled?: boolean;
     /**
      * Generic OAuth pool selection strategy (#695). Persisted through the pool-settings
      * contract. Consumed by the selector only while `pool.kernel` is on; with the flag off
      * it is still merely persisted, so omitted and set behave the same.
      */
-    strategy?: "quota" | "round-robin" | "fill-first";
+    strategy?: "quota" | "round-robin" | "fill-first" | "least-loaded";
     /**
      * 0-100 usage percent at which fill-first advances off the active account (#695).
      * Read only under `pool.kernel` with `strategy: "fill-first"`; 80 when unset, matching
@@ -949,6 +966,14 @@ export interface OcxProviderConfig {
    * Raw reasoning is never relabeled as a summary.
    */
   showThinkingSummary?: boolean;
+  /**
+   * Keep raw content-channel reasoning out of client frames for this provider. Provider-authored
+   * summaries (thinking_delta) stay visible, so an opted-in operator loses no summary; an explicit
+   * wire summary:"none" still hides both. This is a display control, not a confidentiality boundary:
+   * a Responses bridge route still carries the text to the client in the base64 `ocxr1` replay
+   * envelope; direct Chat/Messages encoders send no copy and replay from the server-side cache.
+   */
+  hideRawReasoning?: boolean;
   /**
    * Opt-in same-target 429 retry policy. Codex itself never retries 429 (it retries 5xx only,
    * openai/codex#30471), and single-key pools have no failover, so the proxy waits and replays

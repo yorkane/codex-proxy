@@ -1,174 +1,19 @@
 {
   "version": 1,
   "root": "tests",
-  "keepAtRoot": [
-    "preload.ts",
-    "fake-codex-server.ts",
-    "tsconfig.doctor-service-memory-contract.json",
-    "test-layout.test.ts",
-    "test-layout-tooling.test.ts"
-  ],
-  "domains": {
-    "providers": {
-      "match": [
-        "^(?:aside(?!-profile)|auto|azure|baseten|chutes|cline(?!-(?:client|writer))|command|commandcode|context(?!-compat|-history)|crusoe|cyber|deepinfra|deepseek|digitalocean|exa|featherless|forward|hyperbolic|kimi|meta|mimo|minimax|moonshot|muse|new|nous|novita|nscale|nvidia|opencode|openrouter|qwen38|sambanova|umans|vercel|zcode|zhipu)-"
-      ],
-      "children": {
-        "cursor": [
-          "^(?:cursor)-"
-        ],
-        "kiro": [
-          "^(?:kiro)-"
-        ],
-        "xai": [
-          "^(?:grok)-"
-        ],
-        "ollama": [
-          "^(?:ollama)-"
-        ],
-        "github-copilot": [
-          "^(?:github)-"
-        ]
-      }
-    },
-    "codex-integration": {
-      "match": [
-        "^context-compat\\.test\\.ts$",
-        "^(?:active|app|bearer|catalog|combos\\.test\\.ts|doctor\\.test\\.ts|effort|gather|history|injection|issue|multi|native|parallel|project|selected|slug|ultrafast|warmup\\.test\\.ts)-"
-      ]
-    },
-    "server": {
-      "match": [
-        "^context-history\\.test\\.ts$",
-        "^aside-profiles-routes",
-        "^update-async-routes\\.test\\.ts$",
-        "^(?:account|alias|bounded|cancel|config\\.test\\.ts|consume|data|debug|error|errors|fetch|health|input|loopback|management|memory|outbound|owned|passive|port|ports\\.test\\.ts|proxy|relay|response|retry|server|session|sidebar|stream|v2)-"
-      ]
-    },
-    "adapters": {
-      "match": [
-        "^(?:bridge\\.test\\.ts|buffered|identity|run|tool|translator)-"
-      ],
-      "children": {
-        "google": [
-          "^(?:antigravity|gcp|google|vertex)-"
-        ],
-        "anthropic": [
-          "^(?:anthropic)-"
-        ],
-        "openai": [
-          "^(?:openai)-"
-        ]
-      }
-    },
-    "responses": {
-      "match": [
-        "^(?:apply|chat|citation|continuation|eventstream|legacy|namespace|passthrough|responses|sse|thought|ws)-"
-      ]
-    },
-    "lab": {
-      "match": [
-        "^(?:core|lab)-"
-      ]
-    },
-    "cli": {
-      "match": [
-        "^(?:cli|ensure|interactive|ocx|restore|star|uninstall\\.test\\.ts)-"
-      ]
-    },
-    "routing": {
-      "match": [
-        "^(?:cl01|destination|fastwire|policy|router|router\\.test\\.ts|subagent)-"
-      ]
-    },
-    "gui": {
-      "match": [
-        "^(?:dashboard|gui|models|qwen|tencent)-"
-      ]
-    },
-    "oauth": {
-      "match": [
-        "^(?:chatgpt|generic|state)-"
-      ]
-    },
-    "claude-integration": {
-      "match": []
-    },
-    "ci-workflows": {
-      "match": [
-        "^(?:assert|build|bump|ci|cleanup|closed|docs|dsh|fixture|install|keyring|package|release|repo|skill|test|zz)-"
-      ]
-    },
-    "usage": {
-      "match": [
-        "^(?:cost|request|usage|user)-"
-      ]
-    },
-    "lib": {
-      "match": [
-        "^(?:acl|clearable|credential|debug\\.test\\.ts|optional|redact\\.test\\.ts|remove|self|stall|strict|transient)-"
-      ]
-    },
-    "clients": {
-      "match": [
-        "^aside-profile(?!s-routes)",
-        "^cline-(?:client|writer)(?:-|[.])",
-        "^(?:desktop|omp|pi|prime|remote|sync)-"
-      ]
-    },
-    "service": {
-      "match": [
-        "^(?:autostart|crash|doctor|init|service|service\\.test\\.ts|shutdown|stale|stop|systemd|winsw\\.test\\.ts)-"
-      ]
-    },
-    "windows": {
-      "match": [
-        "^(?:tray|win|windows|winsw)-"
-      ]
-    },
-    "storage": {
-      "match": [
-        "^(?:storage)-"
-      ]
-    },
-    "vision": {
-      "match": [
-        "^(?:sidecar)-"
-      ]
-    },
-    "config": {
-      "match": [
-        "^(?:config|expand|settings|types|url|yaml)-"
-      ]
-    },
-    "web-search": {
-      "match": [
-        "^(?:format|web)-"
-      ]
-    },
-    "update": {
-      "match": [
-        "^(?:update)-"
-      ]
-    },
-    "images": {
-      "match": [
-        "^(?:artifacts|download|loop|loop\\.test\\.ts|plan\\.test\\.ts|synthetic|z)-"
-      ]
-    },
-    "videos": {
-      "match": [
-        "^(?:fulfill|plan)-"
-      ]
-    },
-    "e2e-style": {
-      "match": [
-        "^(?:phase100)-"
-      ]
-    }
-  },
   "explicit": {
+    "cursor-local-installer.test.ts": "providers/cursor",
+    "codex-quota-query-backoff.test.ts": "codex-integration",
+    "pnpm-command-isolation.test.ts": "update", "provider-antigravity-quota-retry.test.ts": "providers", "project-config-warning-snapshot.test.ts": "codex-integration", "codex-quota-auto-refresh-generation.test.ts": "codex-integration", "codex-account-clear-paused.test.ts": "codex-integration",
+    "low-quota-protection.test.ts": "codex-integration",
+    "responses-compaction-recovery.test.ts": "responses", "responses-canonical-nonstream.test.ts": "responses", "compaction-recovery-settings.test.ts": "config", "responses-compaction-recovery-policy.test.ts": "responses", "plugin-loader.test.ts": "lib", "plugin-upstream-hooks.test.ts": "lib",
+    "cli-kiro-auto-selection.test.ts": "cli", "codebuddy-live-models.test.ts": "providers", "kiro-auto-selection.test.ts": "providers/kiro", "kiro-quota-metrics.test.ts": "providers/kiro", "management-provider-request-pacing.test.ts": "server",
+    "desktop-supervised-restart.test.ts": "clients", "cli-restart-handoff.test.ts": "cli",
+    "restart-replacement.test.ts": "server", "deepseek-artifact-tool-schema.test.ts": "providers",
+    "client-config-export-output-limit.test.ts": "config", "responses-skills-snapshot.test.ts": "responses", "responses-code-mode-mcp-direct.test.ts": "responses", "local-read-response-proof.test.ts": "server",
+    "link-relay-bound-transport.test.ts": "clients", "claude-desktop-system-proxy.test.ts": "claude-integration", "codex-config-drift-heal.test.ts": "codex-integration",
     "openai-chat-serialized-tool-call-scaling.test.ts": "adapters/openai",
+    "openai-chat-tool-call-id-remint.test.ts": "adapters/openai",
     "coding-agent-json-lines-scaling.test.ts": "providers",
     "usage-snapshot-digest-reuse.test.ts": "usage",
     "release-desktop-scripts.test.ts": "ci-workflows",
@@ -192,6 +37,8 @@
     "start-args.test.ts": "cli",
     "start-ownership-publication.test.ts": "cli",
     "responses-core-modules.test.ts": "responses",
+    "responses-devin-401-replay.test.ts": "responses",
+    "responses-grok-devin-preflight.test.ts": "responses",
     "responses-passthrough-transient-policy.test.ts": "responses",
     "responses-spend-ledger-wiring.test.ts": "responses",
     "responses-send-budget-errors.test.ts": "responses",
@@ -253,9 +100,16 @@
     "ambiguous-resend-composition.test.ts": "lib",
     "ambiguous-resend-gate.test.ts": "lib",
     "anthropic-account-pool.test.ts": "adapters/anthropic",
+    "anthropic-account-pause-outbound.test.ts": "adapters/anthropic",
+    "anthropic-account-pause.test.ts": "adapters/anthropic",
+    "anthropic-account-threshold.test.ts": "adapters/anthropic",
+    "anthropic-combo-account-cooldown.test.ts": "adapters/anthropic",
+    "cli-anthropic-account-threshold.test.ts": "cli",
+    "anthropic-model-routes.test.ts": "adapters/anthropic",
     "anthropic-agentrouter-language-framing.test.ts": "adapters/anthropic",
     "anthropic-baseurl-override.test.ts": "adapters/anthropic",
     "anthropic-compatible-stream.test.ts": "adapters/anthropic",
+    "anthropic-cooldown-recovery.test.ts": "adapters/anthropic",
     "anthropic-empty-content.test.ts": "adapters/anthropic",
     "anthropic-eof-tolerance.test.ts": "adapters/anthropic",
     "anthropic-error-body.test.ts": "adapters/anthropic",
@@ -267,6 +121,7 @@
     "anthropic-image-normalize.test.ts": "adapters/anthropic",
     "anthropic-image-retry-e2e.test.ts": "adapters/anthropic",
     "anthropic-image-retry.test.ts": "adapters/anthropic",
+    "anthropic-sonnet-5-5-contract.test.ts": "adapters/anthropic",
     "anthropic-parallel-tool-disable.test.ts": "adapters/anthropic",
     "anthropic-pool-toggle-copy.test.ts": "adapters/anthropic",
     "anthropic-quorum-cache.test.ts": "routing",
@@ -339,6 +194,7 @@
     "bridge-nonstreaming-terminal.test.ts": "adapters",
     "bridge-raw-reasoning-hidden.test.ts": "adapters",
     "bridge-reasoning-replay-batch.test.ts": "adapters",
+    "bridge-stall.test.ts": "adapters",
     "bridge-terminal-singleness.test.ts": "adapters",
     "bridge.test.ts": "adapters",
     "buffered-response-shape-guards.test.ts": "adapters",
@@ -389,6 +245,8 @@
     "protocol-guard.test.ts": "responses",
     "protocol-ingress-guard.test.ts": "responses",
     "protocol-direct-encoders-chat.test.ts": "responses",
+    "protocol-direct-encoders-stall-disabled.test.ts": "responses",
+    "protocol-direct-encoders-local-upstream.test.ts": "responses",
     "protocol-direct-encoders-messages.test.ts": "responses",
     "chat-native-combo.test.ts": "responses",
     "messages-native-eligibility.test.ts": "responses",
@@ -422,6 +280,7 @@
     "ci-structure-gate.test.ts": "ci-workflows",
     "ci-workflows.test.ts": "ci-workflows",
     "citation-markers.test.ts": "responses",
+    "visualization-directives.test.ts": "responses",
     "cl01-claude-outbound-review-regressions.test.ts": "routing",
     "cl01-openai-chat-review-regressions.test.ts": "routing",
     "cl01-review-regressions.test.ts": "routing",
@@ -455,15 +314,18 @@
     "claude-picker-ca.test.ts": "claude-integration",
     "claude-picker-listener.test.ts": "claude-integration",
     "claude-picker-models.test.ts": "claude-integration",
+    "claude-picker-recovery.test.ts": "claude-integration",
     "claude-picker-runtime.test.ts": "claude-integration",
     "claude-picker-trust.test.ts": "claude-integration",
     "claude-desktop-remote-hub.test.ts": "claude-integration",
     "claude-dotenv-provenance-transport.test.ts": "claude-integration",
+    "claude-estimate-projection.test.ts": "claude-integration",
     "claude-first-party-union.test.ts": "claude-integration",
     "claude-gateway-cache.test.ts": "claude-integration",
     "claude-inbound-cache-stabilize.test.ts": "claude-integration",
     "claude-inbound-debug.test.ts": "claude-integration",
     "claude-inbound.test.ts": "claude-integration",
+    "claude-output-schema-strict.test.ts": "claude-integration",
     "claude-intercept-integration.test.ts": "server",
     "claude-intercept-local-ca.test.ts": "claude-integration",
     "claude-intercept-model-bindings.test.ts": "claude-integration",
@@ -474,6 +336,7 @@
     "claude-management-api.test.ts": "claude-integration",
     "claude-manual-env.test.ts": "gui",
     "claude-messages-endpoint.test.ts": "claude-integration",
+    "claude-messages-thread.test.ts": "claude-integration",
     "messages-native.test.ts": "claude-integration",
     "messages-native-decline-trace.test.ts": "claude-integration",
     "messages-native-oauth.test.ts": "claude-integration",
@@ -492,7 +355,7 @@
     "clearable-deadline.test.ts": "lib",
     "cli-account-alias-target.test.ts": "cli",
     "cli-account-cancel-flow.test.ts": "cli",
-    "cli-account-orca-import.test.ts": "cli",
+    "cli-account-kiro-device.test.ts": "cli", "cli-account-orca-import.test.ts": "cli",
     "cli-account-pin-drain.test.ts": "cli",
     "cli-account-pool-verbs.test.ts": "cli",
     "cli-account-threshold.test.ts": "cli",
@@ -509,6 +372,8 @@
     "cli-config-show-client.test.ts": "cli",
     "cli-connect-readiness.test.ts": "cli",
     "cli-dispatch.test.ts": "cli",
+    "cli-client-start-fence.test.ts": "cli",
+    "cli-client-start-owner-e2e.test.ts": "cli",
     "cli-dto-fidelity.test.ts": "cli",
     "cli-export-command.test.ts": "cli",
     "cli-head.test.ts": "cli",
@@ -519,7 +384,7 @@
     "cli-models-free-only.test.ts": "cli",
     "cli-models-price.test.ts": "cli",
     "cli-models-reasoning.test.ts": "cli",
-    "cli-models-runtime-dispatch.test.ts": "cli",
+    "cli-models-runtime-dispatch.test.ts": "cli", "cli-models-set.test.ts": "cli",
     "cli-models.test.ts": "cli",
     "cli-native-profile.test.ts": "cli",
     "cli-observe-logs.test.ts": "cli",
@@ -533,6 +398,7 @@
     "cli-restore-back.test.ts": "cli",
     "cli-start-auxiliary-bind.test.ts": "cli",
     "cli-start-journal-order.test.ts": "cli",
+    "sibling-home-client-sync.test.ts": "cli",
     "cli-status-hub-state.test.ts": "cli",
     "cli-status-json.test.ts": "cli",
     "cli-status-oauth-health.test.ts": "cli",
@@ -610,6 +476,7 @@
     "codex-cli-update-launcher-policy.test.ts": "codex-integration",
     "codex-cli-update-zero-effect.test.ts": "codex-integration",
     "codex-cli-windows-installation-files.test.ts": "codex-integration",
+    "codex-forward-access-programs-writer.test.ts": "codex-integration",
     "codex-composed-acceptance.test.ts": "codex-integration",
     "codex-config-generation.test.ts": "codex-integration",
     "codex-context-owner.test.ts": "codex-integration",
@@ -665,6 +532,8 @@
     "codex-model-availability-error.test.ts": "codex-integration",
     "codex-model-denial-evidence.test.ts": "codex-integration",
     "codex-model-entitlement-admission.test.ts": "codex-integration",
+    "codex-model-entitlements-program-shape.test.ts": "codex-integration",
+    "codex-native-availability-nux.test.ts": "codex-integration",
     "codex-model-entitlements.test.ts": "codex-integration",
     "codex-models-cache-invalidate.test.ts": "codex-integration",
     "codex-native-residue.test.ts": "codex-integration",
@@ -676,6 +545,7 @@
     "codex-pool-request-owned-main.test.ts": "codex-integration",
     "codex-pool-rotation.test.ts": "codex-integration",
     "codex-priority-failback.test.ts": "codex-integration",
+    "codex-idle-window.test.ts": "codex-integration",
     "codex-prompt-adopt.test.ts": "codex-integration",
     "codex-prompt-base-variants.test.ts": "codex-integration",
     "codex-prompt-journal.test.ts": "codex-integration",
@@ -731,6 +601,9 @@
     "coding-agent-tool-result-images.test.ts": "adapters",
     "cold-spawn-warmup.test.ts": "ci-workflows",
     "combo-authoritative-reset.test.ts": "codex-integration",
+    "combo-codex-exhaustion-cooldown.test.ts": "codex-integration",
+    "combo-permanent-failure-cooldown.test.ts": "codex-integration",
+    "combo-reset-window-model-scope.test.ts": "codex-integration",
     "combo-child-headers.test.ts": "routing",
     "combo-last-resort.test.ts": "codex-integration",
     "combo-management-api.test.ts": "routing",
@@ -738,6 +611,8 @@
     "combo-workspace-data.test.ts": "gui",
     "combos.test.ts": "codex-integration",
     "command-code-error-finish.test.ts": "providers",
+    "command-code-efforts.test.ts": "providers",
+    "command-code-project-context.test.ts": "providers",
     "command-code-provider.test.ts": "providers",
     "command-code-quota.test.ts": "providers",
     "command-code-tool-text.test.ts": "providers",
@@ -749,6 +624,7 @@
     "compatibility-provider-equivalence.test.ts": "routing",
     "compatibility-version.test.ts": "ci-workflows",
     "config-account-thresholds.test.ts": "config",
+    "config-blocked-model-redirects.test.ts": "config",
     "config-catalog-auto-refresh.test.ts": "config",
     "config-commandcode-claude-pin.test.ts": "config",
     "config-load-degrade.test.ts": "config",
@@ -886,17 +762,22 @@
     "destination-policy-resolved.test.ts": "routing",
     "devin-adapter-reset-wait.test.ts": "providers",
     "devin-adapter.test.ts": "providers",
+    "devin-chat-wire-fixes.test.ts": "providers",
     "devin-cli-authmode-migration.test.ts": "providers",
     "devin-effort-ladder.test.ts": "providers",
+    "devin-family-resolution.test.ts": "providers",
     "devin-hardening.test.ts": "providers",
     "devin-image-passthrough.test.ts": "providers",
     "devin-live-models.test.ts": "providers",
     "devin-login.test.ts": "providers",
+    "devin-quota.test.ts": "providers",
     "devin-output-budget.test.ts": "providers",
     "devin-prompt-cache.test.ts": "providers",
     "devin-provider-merge-migration.test.ts": "providers",
     "devin-stated-reset-hardening.test.ts": "providers",
     "devin-stated-reset-retry.test.ts": "providers",
+    "devin-anthropic-signature-fallback.test.ts": "providers",
+    "devin-reasoning-continuation.test.ts": "providers",
     "devin-stream-deadline.test.ts": "providers",
     "digitalocean-scaleway-provider.test.ts": "providers",
     "docs-429-failover-claims.test.ts": "ci-workflows",
@@ -904,6 +785,7 @@
     "docs-developer-role-policy.test.ts": "ci-workflows",
     "docs-gui-screenshot-policy.test.ts": "ci-workflows",
     "docs-link-targets.test.ts": "ci-workflows",
+    "docs-gjc-reasoning-export.test.ts": "ci-workflows",
     "docs-provider-billing-claims.test.ts": "ci-workflows",
     "docs-provider-discovery-limits.test.ts": "ci-workflows",
     "docs-provider-preset-counts.test.ts": "ci-workflows",
@@ -917,6 +799,7 @@
     "doctor.test.ts": "codex-integration",
     "download-cap-default.test.ts": "images",
     "download-connect-deadline-default.test.ts": "images",
+    "droid-client.test.ts": "clients",
     "dsh-path-contract.test.ts": "ci-workflows",
     "dsh-rc6-compat-script.test.ts": "ci-workflows",
     "dsh-writer-lock.test.ts": "ci-workflows",
@@ -942,6 +825,7 @@
     "fastwire-characterization-routing.test.ts": "routing",
     "fastwire-characterization-wire.test.ts": "routing",
     "fastwire-observability.test.ts": "routing",
+    "fastwire-response-authority.test.ts": "routing",
     "fastwire-policy.test.ts": "routing",
     "featherless-provider.test.ts": "providers",
     "fetch-header-timeout.test.ts": "server",
@@ -959,6 +843,7 @@
     "gemini-web-search.test.ts": "adapters/google",
     "generic-oauth-failover.test.ts": "oauth",
     "github-copilot-account-origin.test.ts": "providers/github-copilot",
+    "github-copilot-context-tier.test.ts": "providers/github-copilot",
     "github-copilot-oauth.test.ts": "providers/github-copilot",
     "github-copilot-sse-rewrite.test.ts": "providers/github-copilot",
     "github-copilot-stream-contract.test.ts": "providers/github-copilot",
@@ -987,6 +872,7 @@
     "google-wire-compiler.test.ts": "adapters/google",
     "google-wire-shape.test.ts": "adapters/google",
     "gpt6-native-rows.test.ts": "codex-integration",
+    "gpt61-sol-rows.test.ts": "codex-integration",
     "grok-attribution.test.ts": "providers/xai",
     "grok-config-inject.test.ts": "providers/xai",
     "grok-effort-inject.test.ts": "providers/xai",
@@ -1001,6 +887,7 @@
     "grok-sync.test.ts": "providers/xai",
     "grok-writer-boundary.test.ts": "providers/xai",
     "gui-api-error.test.ts": "gui",
+    "html-lang-boot-script.test.ts": "gui",
     "gui-codex-usage-score-parity.test.ts": "gui",
     "gui-desktop-sidecar-script.test.ts": "gui",
     "gui-management-session.test.ts": "gui",
@@ -1049,23 +936,37 @@
     "jev-decision.test.ts": "routing",
     "jev-provider.test.ts": "providers",
     "keyring-smoke.test.ts": "ci-workflows",
+    "kilo-client.test.ts": "clients",
     "kimi-oauth-identity.test.ts": "providers",
     "kimi-responses-adjacency.test.ts": "providers",
+    "kiro-account-load.test.ts": "providers/kiro",
     "kiro-account-quota.test.ts": "providers/kiro",
+    "kiro-account-state-disk.test.ts": "providers/kiro",
+    "kiro-account-state-imports.test.ts": "providers/kiro",
     "kiro-adapter.test.ts": "providers/kiro",
     "kiro-auth-context-continuation.test.ts": "providers/kiro",
     "kiro-builder-id-profile.test.ts": "providers/kiro",
     "kiro-calibration.test.ts": "providers/kiro",
+    "kiro-device-builder.test.ts": "providers/kiro", "kiro-device-social.test.ts": "providers/kiro",
     "kiro-fallback-error-body.test.ts": "providers/kiro",
     "kiro-images.test.ts": "providers/kiro",
+    "kiro-leased-responses.test.ts": "providers/kiro",
+    "kiro-model-catalog.test.ts": "providers/kiro", "kiro-model-preference.test.ts": "providers/kiro",
     "kiro-oauth.test.ts": "providers/kiro",
+    "kiro-pool-load-settings.test.ts": "providers/kiro",
     "kiro-pool-rank.test.ts": "providers/kiro",
     "kiro-reasoning-roundtrip.test.ts": "providers/kiro",
+    "kiro-refusal-failover.test.ts": "providers/kiro",
+    "kiro-refusal.test.ts": "providers/kiro",
     "kiro-remote-image.test.ts": "providers/kiro",
     "kiro-retry.test.ts": "providers/kiro",
     "kiro-review-regressions.test.ts": "providers/kiro",
+    "kiro-metering-events.test.ts": "providers/kiro",
+    "kiro-metering-usage.test.ts": "providers/kiro",
     "kiro-stream.test.ts": "providers/kiro",
+    "kiro-transport-parity.test.ts": "providers/kiro",
     "kiro-usage-quota.test.ts": "providers/kiro",
+    "kiro-usage-restart.test.ts": "providers/kiro",
     "kiro-windows-cli-db-path.test.ts": "providers/kiro",
     "kiro-windows-cli-executable-path.test.ts": "providers/kiro",
     "kiro-wire-estimate.test.ts": "providers/kiro",
@@ -1128,12 +1029,15 @@
     "live-service-manager-guard.test.ts": "service",
     "linux-desktop-packaged-e2e.test.ts": "ci-workflows",
     "local-aside-sync-capability.test.ts": "server",
+    "local-account-switch-capability.test.ts": "server",
+    "local-account-switch-ingress.test.ts": "server",
     "local-destinations.test.ts": "lib",
     "local-management-attestation.test.ts": "server",
     "local-management-capability.test.ts": "server",
     "local-management-direct-transport.test.ts": "server",
     "local-provider-reload-client.test.ts": "server",
     "local-token-detect.test.ts": "oauth",
+    "local-upstream.test.ts": "lib",
     "logs-model-tier-confirmation.test.ts": "gui",
     "logs-timezone.test.ts": "server",
     "loop-reasoning-replay.test.ts": "images",
@@ -1164,6 +1068,7 @@
     "management-model-roster.test.ts": "server",
     "management-origin-tls.test.ts": "server",
     "management-provider-compat-carry.test.ts": "server",
+    "management-provider-hide-raw-reasoning.test.ts": "server",
     "management-provider-atomicity.test.ts": "server",
     "management-provider-pinsless-validation.test.ts": "server",
     "management-provider-proto-override.test.ts": "server",
@@ -1187,6 +1092,7 @@
     "mimo-token-plan-provider.test.ts": "providers",
     "mimo-v26-catalog.test.ts": "providers",
     "minimax-clients.test.ts": "providers",
+    "minimax-quota.test.ts": "providers",
     "minimax-reasoning-split.test.ts": "providers",
     "model-cache-generation-tombstone.test.ts": "codex-integration",
     "model-cache.test.ts": "codex-integration",
@@ -1198,7 +1104,7 @@
     "model-pinned-effort.test.ts": "codex-integration",
     "model-presets.test.ts": "providers",
     "model-rename-migration.test.ts": "providers",
-    "model-selection-guidance.test.ts": "cli",
+    "model-selection-guidance.test.ts": "cli", "model-settings-management-api.test.ts": "server",
     "model-visibility-management-api.test.ts": "codex-integration",
     "models-feedback-callback.test.ts": "gui",
     "models-free-filter.test.ts": "gui",
@@ -1298,6 +1204,7 @@
     "openai-chat-native-policy.test.ts": "adapters/openai",
     "openai-chat-parallel-stream.test.ts": "adapters/openai",
     "openai-chat-path-override.test.ts": "adapters/openai",
+    "openai-chat-qwen38-leading-system.test.ts": "adapters/openai",
     "openai-chat-reasoning-wire-policy.test.ts": "adapters/openai",
     "openai-chat-sanitization-review-regressions.test.ts": "adapters/openai",
     "openai-chat-serialized-tool-call-content.test.ts": "adapters/openai",
@@ -1314,6 +1221,7 @@
     "openai-provider-option-tooling.test.ts": "adapters/openai",
     "openai-provider-option.test.ts": "adapters/openai",
     "openai-responses-passthrough.test.ts": "responses",
+    "openai-responses-summary-none.test.ts": "responses",
     "responses-forward-output-cap.test.ts": "responses",
     "opencode-cli.test.ts": "providers",
     "opencode-free-provider.test.ts": "providers",
@@ -1330,6 +1238,8 @@
     "openrouter-provider-routing.test.ts": "providers",
     "openrouter-quota-reset-cooldown-4024.test.ts": "providers",
     "opper-provider.test.ts": "providers",
+    "tokenlab-protocols.test.ts": "providers",
+    "tokenlab-provider.test.ts": "providers",
     "optional-shutdown-hooks.test.ts": "lib",
     "orca-import.test.ts": "codex-integration",
     "orcarouter-provider.test.ts": "providers",
@@ -1338,6 +1248,7 @@
     "package-tree-fenced-restart.test.ts": "ci-workflows",
     "package-tree-integrity.test.ts": "ci-workflows",
     "package-tree-restart-ownership.test.ts": "ci-workflows",
+    "package-tree-retarget.test.ts": "ci-workflows",
     "parallel-tool-calls-optin.test.ts": "codex-integration",
     "parser-content-audio.test.ts": "responses",
     "passive-route-linker.test.ts": "server",
@@ -1400,10 +1311,12 @@
     "provider-registry-parity.test.ts": "providers",
     "provider-send-path-import.test.ts": "server",
     "provider-static-model-discovery.test.ts": "providers",
+    "provider-subscription-cli.test.ts": "gui",
     "provider-workspace-auth.test.ts": "gui",
     "provider-workspace-data.test.ts": "gui",
     "provider-workspace-rail.test.ts": "gui",
     "provider-workspace-state.test.ts": "gui",
+    "proxy-env-macos.test.ts": "server",
     "proxy-env.test.ts": "server",
     "proxy-liveness-package-tree-fence.test.ts": "server",
     "proxy-liveness.test.ts": "server",
@@ -1534,12 +1447,14 @@
     "responses-function-tool-repair.test.ts": "responses",
     "responses-hosted-tool-declaration.test.ts": "responses",
     "responses-hosted-tool-min-spread.test.ts": "responses",
+    "responses-hide-raw-reasoning.test.ts": "responses",
     "responses-image-gen-repair.test.ts": "responses",
     "responses-inbound-store-default.test.ts": "responses",
     "responses-item-id-repair.test.ts": "responses",
     "responses-json-events.test.ts": "responses",
     "responses-legacy-dotted-tool-name-repair.test.ts": "responses",
     "responses-muse-tool-name-alias.test.ts": "responses",
+    "responses-muse-tool-choice.test.ts": "responses",
     "responses-native-main-refresh.test.ts": "responses",
     "responses-opaque-blob-recovery.test.ts": "responses",
     "responses-parser-agent-message.test.ts": "responses",
@@ -1556,6 +1471,7 @@
     "responses-self-named-namespace-scrub.test.ts": "responses",
     "responses-send-budget-counts.test.ts": "responses",
     "responses-send-budget-errors.test.ts": "responses",
+    "responses-memory-models.test.ts": "responses",
     "responses-shadow-intercept.test.ts": "responses",
     "responses-show-thinking-summary.test.ts": "responses",
     "responses-snapshot-repair-server.test.ts": "responses",
@@ -1583,6 +1499,7 @@
     "route-decision-trace.test.ts": "server",
     "route-explainability.test.ts": "cli",
     "routed-agent-messages.test.ts": "adapters",
+    "router-blocked-cross-provider.test.ts": "routing",
     "router-combo-failover-classification.test.ts": "routing",
     "router-discarded-baseurl-warning.test.ts": "routing",
     "router-template-baseurl.test.ts": "routing",
@@ -1613,18 +1530,22 @@
     "server-auth.test.ts": "server",
     "server-background-lifecycle.test.ts": "server",
     "server-clickjacking-headers.test.ts": "server",
+    "server-combo-cooldown-fallback.test.ts": "server",
     "server-combo-failover-e2e.test.ts": "server",
     "server-combo-held-response.test.ts": "server",
     "server-combo-reasoning-replay-eligibility.test.ts": "server",
     "server-combo-zero-output-failover.test.ts": "server",
     "server-google-antigravity-oauth-401-replay.test.ts": "server",
+    "server-google-antigravity-oauth-429-budget.test.ts": "server",
     "server-gui-bundle-freshness.test.ts": "server",
     "server-images-bodyless-content-length.test.ts": "server",
+    "server-images-pool-admission.test.ts": "server",
     "server-images.test.ts": "server",
     "server-key-failover-e2e.test.ts": "server",
     "server-jev-combo-e2e.test.ts": "server",
     "server-kiro-completion-e2e.test.ts": "server",
-    "server-kiro-oauth-401-replay.test.ts": "server",
+    "server-kiro-device-login.test.ts": "server", "server-kiro-oauth-401-replay.test.ts": "server",
+    "server-kiro-refusal-e2e.test.ts": "server",
     "server-live-frame-log.test.ts": "server",
     "server-live-realtime-fixtures.test.ts": "server",
     "server-live.test.ts": "server",
@@ -1641,6 +1562,8 @@
     "server-xai-oauth-401-replay.test.ts": "server",
     "server-xai-responses-streaming.test.ts": "server",
     "service-auth-qualified-localhost.test.ts": "service",
+    "service-child-ownership.test.ts": "service",
+    "service-handled-signal-exit.test.ts": "service",
     "service-claim.test.ts": "service",
     "service-ownership-compatibility.test.ts": "service",
     "service-ownership-handover.test.ts": "service",
@@ -1652,11 +1575,14 @@
     "service-tier-capability.test.ts": "service",
     "service-wsl-home-ownership.test.ts": "service",
     "service.test.ts": "service",
+    "service-multishell-path.test.ts": "service",
+    "serving-runtimes.test.ts": "config",
     "session-affinity.test.ts": "server",
     "session-lane-recall-harness.test.ts": "server",
     "settings-desktop-switch-apply.test.ts": "config",
     "settings-fast-rows.test.ts": "config",
     "settings-main-account-hard-lock.test.ts": "config",
+    "settings-memory-models.test.ts": "config",
     "settings-oauth-open-browser.test.ts": "config",
     "settings-startup-health-seam.test.ts": "config",
     "settings-stream-mode.test.ts": "config",
@@ -1763,16 +1689,12 @@
     "umans-provider.test.ts": "providers",
     "uninstall.test.ts": "cli",
     "update-async-routes.test.ts": "server",
-    "update-badge.test.ts": "update",
-    "update-bun-ownership-lease.test.ts": "update",
-    "update-desktop-badge.test.ts": "update",
-    "update-desktop-owner.test.ts": "update",
-    "update-job.test.ts": "update",
-    "update-notify.test.ts": "update",
-    "update-npm-cache-preflight.test.ts": "update",
-    "update-npm-invocation.test.ts": "update",
-    "update-mise.test.ts": "update",
-    "update-mise-node-runtime.test.ts": "update",
+    "update-badge.test.ts": "update", "update-bun-ownership-lease.test.ts": "update",
+    "update-desktop-badge.test.ts": "update", "update-desktop-owner.test.ts": "update",
+    "update-job.test.ts": "update", "update-worker-launch.test.ts": "update",
+    "update-notify.test.ts": "update", "update-npm-cache-preflight.test.ts": "update",
+    "update-npm-invocation.test.ts": "update", "update-mise-launcher-target.test.ts": "update",
+    "update-mise.test.ts": "update", "update-mise-node-runtime.test.ts": "update",
     "update-pnpm.test.ts": "update",
     "update-refresh.test.ts": "update",
     "update-stop-classification.test.ts": "update",
@@ -1786,6 +1708,7 @@
     "upstream-http-version.test.ts": "server",
     "upstream-reachability.test.ts": "codex-integration",
     "upstream-retry.test.ts": "lib",
+    "upstream-retry-zero-output.test.ts": "lib",
     "upstream-transient-retry.test.ts": "providers",
     "url-normalization.test.ts": "config",
     "usage-aggregate-cache.test.ts": "usage",
@@ -1855,7 +1778,9 @@
     "windows-deploy-close-regressions.test.ts": "windows",
     "windows-elevation-spawn.test.ts": "windows",
     "windows-elevation.test.ts": "windows",
+    "windows-guarded-manager.test.ts": "windows",
     "windows-popup-fix.test.ts": "windows",
+    "windows-process-priority.test.ts": "windows",
     "windows-scheduler-install-verification.test.ts": "windows",
     "windows-secret-acl.test.ts": "windows",
     "windows-service-mutation-lock.test.ts": "windows",
@@ -1902,11 +1827,9 @@
     "zz-ci-api-usage-isolation.test.ts": "ci-workflows",
     "zz-ci-storage-policy-isolation.test.ts": "ci-workflows",
     "zz-pr-coderabbit-readiness-revalidation.test.ts": "ci-workflows",
-    "client-link-connect.test.ts": "clients",
-    "client-link-relay.test.ts": "clients",
-    "client-link-runtime.test.ts": "clients",
-    "link-routes.test.ts": "clients",
-    "client-link-state.test.ts": "clients",
+    "client-link-connect.test.ts": "clients", "client-link-relay.test.ts": "clients",
+    "client-link-runtime.test.ts": "clients", "link-routes.test.ts": "clients",
+    "client-link-state.test.ts": "clients", "client-link-status.test.ts": "clients",
     "client-link-teardown.test.ts": "clients",
     "client-link-tunnel.test.ts": "clients",
     "link-ports.test.ts": "clients",
@@ -1920,30 +1843,9 @@
     "link-compensation.test.ts": "clients",
     "web-search-run-turn-loop.test.ts": "web-search",
     "responses-run-turn-web-search.test.ts": "responses",
-    "server-combo-cooldown-recording.test.ts": "server"
-  },
-  "migrated": [
-    "adapters",
-    "ci-workflows",
-    "claude-integration",
-    "cli",
-    "clients",
-    "codex-integration",
-    "config",
-    "gui",
-    "lab",
-    "lib",
-    "oauth",
-    "providers",
-    "responses",
-    "routing",
-    "server",
-    "service",
-    "storage",
-    "update",
-    "usage",
-    "vision",
-    "web-search",
-    "windows"
-  ]
+    "server-combo-cooldown-recording.test.ts": "server",
+    "injection-routing-drift.test.ts": "codex-integration", "injection-routing-healer.test.ts": "codex-integration",
+    "injection-routing-heal-apply.test.ts": "codex-integration", "cli-start-routing-heal-wiring.test.ts": "cli",
+    "cli-status-codex-routing-drift.test.ts": "cli"
+  }
 }

@@ -226,6 +226,35 @@ export function collectDeclaredBareWireToolNames(body: unknown): Set<string> {
   return names;
 }
 
+/** Custom declarations with no foreign namespace, for code-mode exec recovery. */
+export function collectDeclaredBareCustomWireToolNames(body: unknown): Set<string> {
+  const names = new Set<string>();
+  if (!isPlainObject(body)) return names;
+  const specGroups: unknown[] = [body.tools];
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (isPlainObject(item) && (item.type === "additional_tools" || item.type === "tool_search_output")) {
+        specGroups.push(item.tools);
+      }
+    }
+  }
+  const add = (tool: unknown): void => {
+    if (isPlainObject(tool) && tool.type === "custom" && typeof tool.name === "string") names.add(tool.name);
+  };
+  for (const specs of specGroups) {
+    if (!Array.isArray(specs)) continue;
+    for (const spec of specs) {
+      if (!isPlainObject(spec)) continue;
+      if (spec.type === "namespace") {
+        if (spec.name === BUILTIN_FUNCTIONS_NAMESPACE && Array.isArray(spec.tools)) {
+          for (const inner of spec.tools) add(inner);
+        }
+      } else add(spec);
+    }
+  }
+  return names;
+}
+
 function addNamelessClientCallTypes(callTypes: Set<string>, specs: unknown): void {
   if (!Array.isArray(specs)) return;
   for (const spec of specs) {
@@ -349,6 +378,7 @@ export function hasExplicitWireToolCatalog(body: unknown): boolean {
  * @param declaredNamelessClientCallTypes - Nameless client call types declared by the request.
  * @param providerExecutedCallTypes - Call types executed by the provider.
  * @param declaredBare - Explicitly declared bare tool names without namespace provenance.
+ * @param declaredCustom - Current bare custom declarations eligible for code-mode recovery.
  * @returns The undeclared tool call name if unauthorized, or undefined if permitted.
  */
 function undeclaredNameInItem(
@@ -357,6 +387,7 @@ function undeclaredNameInItem(
   declaredNamelessClientCallTypes: ReadonlySet<string>,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
   declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
   allowlist?: ReadonlySet<string>,
 ): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(item)) return undefined;
@@ -399,7 +430,7 @@ function undeclaredNameInItem(
     const wireName = namespacedToolName(item.namespace, name);
     return { name, droppable: droppableFor(wireName, name, allowlist) };
   }
-  const effectiveName = normalizeDeclaredToolName(name, declared, declaredBare);
+  const effectiveName = normalizeDeclaredToolName(name, declared, declaredBare, declaredCustom);
   if (declared.has(effectiveName)) return undefined;
   return { name, droppable: droppableFor(effectiveName, name, allowlist) };
 }
@@ -412,6 +443,7 @@ function undeclaredNameInItem(
  * @param declaredNamelessClientCallTypes - Nameless client call types declared by the request.
  * @param providerExecutedCallTypes - Call types executed by the provider.
  * @param declaredBare - Explicitly declared bare tool names without namespace provenance.
+ * @param declaredCustom - Current bare custom declarations eligible for code-mode recovery.
  * @returns The name of the first undeclared tool call, or undefined.
  */
 /**
@@ -437,19 +469,20 @@ export function undeclaredToolCallVerdict(
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
   declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
   allowlist?: ReadonlySet<string>,
 ): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(payload)) return undefined;
   if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
-    return undeclaredNameInItem(payload.item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, allowlist);
+    return undeclaredNameInItem(payload.item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
   }
   if (payload.type === "response.function_call_arguments.done" && typeof payload.name === "string") {
     const fakeItem = { type: "function_call", name: payload.name, namespace: payload.namespace };
-    return undeclaredNameInItem(fakeItem, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, allowlist);
+    return undeclaredNameInItem(fakeItem, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
   }
   // Sparse gateways skip incremental items and only ever ship the terminal snapshot.
   if (payload.type === "response.completed" || payload.type === "response.incomplete") {
-    return undeclaredToolCallVerdictInResponse(payload.response, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, allowlist);
+    return undeclaredToolCallVerdictInResponse(payload.response, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
   }
   return undefined;
 }
@@ -460,11 +493,12 @@ function undeclaredToolCallVerdictInResponse(
   declaredNamelessClientCallTypes: ReadonlySet<string>,
   providerExecutedCallTypes: ProviderExecutedCallTypes,
   declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
   allowlist?: ReadonlySet<string>,
 ): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(response) || !Array.isArray(response.output)) return undefined;
   for (const item of response.output) {
-    const verdict = undeclaredNameInItem(item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, allowlist);
+    const verdict = undeclaredNameInItem(item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
     if (verdict !== undefined) return verdict;
   }
   return undefined;
@@ -540,9 +574,10 @@ export function undeclaredToolCallName(
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
   declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
   phantomAllowlist?: ReadonlySet<string>,
 ): string | undefined {
-  const verdict = undeclaredToolCallVerdict(payload, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, phantomAllowlist);
+  const verdict = undeclaredToolCallVerdict(payload, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, phantomAllowlist);
   return verdict !== undefined && !verdict.droppable ? verdict.name : undefined;
 }
 
@@ -554,6 +589,7 @@ export function undeclaredToolCallName(
  * @param declaredNamelessClientCallTypes - Nameless client call types declared by the request.
  * @param providerExecutedCallTypes - Call types executed by the provider.
  * @param declaredBare - Explicitly declared bare tool names without namespace provenance.
+ * @param declaredCustom - Current bare custom declarations eligible for code-mode recovery.
  * @returns The name of the first undeclared tool call, or undefined.
  */
 export function undeclaredToolCallNameInResponse(
@@ -562,6 +598,7 @@ export function undeclaredToolCallNameInResponse(
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
   declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
   phantomAllowlist?: ReadonlySet<string>,
 ): string | undefined {
   const verdict = undeclaredToolCallVerdictInResponse(
@@ -570,6 +607,7 @@ export function undeclaredToolCallNameInResponse(
     declaredNamelessClientCallTypes,
     providerExecutedCallTypes,
     declaredBare,
+    declaredCustom,
     phantomAllowlist,
   );
   return verdict !== undefined && !verdict.droppable ? verdict.name : undefined;
@@ -784,6 +822,7 @@ function failedBlocks(name: string, newline: string): readonly string[] {
  * @param declaredNamelessClientCallTypes - Nameless client call types declared by the request.
  * @param providerExecutedCallTypes - Call types executed by the provider.
  * @param declaredBare - Explicitly declared bare tool names without namespace provenance.
+ * @param declaredCustom - Current bare custom declarations eligible for code-mode recovery.
  * @returns An SSE block rewrite function.
  */
 export function createUndeclaredToolCallGuardBlockRewrite(
@@ -791,6 +830,7 @@ export function createUndeclaredToolCallGuardBlockRewrite(
   declaredNamelessClientCallTypes: ReadonlySet<string> = EMPTY_DECLARED_NAMELESS_CLIENT_CALL_TYPES,
   providerExecutedCallTypes: ProviderExecutedCallTypes = EMPTY_PROVIDER_EXECUTED_CALL_TYPES,
   declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
   phantomAllowlist?: ReadonlySet<string>,
 ): SseBlockRewrite {
   let tripped = false;
@@ -823,7 +863,7 @@ export function createUndeclaredToolCallGuardBlockRewrite(
           block = replaceSseDataPayload(block, JSON.stringify(parsed));
         }
       } else {
-        const verdict = undeclaredToolCallVerdict(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, phantomAllowlist);
+        const verdict = undeclaredToolCallVerdict(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, phantomAllowlist);
         if (verdict !== undefined && verdict.droppable) {
           if (parsed.type === "response.output_item.added" && isPlainObject(parsed.item) && typeof parsed.item.id === "string") {
             droppedItemIds.add(parsed.item.id);
@@ -832,7 +872,7 @@ export function createUndeclaredToolCallGuardBlockRewrite(
         }
       }
     }
-    const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare);
+    const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom);
     if (name !== undefined) {
       tripped = true;
       return failedBlocks(name, block.includes("\r\n") ? "\r\n" : "\n");

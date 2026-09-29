@@ -190,8 +190,8 @@ Aside プロファイルの変更はこの場合でも一つだけ保存しま�
 | `GET /api/debug/usage-logs` |制限された使用法デバッグ エントリを読み取る | — |
 | `GET /api/debug/injection-logs` |制限付きガイダンス挿入デバッグ エントリを読み取る | — |
 | `GET /api/claude/inbound-debug` | Claude インバウンドのデバッグ状態とエントリを読む | — |
-| `GET /api/usage` |範囲とクライアント サーフェスごとの使用状況を要約する |ストレージを読み取れない場合は、`error: "read_failed"` 概要を返します。
-| `GET /api/metrics` | 論理リクエスト、物理送信、復旧種別、所要時間、TTFT のプロセスローカル Prometheus テキストメトリクスを返します。ラベルはプロトコル、結果、復旧クラスの閉じた集合のみで、リクエストや認証情報の識別子は出力しません。 | 起動時に `metricsExport.enabled` が true でなければ 404。通常の管理認証が必要で、データプレーン認証情報ではアクセスできません。 |
+| `GET /api/usage` |範囲とクライアント サーフェスごとの使用状況を要約する |ストレージを読み取れない場合は 500 `{ "error": "read_failed" }` を返します。
+| `GET /api/metrics` | 論理リクエスト、物理送信、復旧種別、所要時間、TTFT のプロセスローカル Prometheus テキストメトリクスを返します。リクエストメトリクスのラベルは閉じた集合を使い、Kiro ゲージには上限付きの不透明なアカウントラベルのみを追加し、リクエストや認証情報の識別子は出力しません。 Kiro の 4 つのクォータゲージ (`opencodex_kiro_quota_{used_credits,limit_credits,used_percent,seconds_to_reset}`) はキャッシュのみを読み、最大 32 個の不透明なアカウントラベルを使います。収集時にネットワーク照会は行いません。 | 起動時に `metricsExport.enabled` が true でなければ 404。通常の管理認証が必要で、データプレーン認証情報ではアクセスできません。 |
 | `GET /api/storage` |バケットごとの Codex ストレージ使用量をスキャン |スキャン失敗時に `error: "scan_failed"` ペイロードを返します。
 | `POST /api/storage/cleanup/preview` |アーカイブされたセッションのクリーンアップをプレビューし、バインディング ダイジェストを返します。 400 `invalid_json` または `invalid_percent` |
 | `POST /api/storage/cleanup` |プレビューされたアーカイブ セットを隔離または完全に削除します。 400 無効な入力。 409 古い/ビジー/参照状態。 500 ファイルシステム/データベース障害 |
@@ -240,17 +240,22 @@ Aside プロファイルの変更はこの場合でも一つだけ保存しま�
 | `POST /api/oauth/login/cancel` |進行中のパブリック OAuth フローをキャンセルする | 400 不明なプロバイダー |
 | `GET /api/oauth/status` | 1 つのプロバイダーの OAuth フローをポーリングする | 400 不明なプロバイダー |
 | `POST /api/oauth/logout` |選択したプロバイダー資格情報を削除します | 400 不明なプロバイダー。 `oauth_mutation_busy` |
-| `GET, DELETE /api/oauth/accounts` |マスクされたアカウントを一覧表示するか、アカウントを 1 つ削除する | 400 無効なプロバイダー/ID。 404 アカウントがありません。 `oauth_mutation_busy` |
+| `GET, DELETE /api/oauth/accounts` | マスクされたアカウントを一覧表示するか、アカウントを 1 つ削除する Kiro の行には自動選択の `autoSelectable` と、除外時には閉じた集合の `skipReason` が含まれます。アクティブな単一アカウントは送信を続けられ、クォータ取得は任意です。 | 400 無効なプロバイダー/ID。 404 アカウントがありません。 `oauth_mutation_busy` |
 | `PUT /api/oauth/accounts/active` |アクティブな OAuth アカウントを選択します | 400 無効なプロバイダー/アカウント。 `oauth_mutation_busy` |
 | `GET, PUT, PATCH /api/oauth/accounts/pool` | Anthropic OAuth プール ポリシーの読み取りまたは更新 | 400 非 Anthropic プロバイダーまたは無効なポリシー |
 | `POST /api/oauth/accounts/clear-cooldown` | 1 つの OAuth アカウントのランタイム クールダウンをクリアする | 400 無効なプロバイダー/アカウント |
 | `PUT /api/oauth/accounts/alias` | OAuth アカウント エイリアスを設定またはクリアする | 400 無効なプロバイダー/アカウント/エイリアス |
+| `PUT /api/oauth/accounts/pause` | Anthropic または汎用 OAuth アカウントを一時停止・再開。Body `{ provider, accountId, paused }`。アクティブなアカウントを停止すると、利用可能な別のアカウントがあれば切り替えます。 | 400 未対応のプロバイダーまたは無効な body；404 アカウントなし；`oauth_mutation_busy` |
 | `GET, POST, DELETE /api/providers/keys` |マスクされたプロバイダー キーを一覧表示し、1 つを追加/アクティブ化するか、1 つを削除します。 400 無効な入力。 404 プロバイダー/キーがありません |
 | `PUT /api/providers/keys/active` |プロバイダーのアクティブなキーを選択します | 400 無効な入力。 404 プロバイダー/キーがありません |
 | `PUT /api/providers/keys/alias` |プロバイダー キー エイリアスを設定またはクリアする | 400 無効な入力。 404 プロバイダー/キーがありません |
 | `GET, POST, PATCH, DELETE /api/keys` |データ プレーン アドミッション キーの一覧表示、作成、編集、または削除 | 400 無効な本文/ID。 404 キーがありません |
 
 資格情報リストの応答は意図的にマスクされます。 OAuth アクセス トークンと完全なプロバイダー API キーはダッシュボード クライアントに返されません。
+
+#### Anthropic OAuth: `pause` / `resume`
+
+CLI コマンドは Anthropic OAuth アカウントを id または一意の別名で一時停止・再開します。別名は完全一致を優先し、次に大文字と小文字を区別せず照合します。ダッシュボードと同じ `PUT /api/oauth/accounts/pause` に `{ provider: "anthropic", accountId, paused }` を送信します。`paused` はアカウントに保存され、`GET /api/oauth/accounts` にも表示されます。プロアクティブなプールが無効でも、停止中のアカウントは選択、セッションの紐付け、429 の切り替え候補から除外されます。全アカウントが停止中なら、再開するまでリクエストは 403 を返します。送信済みのリクエストは継続し、認証情報と健全性の状態は保持されます。再起動や再ログインでも停止は維持され、アカウント削除時に消えます。アカウント別のしきい値はこの操作に含まれません。
 
 ### プロバイダー
 
@@ -349,3 +354,13 @@ account の selector binding は残るため、欠落中の exact route は fail
 ## リモートセッションとデータキー更新
 
 `POST /api/keys/rotate {id}` は10分間の移行を開始し、新しい秘密値を一度だけ返します。`POST /api/keys/rotate/commit {id,rotationId}` で確定し、`DELETE /api/keys/rotate {id,rotationId}` で中止します。管理認証が必須で、データキーからは呼べません。`POST /api/session/logout` には現在の `gui-session`、一致する Origin、CSRF が必要です。管理トークンは 403 となり、同意セッションを作成できません。
+
+## Anthropic アカウント使用量しきい値
+
+`PUT /api/oauth/accounts/auto-switch`
+
+Anthropic OAuth のみ。`{ provider: "anthropic", accountId, threshold }`: 整数 0–100、null は継承、欠落はエラー。再起動後も保持され、アカウント削除時に消えます。
+
+DTO は `autoSwitchThresholdOverride`（整数/null）、`autoSwitchThreshold`（プール既定値）、`effectiveAutoSwitchThreshold` を含みます。0 は使用量による切り替えのみ無効にし、一時停止と 429 復旧は維持します。
+
+HTTP: 400 invalid/unsupported; 404 missing account; `oauth_mutation_busy` on lock contention.

@@ -215,8 +215,8 @@ par le fournisseur en amont, cette information reste absente : elle n'est pas d�
 | `GET /api/debug/usage-logs` | Lire un nombre limité d'entrées de débogage de l'utilisation | — |
 | `GET /api/debug/injection-logs` | Lire un nombre limité d'entrées de débogage de l'injection du guidage | — |
 | `GET /api/claude/inbound-debug` | Lire l'état et les entrées du débogage entrant | — |
-| `GET /api/usage` | Résumer l'utilisation par période et par interface cliente ; les réponses Codex comprennent aussi une ventilation `accounts` indexée par des libellés de journalisation stables ne contenant aucune donnée personnelle | Renvoie un résumé `error: "read_failed"` si le stockage ne peut pas être lu |
-| `GET /api/metrics` | Renvoyer les métriques texte Prometheus locales au processus : requêtes logiques, envois physiques, types de récupération, durée et TTFT. Les libellés sont limités au protocole, au résultat et à la classe de récupération ; aucun identifiant de requête ou d'identifiant secret n'est exporté. | 404 si `metricsExport.enabled` n'était pas vrai au démarrage ; l'authentification de gestion est obligatoire et les identifiants du plan de données ne donnent aucun accès |
+| `GET /api/usage` | Résumer l'utilisation par période et par interface cliente ; les réponses Codex comprennent aussi une ventilation `accounts` indexée par des libellés de journalisation stables ne contenant aucune donnée personnelle | Renvoie 500 `{ "error": "read_failed" }` si le stockage ne peut pas être lu |
+| `GET /api/metrics` | Renvoyer les métriques texte Prometheus locales au processus : requêtes logiques, envois physiques, types de récupération, durée et TTFT. Les métriques de requêtes utilisent des libellés fermés ; les jauges Kiro ajoutent uniquement un libellé de compte opaque et borné ; aucun identifiant de requête ou d'identifiant secret n'est exporté. Les quatre jauges `opencodex_kiro_quota_{used_credits,limit_credits,used_percent,seconds_to_reset}` lisent uniquement le cache et utilisent au plus 32 étiquettes de compte opaques. Aucune sonde réseau lors de la collecte. | 404 si `metricsExport.enabled` n'était pas vrai au démarrage ; l'authentification de gestion est obligatoire et les identifiants du plan de données ne donnent aucun accès |
 | `GET /api/storage` | Analyser l'utilisation du stockage Codex par catégorie | Renvoie une charge utile `error: "scan_failed"` en cas d'échec de l'analyse |
 | `POST /api/storage/cleanup/preview` | Prévisualiser le nettoyage des sessions archivées et renvoyer une empreinte contraignante | 400 `invalid_json` ou `invalid_percent` |
 | `POST /api/storage/cleanup` | Mettre en quarantaine ou supprimer définitivement l'ensemble archivé prévisualisé | 400 saisie invalide ; 409 état obsolète, occupé ou référencé ; 500 échec du système de fichiers ou de la base de données |
@@ -278,11 +278,12 @@ Tant qu’une liste initiale fiable n’est pas disponible, les requêtes PUT va
 | `POST /api/oauth/login/cancel` | Annuler un flux OAuth public en cours | 400 fournisseur inconnu |
 | `GET /api/oauth/status` | Sonder le flux OAuth d'un fournisseur | 400 fournisseur inconnu |
 | `POST /api/oauth/logout` | Supprimer les informations d'identification du fournisseur sélectionné | 400 fournisseur inconnu ; `oauth_mutation_busy` |
-| `GET, DELETE /api/oauth/accounts` | Répertorier les comptes masqués ou supprimer un compte | 400 invalide provider/id ; 404 compte manquant ; `oauth_mutation_busy` |
+| `GET, DELETE /api/oauth/accounts` | Répertorier les comptes masqués ou supprimer un compte Les lignes Kiro ajoutent `autoSelectable` et un `skipReason` fermé en cas d’exclusion de la sélection automatique ; un compte actif unique peut encore servir. Le quota reste facultatif. | 400 invalide provider/id ; 404 compte manquant ; `oauth_mutation_busy` |
 | `PUT /api/oauth/accounts/active` | Sélectionnez le compte OAuth actif | 400 invalide provider/account ; `oauth_mutation_busy` |
 | `GET, PUT, PATCH /api/oauth/accounts/pool` | Lire ou mettre à jour la stratégie du pool OAuth Anthropic | 400 fournisseur non Anthropic ou stratégie invalide |
 | `POST /api/oauth/accounts/clear-cooldown` | Effacer le temps de recharge d'un compte OAuth | 400 invalide provider/account |
 | `PUT /api/oauth/accounts/alias` | Définir ou supprimer un alias de compte OAuth | 400 invalide provider/account/alias |
+| `PUT /api/oauth/accounts/pause` | Suspendre/reprendre Anthropic ou un compte OAuth générique. Body `{ provider, accountId, paused }` ; la suspension du compte actif sélectionne un autre compte utilisable s’il existe. | 400 fournisseur non pris en charge ou body invalide ; 404 compte absent ; `oauth_mutation_busy` |
 | `GET, POST, DELETE /api/providers/keys` | Répertorier les clés de fournisseur masquées, en ajouter ou en activer une, ou en supprimer une | 400 saisie invalide ; 404 fournisseur ou clé manquante |
 | `PUT /api/providers/keys/active` | Sélectionnez la clé active d'un fournisseur | 400 saisie invalide ; 404 provider/key manquant |
 | `PUT /api/providers/keys/alias` | Définir ou supprimer un alias de clé de fournisseur | 400 saisie invalide ; 404 provider/key manquant |
@@ -290,6 +291,10 @@ Tant qu’une liste initiale fiable n’est pas disponible, les requêtes PUT va
 
 Les réponses qui répertorient les identifiants sont délibérément masquées. Les jetons d'accès OAuth et les clés API complètes des
 fournisseurs ne sont pas renvoyés aux clients du tableau de bord.
+
+#### Anthropic OAuth: `pause` / `resume`
+
+La commande CLI suspend ou reprend un compte Anthropic OAuth par id ou alias unique (correspondance exacte, puis sans distinction de casse). Utilise `PUT /api/oauth/accounts/pause` avec `{ provider: "anthropic", accountId, paused }`, également utilisé par le tableau de bord. L’état `paused` est enregistré dans le compte et exposé par `GET /api/oauth/accounts`. La suspension s’applique même si le pool proactif est désactivé : le compte est exclu de la sélection, des affinités et des successeurs 429. Si tous les comptes sont suspendus, les requêtes renvoient 403 jusqu’à une reprise. Les requêtes déjà envoyées continuent ; les identifiants et l’état de santé sont conservés. La suspension survit au redémarrage et à une nouvelle connexion, et disparaît avec la suppression du compte. Les seuils individuels ne font pas partie de cette commande.
 
 ### Fournisseurs
 
@@ -407,3 +412,13 @@ L'accès HTTP direct est surtout utile aux intégrations qui exigent les contrat
 ## Sessions distantes et rotation des clés de données
 
 `POST /api/keys/rotate {id}` démarre un chevauchement de dix minutes et renvoie le nouveau secret une seule fois. `POST /api/keys/rotate/commit {id,rotationId}` valide; `DELETE /api/keys/rotate {id,rotationId}` annule. L'authentification de gestion est obligatoire et une clé de données ne suffit pas. `POST /api/session/logout` exige la `gui-session` courante, l'Origin correspondante et CSRF. Un jeton admin reçoit 403 et ne peut jamais créer une session de consentement.
+
+## Seuil d’utilisation par compte Anthropic
+
+`PUT /api/oauth/accounts/auto-switch`
+
+Anthropic OAuth uniquement. `{ provider: "anthropic", accountId, threshold }` : entier 0–100 ou null pour hériter ; champ absent invalide. Conservé au redémarrage, supprimé avec le compte.
+
+Le DTO inclut `autoSwitchThresholdOverride` (entier/null), `autoSwitchThreshold` (défaut du pool) et `effectiveAutoSwitchThreshold`. 0 désactive seulement le basculement selon l’utilisation ; pause et reprise après 429 restent actives.
+
+HTTP: 400 invalid/unsupported; 404 missing account; `oauth_mutation_busy` on lock contention.

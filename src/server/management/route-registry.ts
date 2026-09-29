@@ -103,6 +103,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/codex-auth/login-status", module: "codex/auth-api/routes", mutates: false },
   { method: "GET", path: "/api/codex-auth/quota", module: "codex/auth-api/routes", mutates: false },
   { method: "GET", path: "/api/codex-auth/quota/history", module: "codex/auth-api/routes", mutates: false },
+  { method: "GET", path: "/api/codex-auth/low-quota-events", module: "server/management/low-quota-routes", mutates: false, exempt: { reason: "deferred-verb", why: "The authenticated event history is an operator diagnostic with no CLI verb yet.", owner: "rt5 low-quota", ownerDoc: "structure/gui-and-management-api.md" } },
   { method: "GET", path: "/api/codex-auth/reset-credits", module: "codex/auth-api/routes", mutates: false },
   { method: "PATCH", path: "/api/codex-auth/pool-strategy", module: "codex/auth-api/routes", mutates: true },
   { method: "POST", path: "/api/codex-auth/accounts", module: "codex/auth-api/routes", mutates: true },
@@ -278,6 +279,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/disabled-models", module: "server/management/model-routes", mutates: true },
   { method: "PUT", path: "/api/model-discovery", module: "server/management/model-routes", mutates: true },
   { method: "PUT", path: "/api/model-presets", module: "server/management/model-routes", mutates: true },
+  { method: "PUT", path: "/api/model-settings", module: "server/management/model-routes", mutates: true },
   { method: "PUT", path: "/api/model-visibility", module: "server/management/model-routes", mutates: true },
   { method: "PUT", path: "/api/selected-models", module: "server/management/model-routes", mutates: true },
   // server/management/native-integration-routes
@@ -288,6 +290,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/native-integrations/grok", module: "server/management/native-integration-routes", mutates: true },
   // server/management/cursor-integration-routes
   { method: "GET", path: "/api/native-integrations/cursor", module: "server/management/cursor-integration-routes", mutates: false },
+  { method: "GET", path: "/api/native-integrations/cursor/local-installer", module: "server/management/cursor-integration-routes", mutates: false },
   // server/management/oauth-account-routes
   { method: "DELETE", path: "/api/keys", module: "server/management/oauth-account-routes", mutates: true },
   { method: "DELETE", path: "/api/keys/rotate", module: "server/management/oauth-account-routes", mutates: true },
@@ -320,6 +323,8 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/providers/keys", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/oauth/accounts/active", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/oauth/accounts/alias", module: "server/management/oauth-account-routes", mutates: true },
+  { method: "PUT", path: "/api/oauth/accounts/pause", module: "server/management/oauth-account-routes", mutates: true },
+  { method: "PUT", path: "/api/oauth/accounts/auto-switch", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/oauth/accounts/pool", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/providers/keys/active", module: "server/management/oauth-account-routes", mutates: true },
   { method: "PUT", path: "/api/providers/keys/alias", module: "server/management/oauth-account-routes", mutates: true },
@@ -369,11 +374,11 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/storage/codex-logs/unprotect", module: "server/management/storage-log-guard-routes", mutates: true },
   // server/management/link-routes
   { method: "GET", path: "/api/link/status", module: "server/management/link-routes", mutates: false },
-  { method: "GET", path: "/api/link/candidates", module: "server/management/link-routes", mutates: false, exempt: { reason: "session-only", why: "SSH candidates are a dashboard pairing surface and are withheld from admin-token and Tailscale identity sessions." } },
-  { method: "POST", path: "/api/link/probe", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "SSH probing and host-key presentation are part of the interactive pairing consent flow." } },
-  { method: "POST", path: "/api/link/confirm-host", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "Persisting a host key requires the paired dashboard session that saw the fingerprint." } },
-  { method: "POST", path: "/api/link/join", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "Joining a confirmed Home issues a link credential and restarts this standalone runtime as a client." } },
-  { method: "POST", path: "/api/link/apply", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "Applying a link issues a data key and starts a remote tunnel, so it requires the paired dashboard session." } },
+  { method: "GET", path: "/api/link/candidates", module: "server/management/link-routes", mutates: false, exempt: { reason: "session-only", why: "SSH candidates are a dashboard surface: a paired session, or on a standalone runtime the current loopback dashboard session on trusted loopback ingress; admin-token and Tailscale identity sessions are refused." } },
+  { method: "POST", path: "/api/link/probe", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "SSH probing and host-key presentation are part of the interactive dashboard consent flow (paired, or standalone loopback dashboard on trusted loopback ingress)." } },
+  { method: "POST", path: "/api/link/confirm-host", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "Persisting a host key requires the dashboard session that saw the fingerprint (paired, or standalone loopback dashboard on trusted loopback ingress)." } },
+  { method: "POST", path: "/api/link/join", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "Joining a confirmed Home issues a link credential and restarts this standalone runtime as a client on its configured port, which briefly interrupts running Codex turns. It is the dashboard's turn-on flow with a pre-join notice (paired, or standalone loopback dashboard on trusted loopback ingress); admin-token and Tailscale identity sessions are refused." } },
+  { method: "POST", path: "/api/link/apply", module: "server/management/link-routes", mutates: true, exempt: { reason: "session-only", why: "Applying a link issues a data key and starts a remote tunnel, so it requires a dashboard session (paired, or standalone loopback dashboard on trusted loopback ingress)." } },
   { method: "DELETE", path: "/api/link/{id}", module: "server/management/link-routes", mutates: true, mechanism: "regex" },
   { method: "POST", path: "/api/link/issue", module: "server/management/link-routes", mutates: true },
   // server/management/remote-workspace-routes

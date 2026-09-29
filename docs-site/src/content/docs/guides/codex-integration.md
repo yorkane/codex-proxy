@@ -15,6 +15,12 @@ file, removes OpenCodex's generated routing artifacts, and leaves the proxy runn
 clients. Re-enabling rebuilds the catalog from the models available at that time, so it does not
 restore the Codex files byte for byte.
 
+For bare native Codex models and OpenCodex-generated account-selector rows, the catalog carries
+authenticated access program metadata. Bare models use the main Codex account; account-qualified
+models use their selected account. Refreshing the integration updates these rows when upstream
+changes the account's access programs.
+OpenCodex carries the logged-in main account's live model availability prompt onto bare native model rows.
+
 The proxy exposes one bare `openai` Codex-login route with Pool(default) and Direct account modes,
 plus `openai-apikey/<model>` for the configured API key. Pool includes main plus added accounts;
 Direct uses only the caller/main bearer. The routes do not fall back to one another. Shipped v1
@@ -126,6 +132,14 @@ echo `default`, so request logs show the response tier as an observation with co
 `assumed`. For latency-sensitive work, compare observed first-output times across the providers you
 actually use rather than assuming any particular channel is faster.
 
+For a gateway forwarding to a backend with the same metadata limitation, explicitly declare
+[`responseTierAuthoritative: false`](/reference/configuration/providers/#response-service-tier-authority)
+on that provider. The request still sends priority and records the raw echo, while actual Fast
+scheduling remains unconfirmed. Undeclared gateways and the official API keep their existing
+response-based interpretation. Updating OpenCodex alone does not add this declaration to existing
+gateway entries: without it, an eligible priority request followed by a `default` echo still records
+`response-declined`.
+
 The proxy listens on port `10100` by default and serves `POST /v1/responses`,
 `POST /v1/responses/compact`, `POST /v1/images/generations`, `POST /v1/images/edits`,
 `GET /v1/models`, `GET /healthz`, and the `/api/*` management surface.
@@ -222,8 +236,10 @@ This is separate from the [Image Bridge](/guides/image-bridge/), which only acti
 **Responses** turn lists the hosted `image_generation` tool while a non-OpenAI model is selected.
 Standalone `/images/generations` calls never enter that bridge.
 
-- **One mode-aware forward candidate:** Pool selects an eligible main/added account; Direct uses the
-  caller OAuth bearer. The configured mode applies consistently to the image request.
+- **One mode-aware forward candidate:** Pool selects an eligible main/added account and uses its
+  stored ChatGPT credential even when the client authenticates to opencodex with a proxy admission
+  bearer. Direct uses the caller's ChatGPT OAuth bearer and cannot forward a proxy admission token.
+  The configured mode applies consistently to the image request.
 - **OpenAI API-key provider:** it is used only when no forward candidate owns an authentication
   failure. A broken/expired Pool credential is never hidden behind separately billed API usage.
 - **Explicit custom provider:** set `images.provider` to the id of a custom API-key
@@ -472,6 +488,55 @@ While the mode is active, the realtime voice sideband override
 (`experimental_realtime_ws_base_url`) is not injected — the dedicated provider-table form cannot
 carry it — so Codex Desktop voice uses its native endpoint rather than the proxy.
 
+### Emergency compaction model (opt-in)
+
+When OpenCodeX translates remote compaction for providers such as Google, it replaces images
+from earlier turns with short reopening notes if a later explicit final answer exists. Existing
+analysis and file references stay in the summary input; images after the last final answer stay
+available for unresolved work. Commentary-only and unphased histories are preserved. This affects
+only the compaction request, not stored attachments or ordinary model requests. It reduces repeated
+vision input but does not guarantee that a long text history fits the provider's context limit.
+
+`compactionRecovery` leaves the initial compaction on the conversation's selected route. It
+permits one emergency attempt only after a supported, pre-output compaction failure. It is
+separate from `compactionRouting`, which chooses another model before compaction starts, and
+from `codexClientCompaction`, which changes Codex's provider form.
+
+```json
+{
+  "compactionRecovery": {
+    "enabled": true,
+    "model": "provider/emergency-model",
+    "allowDevinInvalidArgument": false
+  }
+}
+```
+
+Use an independently configured, authorized model with enough context for the failed input.
+Enabling recovery permits that model's provider to receive the compaction history and charge
+for the extra attempt when recovery runs; ordinary successful compactions incur no extra call.
+The option is off when absent or disabled. The existing authenticated management API accepts
+this block through `PUT /api/settings`; send `compactionRecovery: null` to remove it. A direct
+file edit should follow the normal stopped-proxy configuration workflow. This setting does not
+change sign-in, the conversation's ordinary model, Codex's provider ID, or the desktop composer.
+
+Recovery does not replay after cancellation, semantic output, tool side effects, an exhausted
+send budget, or an authentication, admission or policy refusal. Generic `400` errors do not
+enable fallback. Devin answers an oversized history with an opaque pre-output
+`invalid_argument`; when the request's estimated size is at or near the model's input window,
+the adapter reports it as `context_length_exceeded` instead, so Codex compacts on an ordinary
+turn and a failed compaction qualifies as a context overflow without any Devin-specific option.
+The estimate uses tool descriptions after Cognition sanitization and truncation, matching the
+request sent upstream. A smaller request that gets the same code stays a plain `400`. The
+separately opted-in `allowDevinInvalidArgument` case covers only those remaining `invalid_argument` failures, and
+only on an identified compaction request. The emergency attempt shares the original request's
+send budget and never starts a second recovery attempt.
+
+Native encrypted compaction is outside this recovery path: its original error is retained.
+There is no automatic local truncation mode. A response being accepted is not proof that a
+long conversation retained its goals; verify the next turn on the original model before
+treating an emergency summary as a recovered task.
+
 ### Authless Codex Desktop (opt-in)
 
 In **Dashboard → Overview**, **Open Codex without signing in** controls this existing
@@ -612,6 +677,15 @@ code-mode `exec` has the call converted into the matching `tools.<helper>(...)` 
 `exec`. A catalog that genuinely declares the bare goal tool keeps it, and a catalog that declares
 neither the tool nor `exec` still rejects the call as undeclared.
 
+On routed conversions with a verified freeform code-mode `exec` catalog, structured calls
+sent directly to
+`mcp__<server>__<tool>` (including a provider-added `default.` prefix) are also
+wrapped as nested host-tool calls. This avoids a retry
+caused solely by a model omitting the `exec` wrapper. Explicitly declared MCP tools
+keep their normal behavior; an ordinary JSON function named `exec` does not enable
+this repair. Unknown tools still fail at the host. Tool-call records printed as
+ordinary answer text are not executed by this compatibility rule.
+
 For routed Responses turns, an explicit tool-enforcement policy also rejects client tool calls if
 the request's declared-tool catalog is unavailable. An empty declared catalog rejects every client
 tool call; Chat and Anthropic clients retain their own tool-validation responsibility.
@@ -635,6 +709,19 @@ mode unchanged.
 
 After `ocx sync` changes this metadata, restart Codex App and open a fresh task. Existing app-server
 processes and tasks may retain the catalog and tool plan they loaded at startup.
+
+### Inline visualizations with routed models
+
+The Codex App's Visualize plugin asks the model to reply with a reference wrapped in private-use
+characters (U+E200 … U+E201). Some providers remove those characters before the model sees them —
+every Claude route we checked does — so the model used to answer with a bare
+`visualize{"path":…}` line that Codex App printed as text.
+
+opencodex rewrites those references into the directive the app itself renders,
+`::codex-inline-vis{path="/absolute/path/chart.html"}`, in the conversation text sent to routed
+models. Any model can read and repeat that form, so the visualization renders inline. Native OpenAI
+passthrough requests are forwarded unchanged. Replies that were already saved in the bare
+`visualize{…}` form stay as they are; ask for the visualization again in a new reply.
 
 ### Custom model display names
 
@@ -837,6 +924,15 @@ it is not; `ocx doctor` reports restart safety (service/shim coverage).
 
 ## Routed models during Codex reserve mode
 
+Codex Pool can optionally protect stored pool accounts at a selected 5-hour or weekly usage
+threshold. The Desktop/main account keeps its separate 98% hard lock.
+Set `codexPool.lowQuotaProtection` in configuration to pause accounts, record a log-and-API
+alert, or both; see [routing configuration](/reference/configuration/routing/#codex-pool-low-quota-protection).
+A pause takes effect for the next selection immediately, while saving it to disk is deferred.
+Check this server’s authenticated `GET /api/codex-auth/low-quota-events` history for `logged`
+alerts or save failures. Manual resume remains in force for the current quota episode. The
+default alert reaches only the log and API; it does not produce a desktop or OS notification.
+
 When the ChatGPT 5-hour quota is exhausted, Codex may offer a reserve fallback model
 (`gpt-reserve` / Luna Reserve). While that state is active, the Codex model picker can make
 **every other entry unselectable — including opencodex routed models**, even though those
@@ -905,6 +1001,32 @@ When an account leaves pool selection, the reason travels with the decision inst
 
 A main-account refresh that does not complete still answers `503` with `Retry-After`, because a retry may still succeed. The message now adds that a failure which persists means the main account needs reauthentication, rather than only asking for another attempt.
 
+### Optional idle-window steering
+
+`codexPool.startIdleWindows` is an optional boolean and defaults to `false`. When enabled, a new
+unbound real request may be placed on an eligible account whose observed short quota window is at
+0% with evidence that its five-hour clock has not started. This check runs after conversation and family affinity, so an existing
+binding remains authoritative; an explicit account pin or manual account preference also wins.
+Independent model quota scopes are skipped, and the shared active cursor is unchanged. After the
+idle-window choice, normal strategy selection resumes for other conversations.
+
+The observation must be no older than five minutes, and the short window must explicitly be
+18,000 seconds. Its reset must be observed within 60 seconds of `observation + 5h` (rather than an already ticking or elapsed reset). A synchronous,
+process-local reservation prevents duplicate selections for the same account and window. The
+reservation deadline is at least 5h plus one minute after selection; a fresh observation is
+required after that deadline before the same account can be steered again. Reservations are cleared when the proxy
+process restarts and are never persisted to disk.
+
+Enable it in your existing configuration:
+
+```json
+{
+  "codexPool": { "startIdleWindows": true }
+}
+```
+
+If no account meets the criteria, ordinary routing applies. This feature only steers an actual incoming request. It creates no synthetic request and no timer.
+
 ### Keeping a downgraded account out of rotation
 
 `codexPool.excludedPlans` lists plan keys that automatic pool selection skips, matched case-insensitively against the plan stored on each account. It is absent by default, so an existing install rotates exactly as before.
@@ -966,6 +1088,27 @@ When returning to the root-override form, OpenCodex retains an existing `[model_
 `ocx restore`, `ocx stop` and `ocx uninstall` no longer refuse on `history_paginated_requires_native_writer`. They take every OpenCodex root routing key out and keep the `[model_providers.opencodex]` definition on disk, so conversations whose rows still name that provider keep resolving while plain `codex` stops pointing at the proxy. The result is reported as a partial restore that names the retained lines, and `ocx restore --remove-codex-provider-table` removes them too, after which those conversations stop opening.
 
 Enabling the integration in its provider-table form on a home whose `openai`-tagged conversations Codex has already paginated used to be refused outright with `history_paginated_openai_requires_native_writer`: nothing was written and the integration stayed disabled. OpenCodex now completes that transition by keeping the managed root `openai_base_url` override beside the `[model_providers.opencodex]` table. Codex merges the override onto its built-in `openai` provider, so those conversations keep reaching the proxy without being relabeled and no rollout byte or thread row is touched. Only a routing form that requires the `x-opencodex-api-key` admission header still refuses, because Codex's built-in provider cannot carry that header; its message names the two settings that resolve it — route Codex through the loopback listener so the override can be retained, or set `syncResumeHistory` to `false` to accept that those conversations resume against Codex's own OpenAI endpoint.
+
+### Remote thread-list provider filters
+
+Provider-table routing changes the default provider id for new conversations to `opencodex` while
+history that cannot safely be relabeled may remain tagged `openai`. Some native app-server/mobile
+versions treat an omitted `thread/list.modelProviders` filter as the current default provider only,
+so those existing conversations can disappear from that remote list even though their database row
+and rollout are intact. A compatible list client can send `modelProviders: []` to request all
+providers. OpenCodex cannot rewrite that RPC because the remote client talks directly to Codex's
+native app-server rather than the inference proxy.
+
+`ocx sync` and `ocx start` include the warning when they apply a provider-table route. If a
+user-owned root URL sends the command down the no-routing branch, the CLI omits the warning. In
+client-compaction mode, the CLI can retain that URL, apply the `opencodex` provider table, and
+include the warning. The dashboard shows a separate preference hint when either setting is enabled.
+It appears once if both settings are enabled, regardless of the root URL. The hint reports enabled
+preferences; it does not mean Authless Desktop is effective on the current route. Authless Desktop
+applies only to effective loopback authless routing and is ignored for remote-client routing or
+listeners that require an admission header. The warning is not a migration: OpenCodex does not edit
+provider tags merely to influence a client-side list filter. Verify the conversation in native Codex
+and the app-server/client version; do not rewrite paginated history to make a remote list include it.
 
 Do not rewrite an active paginated rollout or thread row to migrate those conversations yourself. Close the affected conversation before any recovery, and report the exact error and versions without uploading private history. A backup or a successful script alone does not prove the conversation is visible again. Check the restored conversation in Codex after reopening.
 

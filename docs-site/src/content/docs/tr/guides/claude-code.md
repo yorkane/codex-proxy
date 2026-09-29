@@ -188,8 +188,10 @@ Picker modu first-party modunun bir parçasıdır. macOS'ta first-party seçildi
 açıktır; `claudeCode.intercept.picker: false` ayarlanırsa kapalı kalır. First-party Desktop'ın Code
 sekmesindeki model seçiciyi değiştirerek kullanılabilir opencodex modellerini adlarıyla listeler.
 İlk etkinleştirmede macOS, giriş anahtar zincirinde yerel bir sertifika yetkilisine güvenmenizi isteyebilir.
-Bu yetkili `claude.ai` ve alt alan adlarıyla sınırlıdır; iletişim kutusu bu yerel CA için tek seferlik güven
-adımıdır.
+Bu yetkili `claude.ai` ve alt alan adlarıyla sınırlıdır. İmza anahtarı yalnızca çalışan OpenCodex sürecinde
+bulunduğundan her OpenCodex yeniden başlatılmasında yeni bir yetkili yayımlanır ve macOS güveni yeniden ister —
+her yeniden başlatmadan sonra iletişim kutusunu onaylayın veya daha sonra `ocx claude desktop picker trust`
+komutunu çalıştırın.
 
 Picker modu açıkken Claude Desktop ağa OpenCodex üzerinden çıkar. OpenCodex durursa Desktop, tamamen yeniden
 başlatılana veya picker modu kapatılana kadar çevrimdışı kalır. Durumu `ocx claude desktop picker status`
@@ -248,9 +250,11 @@ alternatif bir Desktop kullanıcı verisi kökü için `CLAUDE_USER_DATA_DIR`
 değerini ayarlayın. Eski `Claude-3p` dizini otomatik olarak okunmaz veya
 silinmez.
 
-Anthropic harici rotalar, `claude-opus-4-8-YYYYMMDD` gibi kararlı takma adlar
-alır; yıl 2026 ile 2035 arasındadır. Tarih benzeri kısım, modelin çıkış tarihi
-değil, sentetik bir rota yuvasıdır. Önce 2026 yuvaları atanır, bu nedenle mevcut
+Anthropic harici rotalar, `p` önekli dört karakterli bir kod kullanan
+`claude-opus-4-8-p01q` gibi kararlı takma adlar alır. OpenCodex profil atamalarını
+kararlı tutmak için dahili olarak sentetik tarih yuvaları saklar; ancak güncel
+Desktop sürümleri etkin oturum modellerini karşılaştırırken sondaki tarihleri
+kaldırdığı ve model değişimini engelleyebildiği için bu tarihi Desktop model kimliği olarak yayımlamaz. Mevcut
 takma adlar kimliklerini korur; sonraki yıllara ancak 2026 dolduktan sonra
 geçilir. Gerçek Anthropic Claude rotaları kendi gerçek kimliklerini korur.
 Yeni rotalar varsayılan olarak Opus ailesine gider, ancak bir rotayı taşımak
@@ -267,7 +271,7 @@ kimliğidir; bu yüzden bir seçici satırını bir opencodex rotasına bağlars
 
 ```bash
 ocx claude desktop bind claude-sonnet-4-6 xai/grok-4.7
-ocx claude desktop bind claude-opus-4-6 native/gpt-6-sol
+ocx claude desktop bind claude-opus-4-6 native/gpt-6.1-sol
 ocx claude desktop unbind claude-opus-4-6
 ```
 
@@ -417,11 +421,11 @@ satırı için bir tane gönderir (`Routed by OpenCodex to <provider>/<model>`; 
 | Yüzey | Format | Örnek |
 | --- | --- | --- |
 | Claude Code CLI | `ocx-claude-<provider>--<model>` (düz) veya `ocx-claude2-…` (kaçışlı) | `ocx-claude-openai--gpt-5.6-sol` |
-| Claude Desktop 3P | `claude-opus-4-8-<code>` (3 karakterli base36 karması) | `claude-opus-4-8-ncb` |
+| Claude Desktop 3P | `claude-opus-4-8-p<code>` (3 karakterli base36 profil yuvası) | `claude-opus-4-8-p01q` |
 
 Proxy, istek başına aileyi seçer: `?ids=cli` veya `?ids=desktop` kazanır; aksi
 takdirde `claude-code/*` kullanıcı aracısı okunabilir CLI biçimini alır ve diğer
-istemciler Desktop karmasını alır. Her iki aile de süresiz olarak kodu çözer —
+istemciler Desktop kodunu alır. Her iki aile de süresiz olarak kodu çözer —
 her iki biçimde `settings.json` içine kaydedilen bir model çalışmaya devam eder.
 Her girdi, `gemini-3-pro (gemini)` gibi dürüst bir görünen adın yanı sıra Claude
 Desktop'ın üçüncü taraf ağ geçidi modunun çaba seçicisini sunabilmesi için resmi
@@ -846,3 +850,7 @@ tutucusu olarak `"haiku"` iletin.
 `config.json` içindeki `claudeCode.stabilizePromptCache: true`, dönüştürülen rotalarda sistem talimatlarının sonundaki desteklenen Claude bildirimlerini son kullanıcı mesajına taşır. Varsayılan değer `false` olur. Yalnızca bu rol değişikliği istemcileriniz için uygunsa etkinleştirin. Kod bloklarındaki örnekler ve eşleşmeyen metin korunur; yerel Anthropic aktarımı değişmez. Meta veri yoksa önbellek anahtarı kararlı talimatlardan hesaplanır. Bu seçenek konuşma kimliği oluşturmaz veya üst hizmette önbellek isabeti garanti etmez.
 
 Dönüştürülen tüm Chat rotalarında zaman çizelgesi hatırlatmaları, bekleyen araç sonuçlarından sonra konuşmadaki konumlarını korur. Böylece yeni bir hatırlatma eklenmesi baştaki sistem istemini yeniden yazmaz ve konuşmanın ortasındaki bir yönerge, izlemesi gereken turların önüne geçmez. O konumun hangi rolü taşıdığı ayrı bir karardır: sağlayıcı `foldDeveloperRoleToSystem: false` kaydetmedikçe hatırlatma `system` olarak gönderilir; bu kayıt, üst hizmetin `developer` rolünü kabul ettiğini belirtir ve rol aynı konumda iletilir. Kabul etmeyen bir üst hizmet `400 role 'developer' is not allowed` yanıtı verir ve tur hiç başlamaz; kaydı olmayan hedefin katlanmasının nedeni budur. Bu davranış `stabilizePromptCache` açık veya kapalıyken geçerlidir; yerel Anthropic aktarımı değişmez. Önbelleğin yeniden kullanımı için kararlı bir oturum kimliği ve kullanılabilir üst hizmet önbelleği hâlâ gereklidir. Önceki talimatların veya araçların değişmesi ve konuşmanın sıkıştırılması da önbellek isabetini etkileyebilir; hatırlatma sırasını korumak tek başına yeniden kullanımı garanti etmez.
+
+### `anthropicAccountPool.routes`
+
+Havuz açıkken `anthropicAccountPool.routes` kuralları ilk eşleşen model için ilk seçimi ve 429 yeniden denemelerini kayıtlı hesaplarla sınırlar. Uygun hesap yoksa istek yerel olarak reddedilir; `fallback: true` normal havuza izin verir. Kurallar model erişimini kanıtlamaz.
