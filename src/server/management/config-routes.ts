@@ -369,8 +369,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
       codexDesktopAuthless: config.codexDesktopAuthless === true,
-      managementAuthDisabled: config.managementAuthDisabled === true,
-      disableOriginCheck: config.disableOriginCheck === true,
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
       codexClientCompaction: config.codexClientCompaction === true,
       codexDesktopSwitches: describeCodexDesktopSwitches(config, await observedCodexDesktopSwitchApply()),
@@ -468,8 +466,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       fastRows?: unknown;
       codexMainAccountHardLock?: unknown;
       codexDesktopAuthless?: unknown;
-      managementAuthDisabled?: unknown;
-      disableOriginCheck?: unknown;
       codexClientCompaction?: unknown;
       compactionRouting?: unknown;
       compactionRecovery?: unknown;
@@ -481,17 +477,15 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexAccountPickerEnabled === undefined
       && body.codexQuotaAutoRefresh === undefined
       && body.oauthOpenBrowser === undefined
-      && body.managementAuthDisabled === undefined
       && body.codexDesktopAuthless === undefined
       && body.ultraFastTier === undefined
       && body.fastRows === undefined
       && body.codexMainAccountHardLock === undefined
-      && body.disableOriginCheck === undefined
       && body.codexClientCompaction === undefined
       && body.compactionRouting === undefined
       && body.compactionRecovery === undefined
       && body.memoryModels === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, ultraFastTier, fastRows, codexMainAccountHardLock, codexDesktopAuthless, codexClientCompaction, managementAuthDisabled, disableOriginCheck, compactionRouting, compactionRecovery, or memoryModels" }, 400);
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, ultraFastTier, fastRows, codexMainAccountHardLock, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, or memoryModels" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -505,12 +499,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     if (body.codexAccountPickerEnabled !== undefined
       && typeof body.codexAccountPickerEnabled !== "boolean") {
       return jsonResponse({ error: "codexAccountPickerEnabled boolean is required" }, 400);
-    }
-   if (body.managementAuthDisabled !== undefined && typeof body.managementAuthDisabled !== "boolean") {
-     return jsonResponse({ error: "managementAuthDisabled boolean is required" }, 400);
-   }
-    if (body.disableOriginCheck !== undefined && typeof body.disableOriginCheck !== "boolean") {
-      return jsonResponse({ error: "disableOriginCheck boolean is required" }, 400);
     }
     if (body.ultraFastTier !== undefined && typeof body.ultraFastTier !== "boolean") {
       return jsonResponse({ error: "ultraFastTier boolean is required" }, 400);
@@ -624,12 +612,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       }
       if (typeof body.oauthOpenBrowser === "boolean") {
         config.oauthOpenBrowser = body.oauthOpenBrowser;
-      }
-     if (typeof body.managementAuthDisabled === "boolean") {
-       config.managementAuthDisabled = body.managementAuthDisabled;
-     }
-      if (typeof body.disableOriginCheck === "boolean") {
-        config.disableOriginCheck = body.disableOriginCheck;
       }
       // Off deletes the key rather than persisting `false`: absent is the documented
       // default, and a written `false` would survive as a decision nobody made.
@@ -750,8 +732,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       catalogRefreshPending,
       fastRows: config.fastRows !== false,
       codexDesktopAuthless: authlessIsEnabled,
-      managementAuthDisabled: config.managementAuthDisabled === true,
-      disableOriginCheck: config.disableOriginCheck === true,
       codexClientCompaction: clientCompactionIsEnabled,
       codexDesktopSwitches,
       compactionRouting: config.compactionRouting ?? null,

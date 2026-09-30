@@ -96,7 +96,6 @@ export function isSameOriginAsRequest(req: Request, origin: string): boolean {
 }
 
 export function isAllowedRequestOrigin(req: Request, config: RequestPolicyView): boolean {
-  if (config.disableOriginCheck === true) return true;
   const origin = req.headers.get("Origin");
   if (!isApiAuthRequired(config)) {
     if (!isLoopbackRequestHost(req.headers.get("Host"))) return false;
@@ -166,13 +165,9 @@ export function managementRequestOrigin(req: Request, config: OcxConfig): string
 }
 
 export function isAllowedManagementOrigin(req: Request, config: OcxConfig): boolean {
-  if (config.disableOriginCheck === true) return true;
   const requestOrigin = managementRequestOrigin(req, config);
   if (!requestOrigin) return false;
   const origin = req.headers.get("Origin");
-  if (config.managementAuthDisabled === true && isLoopbackHostname(config.hostname) && origin) {
-    if (isLoopbackOriginValue(origin) || isExtraAllowedOrigin(origin, config)) return true;
-  }
   return !origin || origin === requestOrigin || isExtraAllowedOrigin(origin, config);
 }
 
@@ -320,7 +315,7 @@ export interface LinkIngressPolicy {
   allowedKeyIds: ReadonlySet<string>;
 }
 
-export type RequestPolicyView = Pick<OcxConfig, "hostname" | "corsAllowOrigins" | "apiKeys" | "disableOriginCheck"> & {
+export type RequestPolicyView = Pick<OcxConfig, "hostname" | "corsAllowOrigins" | "apiKeys"> & {
   linkIngress?: LinkIngressPolicy;
 };
 
@@ -336,7 +331,6 @@ export function requestPolicyView(
 ): RequestPolicyView {
   return {
     hostname: bindHostname,
-    ...(config.disableOriginCheck ? { disableOriginCheck: config.disableOriginCheck } : {}),
     ...(config.corsAllowOrigins ? { corsAllowOrigins: config.corsAllowOrigins } : {}),
     ...(config.apiKeys ? { apiKeys: config.apiKeys } : {}),
     ...(linkIngress ? { linkIngress } : {}),

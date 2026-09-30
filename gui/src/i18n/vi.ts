@@ -3543,10 +3543,6 @@ export const vi: Record<TKey, string> = {
   "models.fastRows.updateFailed": "Không thể cập nhật cài đặt hàng Fast.",
   // Fork-owned keys (shadow intercept UI + management-auth toggles). Technical terms kept in English.
   "nav.shadow": "Shadow",
-  "dash.managementAuthDisabled": "Disable management API auth",
-  "dash.managementAuthDisabledHint": "Skip the admin token on /api/* so the dashboard and API are accessible without credentials. Loopback binds only.",
-  "dash.disableOriginCheck": "Disable origin check",
-  "dash.disableOriginCheckHint": "Disable all origin/CORS checks so an external reverse proxy can reach the dashboard and API. Use with care.",
   "models.shadowCallFallback": "Fallback for unlisted source models",
   "models.shadowCallCustom": "Custom source model",
   "models.shadowCallCustomPlaceholder": "Custom source model id",

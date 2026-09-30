@@ -52,9 +52,8 @@ curl -s http://127.0.0.1:10100/healthz   # 期望 {"status":"ok",...}
     "modelMap": { "gpt-5.6-terra": "my-llm/qwen3-next" },
     "sourceModels": ["gpt-5.6-terra"]   // 自定义来源 id 必须同时登记在这里
   },
-  // 3) 管理 API 免 token（仅绑定 loopback 时生效）；反代场景再加 disableOriginCheck
-  "managementAuthDisabled": true,
-  "disableOriginCheck": false
+  // 3) 外部反代场景：放行反代 origin（管理面 admin token 不变；浏览器经 gui-session 免凭证，脚本带 x-opencodex-api-key）
+  "corsAllowOrigins": ["https://your-proxy.example.com"]
 }
 ```
 
@@ -95,8 +94,8 @@ WantedBy=multi-user.target
 3. 写 ~/.opencodex/config.json：defaultProvider 与 providers 用我提供的 baseUrl/apiKey/models；
    如需 Codex 原生模型改道，配置 shadowCallIntercept.modelMap（来源模型 → provider/model），
    自定义来源模型 id 要同时写进 sourceModels；provider 可选 undeclaredToolAllowlist
-   容忍模型幻觉工具名；管理 API 免 token 用 managementAuthDisabled=true（仅 loopback 生效），
-   外部反代访问再加 disableOriginCheck=true。
+   容忍模型幻觉工具名；管理 API 走 admin token（浏览器经 gui-session 免凭证，脚本带 x-opencodex-api-key），
+   外部反代访问把 origin 写进 corsAllowOrigins。
 4. 启动并验证：ocx start --port 10100 &（或复用已有 systemd 单元，停→换→起一步做完）；
    curl -s http://127.0.0.1:10100/healthz 应返回 status ok；
    再 POST /v1/responses 发一个带 tools 声明的最小请求，确认工具往返正常、无 502。
@@ -110,6 +109,6 @@ WantedBy=multi-user.target
 | 影子调用拦截 | `shadowCallIntercept` | 按来源模型把 Codex 原生模型（luna/sol/terra/5.5/5.4-mini 及自定义）换成任意已配置 provider/model |
 | 幽灵工具容忍 | `providers.*.undeclaredToolAllowlist` | 幻觉工具名命中即整条剥除、回合继续；未命中的仍 502 fail-closed |
 | 统一工具名修复 | （无需配置） | 内置 emitted-call-guard：可修复的错名自动改写、命名空间误调回喂纠错指令、纯幻影按名单丢弃 |
-| 管理面免认证 | `managementAuthDisabled` / `disableOriginCheck` | 本地免 token / 反代放行；默认全关，行为与上游一致 |
+| 反代 origin 白名单 | `corsAllowOrigins`（上游原生） | 外部反代放行指定 origin；管理面 admin token 不可绕过 |
 
 更细的设计与运维手册见 fork 运维层仓库根目录的 AGENTS.md / design.md。

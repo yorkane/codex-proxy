@@ -75,7 +75,7 @@ type CachedOverview = {
 
 type MaMode = "v1" | "default" | "v2";
 
-type CodexPreference = "codexAutoStart" | "codexDesktopAuthless" | "codexClientCompaction" | "managementAuthDisabled" | "disableOriginCheck";
+type CodexPreference = "codexAutoStart" | "codexDesktopAuthless" | "codexClientCompaction";
 type DashboardSettingsState = {
   settings: SettingsData | null;
   beforeSave: SettingsData | null;
@@ -773,51 +773,6 @@ const [maBusy, setMaBusy] = useState(false);
       dispatchSettings({ type: "save-finished" });
     }
   };
-  const toggleManagementAuth = async () => {
-    if (!settings || settingsSaving) return;
-    const next = !settings.managementAuthDisabled;
-    settingsMutationInFlightRef.current = true;
-    dispatchSettings({ type: "save-started", key: "managementAuthDisabled", value: next });
-    try {
-      const res = await fetch(`${apiBase}/api/settings`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ managementAuthDisabled: next }),
-      });
-      const data = await requireJson<SettingsData>(res, "save failed");
-      settingsMutationEpochRef.current += 1;
-      dispatchSettings({ type: "save-succeeded", key: "managementAuthDisabled", settings: data });
-    } catch {
-      dispatchSettings({ type: "save-failed" });
-      setError(true);
-    } finally {
-      settingsMutationInFlightRef.current = false;
-      dispatchSettings({ type: "save-finished" });
-    }
-  };
-
-  const toggleDisableOriginCheck = async () => {
-    if (!settings || settingsSaving) return;
-    const next = !settings.disableOriginCheck;
-    settingsMutationInFlightRef.current = true;
-    dispatchSettings({ type: "save-started", key: "disableOriginCheck", value: next });
-    try {
-      const res = await fetch(apiBase + "/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ disableOriginCheck: next }),
-      });
-      const data = await requireJson<SettingsData>(res, "save failed");
-      settingsMutationEpochRef.current += 1;
-      dispatchSettings({ type: "save-succeeded", key: "disableOriginCheck", settings: data });
-    } catch {
-      dispatchSettings({ type: "save-failed" });
-      setError(true);
-    } finally {
-      settingsMutationInFlightRef.current = false;
-      dispatchSettings({ type: "save-finished" });
-    }
-  };
   const toggleCodexAutoStart = () => toggleCodexSetting("codexAutoStart");
   const toggleCodexDesktopAuthless = () => toggleCodexSetting("codexDesktopAuthless");
   const toggleCodexClientCompaction = () => toggleCodexSetting("codexClientCompaction");
@@ -991,8 +946,6 @@ maMode, maModeResolved, maBusy, setMaHelpOpen, maHelpOpen,
     sidecarCodexApply,
     saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, toggleCodexDesktopAuthless,
     toggleCodexClientCompaction, runSync, clearSyncFeedback,
-    toggleManagementAuth,
-    toggleDisableOriginCheck,
     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
   };
 }
