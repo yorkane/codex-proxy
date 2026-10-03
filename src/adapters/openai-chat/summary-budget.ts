@@ -2,9 +2,18 @@ import { modelRecordValue } from "../../reasoning-effort";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../types";
 
 export function resolveMaxTokens(provider: OcxProviderConfig, parsed: OcxParsedRequest): number | undefined {
-  return parsed.options.maxOutputTokens
-    ?? modelRecordValue(provider.modelMaxOutputTokens, parsed.modelId)
+  const configured = modelRecordValue(provider.modelMaxOutputTokens, parsed.modelId)
     ?? provider.defaultMaxOutputTokens;
+  const requested = parsed.options.maxOutputTokens;
+  // `modelMaxOutputTokens` declares what the engine can actually emit, so it caps the caller's
+  // allowance instead of only filling in a missing one. Codex has no max-output field in its model
+  // catalog and therefore sends the whole advertised context window as `max_output_tokens`; a
+  // routed model whose real window is larger than the advertised one would then fail the upstream
+  // pre-check (input + max_tokens > engine window) while auto-compaction, which only watches the
+  // input against the advertised window, still sees room to spare. A caller asking for less than
+  // the ceiling is still served exactly what it asked for.
+  if (configured === undefined) return requested;
+  return requested === undefined ? configured : Math.min(requested, configured);
 }
 
 function textContent(value: unknown): string | undefined {
