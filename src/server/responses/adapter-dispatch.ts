@@ -1,3 +1,5 @@
+import { classifyAnthropic429 } from "../../oauth/anthropic-rate-limit-policy";
+import { rotateAnthropicAccountOnResponse } from "../../oauth/anthropic-account-refusal";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
 import { isLocalUpstream } from "../../lib/local-upstream";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
@@ -57,8 +59,6 @@ import { bindRouteReasoningReplayScope } from "./core-replay";
 import {
   AnthropicAccountCooldownError,
   ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
-  rotateAnthropicAccountOn429,
-  recordAnthropicAccount429,
   getAnthropicPoolAccessSnapshot,
   formatAnthropicProviderForLog,
 } from "../../oauth/anthropic-routing";
@@ -692,7 +692,8 @@ export async function prepareAdapterExchange(
           refreshed = await refreshResolvedOAuthSelection(transportState.sentOAuthSnapshot);
         } catch (err) {
           const failed = transportState.sentOAuthSnapshot;
-          if (route.providerName === "google-antigravity" && err instanceof OAuthLoginRequiredError && failed
+          if (route.providerName === "google-antigravity" && !antigravityAuthRotationAttempted
+            && err instanceof OAuthLoginRequiredError && failed
             && getAccountSet(route.providerName)?.accounts.some(row =>
               row.id === failed.accountId && row.needsReauth === true)) {
             antigravityAuthRotationAttempted = true;
@@ -986,27 +987,22 @@ export async function prepareAdapterExchange(
         if (isNonReplayableResponse(upstreamResponse)) continue recovery;
      }
 
-      // Opt-in Anthropic OAuth account pool (#294): cool the failed account and retry
-      // with another eligible OAuth account (bounded per request). Disabled by default.
+      // Anthropic OAuth: recover a rate limit or proven account entitlement refusal
+      // before output, within the shared request and account rotation limits.
       while (
-        upstreamResponse.status === 429
+        (upstreamResponse.status === 429 || upstreamResponse.status === 403)
         && transportState.anthropicPoolAccountId
-        && transportState.anthropicPoolFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST
       ) {
-        const nextAccountId = rotateAnthropicAccountOn429(
-          config,
-          transportState.anthropicPoolAccountId,
-          upstreamResponse.headers.get("retry-after"),
-          anthropicSessionKey,
-          Date.now(),
-          upstreamResponse.headers,
-          transportState.anthropicRouteDecision,
-        );
+        const nextAccountId = await rotateAnthropicAccountOnResponse(upstreamResponse, {
+          config, accountId: transportState.anthropicPoolAccountId, sessionKey: anthropicSessionKey,
+          model: route.modelId, requestKey: transportState, decision: transportState.anthropicRouteDecision, signal: upstream.signal,
+          canRetry: !sendBudgetExhausted() && transportState.anthropicPoolFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
+        });
         if (!nextAccountId) break;
-        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
         try {
           const admitted = await commitResolvedOAuthSelection(await getAnthropicPoolAccessSnapshot(nextAccountId));
           if (!admitted) throw new Error("OAuth selection changed during recovery");
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
           transportState.anthropicPoolAccountId = admitted.accountId;
           transportState.anthropicPoolFailovers += 1;
           route.provider = { ...route.provider, apiKey: admitted.accessToken };
@@ -1025,11 +1021,6 @@ export async function prepareAdapterExchange(
        } catch {
           break;
         }
-      }
-      if (upstreamResponse.status === 429 && transportState.anthropicPoolAccountId
-        && transportState.anthropicPoolFailovers >= ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST) {
-        recordAnthropicAccount429(config, transportState.anthropicPoolAccountId,
-          upstreamResponse.headers.get("retry-after"), Date.now(), upstreamResponse.headers);
       }
       // Generic OAuth account failover (#2568) rotates reactively after a refusal when
       // two accounts are stored. Kiro additionally classifies bounded 400/403 refusals;
@@ -1102,6 +1093,11 @@ export async function prepareAdapterExchange(
             resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire, route.staticPolicy),
             config.cacheRetention,
           );
+          bindRouteReasoningReplayScope({
+            parsed, providerName: route.providerName, provider: route.provider,
+            adapterName: transportState.activeAdapter.name,
+            oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot,
+          });
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, transportState.activeAdapter.name, logCtx.accountLogLabel);
           recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, transportState.activeAdapter.name);
           // The replay IS this hop's send, so hand the reservation down and let the layer that
@@ -1201,6 +1197,13 @@ export async function prepareAdapterExchange(
             resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire, route.staticPolicy),
             config.cacheRetention,
           );
+          // Same contract as the Kiro refusal arm: the replay must carry the replacement
+          // account's continuation owner and reasoning scope, never the account that just 429'd.
+          bindRouteReasoningReplayScope({
+            parsed, providerName: route.providerName, provider: route.provider,
+            adapterName: transportState.activeAdapter.name,
+            oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot,
+          });
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, transportState.activeAdapter.name, logCtx.accountLogLabel);
           recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, transportState.activeAdapter.name);
           // The replay IS this hop's send, so hand the reservation down and let the layer that
@@ -1425,6 +1428,7 @@ export async function prepareAdapterExchange(
           status: upstreamResponse.status,
           message,
           upstreamRetryAfter,
+          includeDefault: !(transportState.anthropicPoolAccountId && classifyAnthropic429(upstreamResponse.headers) === "request-scoped-unknown"),
         });
       return formatErrorResponse(
         upstreamResponse.status,

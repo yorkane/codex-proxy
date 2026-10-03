@@ -70,8 +70,8 @@ existing wire and tier policy. The OAuth lane is service-tier classified per mod
 `devlog/_plan/260923_grok47_parity/010_probe-evidence.md` records 4.7): grok-4.7, grok-4.6, grok-4.5,
 grok-4.3, grok-4.20-0309-reasoning, grok-4.20-0309-non-reasoning, grok-build-0.1 and
 grok-composer-2.5-fast accept `service_tier: "priority"` over Grok OAuth and echo it, so those
-routes resolve Fast-eligible, publish `--fast` rows, and forward a caller-sent tier on either
-wire (`chatServiceTier: true`). grok-4.20-multi-agent-0309 stays unclassified with its
+routes resolve Fast-eligible, publish `--fast` rows, and forward a caller-sent tier on either wire (`chatServiceTier: true`) — except OAuth grok-4.7, whose Fast serializes `grok-4.7-build-fast` with no tier ([xAI Grok](../providers/xai-grok.md#oauth-fast-tier-priority-processing)).
+grok-4.20-multi-agent-0309 stays unclassified with its
 caller-tier pin: the gateway accepts the field but answers `service_tier: "default"`, a live
 downgrade rather than a fast tier.
 
@@ -376,7 +376,7 @@ destination receives unchanged whenever a caller sends one itself.
 ## Passthrough SSE stream shapes (#314)
 
 Native passthrough SSE has TWO shapes, selected per request in
-`src/server/responses/core.ts`:
+`src/server/responses/core.ts`; both apply the client-only [hosted-image projection](../data-planes/images.md#hosted-responses-image-display) after continuation-cache observers: `src/lib/errors.ts` selects the first nonblank string in the canonical upstream message precedence (error, last_error, response error, incomplete details, then a flat error event). Malformed or blank fields cannot hide a later valid diagnostic; retained text is not rewritten.
 
 - **Default outside Windows: tee + background inspection.** `upstreamResponse.body.tee()` sends
   branch[0] through a terminal-aware client relay while branch[1] is
@@ -503,7 +503,7 @@ No pool timer or shutdown registration exists before eligible traffic activates 
 Translated response request-log tracking and the heartbeat relay also reuse
 `createSseInspector`. This keeps every client-facing SSE observation path on
 the same byte-bounded, discard-and-resynchronize frame policy and ensures the
-request-log, first-output, and terminal observers share one payload parse.
+request-log, first-output, and terminal observers share one payload parse. First-output timing recognizes nonempty text, reasoning, function-argument, and custom-tool-input deltas; empty deltas, tool scaffolding, control/echo frames, and terminal snapshots do not start it.
 The inspector records a structured `response.failed` status before invoking the
 terminal observer. Native Responses, Chat Completions, Claude Messages, and WebSocket
 request logs must therefore finalize through the context-aware terminal mapper; recognized

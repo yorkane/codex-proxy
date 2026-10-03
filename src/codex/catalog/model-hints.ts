@@ -437,6 +437,14 @@ export const CALLABLE_CONFIGURED_COMPATIBILITY_MODELS: Readonly<Record<string, R
   "codebuddy-cn": new Set([
     "default",
   ]),
+  // MiniMax serves MiniMax-M3.1-Flash-Preview to Token Plan keys, but its /v1/models roster
+  // does not list the preview (probed 2026-09-30), so a live roster would drop it.
+  minimax: new Set([
+    "MiniMax-M3.1-Flash-Preview",
+  ]),
+  "minimax-cn": new Set([
+    "MiniMax-M3.1-Flash-Preview",
+  ]),
   kimi: new Set([
     "k3[1m]",
     "kimi-k2.7-code",
@@ -596,7 +604,12 @@ export function modelInputModalities(
   ))) {
     return ["text", "image"];
   }
-  return undefined;
+  // OpenGateway publishes modalities as { input: [...], output: [...] }, not an array.
+  // Append this fallback after all recognized signals so existing providers keep their
+  // resolution, and retain Codex's closed enum rather than advertising output modalities.
+  const nestedInput = normalizedStringList(plainRecord(item.modalities)?.input, 8, 24)
+    ?.filter(value => value === "text" || value === "image" || value === "audio");
+  return nestedInput && nestedInput.length > 0 ? nestedInput : undefined;
 }
 
 /**
@@ -680,6 +693,9 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
       // real values. Appended after the recognized fields for the same reason as the
       // llama.cpp entries above: no provider that already resolves changes behavior.
       capabilityRecord?.context_length,
+      // OpenGateway publishes a top-level context_window. Keep this last so catalogs
+      // already resolving through any recognized field retain their existing window.
+      item.context_window,
     );
   const maxInputTokens = positiveSafeInteger(limits?.max_input_tokens, item.max_input_tokens);
   const maxOutputTokens = positiveSafeInteger(

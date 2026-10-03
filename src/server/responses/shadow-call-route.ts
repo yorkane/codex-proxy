@@ -48,10 +48,16 @@ export function resolveShadowRoute(args: {
   parsed: OcxParsedRequest;
   config: OcxConfig;
   logCtx: RequestLogContext;
-  options: { comboAttempt?: boolean };
-  resolveRoute: (modelId: string) => RouteResult;
+  /**
+   * Resolve a candidate target WITHOUT claiming it as the request's policy route. Upstream 2.76
+   * probes the shadow target before interception is decided, so a declined policy target must not
+   * lend its eligibility or "policy" route kind to the request.
+   */
+  probeRoute: (modelId: string) => RouteResult;
+  /** Claim the accepted target as the request's route (request-owned policy capture). */
+  acceptRoute: (accepted: RouteResult) => RouteResult;
 }): ShadowRouteOutcome {
-  const { parsed, config, logCtx, options, resolveRoute } = args;
+  const { parsed, config, logCtx, probeRoute, acceptRoute } = args;
   const sci = config.shadowCallIntercept;
   if (!sci?.enabled || !isShadowSourceModel(parsed.modelId, sci.sourceModels)) return {};
   const sourcePrefix = shadowSourceModelPrefix(parsed.modelId, sci.sourceModels)!;
@@ -64,7 +70,7 @@ export function resolveShadowRoute(args: {
     sourceIdentity = { providerName: resolvedSource.providerName, modelId: sourcePrefix };
   } catch { /* Native Codex helper calls remain OpenAI-owned without an enabled OpenAI route. */ }
   // A dead target fails this helper call once, before any send (#5618).
-  const target = resolveShadowCallTarget(replacement, resolveRoute);
+  const target = resolveShadowCallTarget(replacement, probeRoute);
   if ("unavailable" in target) {
     logCtx.shadowCallRewrittenFrom = sanitizeLogMetadataString(sourcePrefix);
     logCtx.errorCode = INTERCEPT_TARGET_UNAVAILABLE_CODE;
@@ -89,7 +95,7 @@ export function resolveShadowRoute(args: {
   // replayed tool names are a property of the replacement model, not of any
   // provider, and direct (non-intercepted) traffic keeps fail-closed.
   parsed._shadowIntercepted = true;
-  return { route: targetRoute };
+  return { route: acceptRoute(targetRoute) };
 }
 
 /**
