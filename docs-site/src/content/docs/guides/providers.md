@@ -210,6 +210,8 @@ ocx logout <provider>
 | `devin` | `devin` | `https://server.codeium.com` | Experimental unofficial Cognition/Devin bridge. Login first imports the credential the installed Devin CLI already holds (`devin auth login` writes a `devin-session-token` to its own `credentials.toml`); when none is present it opens Auth0 browser sign-in and exchanges the pasted token via Cognition's `RegisterUser` for a long-lived API key. `ocx login devin-cli` remains as a deprecated alias. Models are discovered per account with `GetCascadeModelConfigs`. Account quota comes from `GetUserStatus` under one eight-second request and body deadline: dated daily and weekly windows, plus the monthly prompt and flex credit pool for a credit-billed plan or an unknown strategy with both reset dates absent when a balance field is present. Negative used credits omit the monthly window; valid zero available credits mark it exhausted. A timed-out probe keeps the last good quota. Not shown in the dashboard preset by default. Chat and usage reporting are verified against a live account across three models. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
 
+Google Antigravity groups a model's complete `low` / `medium` / `high` variants into one entry with an effort selector. This includes Claude Opus and Sonnet 5.5 and future versions discovered during automatic refresh. Partial sets remain separate. Existing enabled/disabled choices carry into the grouped entry; genuinely new models still follow your New model policy. Saved suffix IDs continue to request their original tier. Grouped effort routing survives a proxy restart when model discovery is temporarily unavailable. A running Codex session may need to reload its model list after catalog refresh.
+
 Google Antigravity account and provider quota probes use fixed Google accounting endpoints, including the models fallback. They support transparent Fake-IP DNS for those destinations while retaining TLS verification, redirect rejection and private-address checks. A custom provider base URL changes model requests, not quota destinations; `NO_PROXY` continues to select the direct-route policy.
 
 ### Google tool-schema loss diagnostics
@@ -602,9 +604,9 @@ OpenAI-compatible API gateway at [tokenlab.sh](https://tokenlab.sh/r/OPENCODEX),
 operated by TOKENLAB AI INC.
 Create a workspace [API key](https://tokenlab.sh/dashboard/api?tab=keys), then run
 `ocx provider add tokenlab` or select **TokenLab** in the dashboard's **Add provider** picker.
-TokenLab maintains a step-by-step [OpenCodex integration guide](https://docs.tokenlab.sh/integrations/opencodex)
-([한국어](https://docs.tokenlab.sh/ko/integrations/opencodex)) covering setup and per-model routing.
-The preset uses [Chat Completions](https://docs.tokenlab.sh/quickstart) and discovers models at
+TokenLab maintains a step-by-step [OpenCodex integration guide](https://tokenlab.sh/docs/en/integrations/opencodex)
+([한국어](https://tokenlab.sh/docs/ko/integrations/opencodex)) covering setup and per-model routing.
+The preset uses [Chat Completions](https://tokenlab.sh/docs/en/quickstart) and discovers models at
 `GET /v1/models?category=chat`, keeping only entries that declare `tool-use` capability.
 Image, video, audio, embedding and decision models are excluded from this chat preset.
 
@@ -613,8 +615,8 @@ Each model then uses the request format TokenLab declares for it
 
 | Models | Codex (Responses clients) | Chat clients | Claude Code (Anthropic clients) |
 | --- | --- | --- | --- |
-| `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `grok-4.7`, `deepseek-v4.1-flash`, `deepseek-v4-pro`, `kimi-k3`, `glm-5.3` | [Responses](https://docs.tokenlab.sh/api-reference/responses/create-response) | Chat Completions | Chat Completions |
-| `claude-*` | [Messages](https://docs.tokenlab.sh/api-reference/messages/create-message) | Messages | Messages |
+| `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `grok-4.7`, `deepseek-v4.1-flash`, `deepseek-v4-pro`, `kimi-k3`, `glm-5.3` | [Responses](https://tokenlab.sh/docs/en/api-reference/responses/create-response) | Chat Completions | Chat Completions |
+| `claude-*` | [Messages](https://tokenlab.sh/docs/en/api-reference/messages/create-message) | Messages | Messages |
 | Every other model, including `gemini-3.8-flash` | Chat Completions | Chat Completions | Chat Completions |
 
 To keep a model on Chat Completions, add it to the provider's `modelAdapters`, for example
@@ -622,7 +624,7 @@ To keep a model on Chat Completions, add it to the provider's `modelAdapters`, f
 provider points at `https://api.tokenlab.sh/v1`. OpenCodex sends no delivery-policy header, so
 your API key's own delivery policy decides how TokenLab serves each request.
 
-The [model catalog](https://docs.tokenlab.sh/api-reference/models/list-models) is public without
+The [model catalog](https://tokenlab.sh/docs/en/api-reference/models/list-models) is public without
 a key, but a supplied key is validated and scopes results to its model permissions and delivery
 policy. Use a valid key with a funded workspace for inference. `gpt-5.6-terra` is the seeded
 default; choose another discovered model if your key does not allow it. The provider and model

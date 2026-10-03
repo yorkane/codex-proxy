@@ -1218,6 +1218,7 @@ export async function prepareResponsesRequest(
     inboundWire,
     inboundTransport: options.inboundTransport,
     claudeGoAffinity: options.claudeGoAffinity,
+    droidDefaultEffort: options.droidDefaultEffort,
   });
   try {
     assertPolicyNormalizedRoute(policyScope, admittedPolicyRoute, route);
