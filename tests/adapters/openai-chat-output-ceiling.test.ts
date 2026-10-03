@@ -70,4 +70,16 @@ describe("resolveMaxTokens output ceiling", () => {
     const bare = { baseUrl: "https://upstream.example/v1", apiKey: "k" } as OcxProviderConfig;
     expect(resolveMaxTokens(bare, parsedWith("Q38-Flash-Next", 350000))).toBe(350000);
   });
+
+  test("caps a shadow-intercepted request routed by its provider-qualified id", () => {
+    // The shadow intercept rewrites parsed.modelId to the provider-qualified replacement
+    // ("llm-248/Q38-Flash-Next"), while the record is keyed by the bare model id. A lookup
+    // that does not see through the slash silently misses the ceiling, and the engine then
+    // receives the whole advertised window (2026-10-03 09:28 regression).
+    expect(resolveMaxTokens(provider, parsedWith("llm-248/Q38-Flash-Next", 350000))).toBe(131072);
+  });
+
+  test("caps a provider-qualified id when the caller declared no allowance", () => {
+    expect(resolveMaxTokens(provider, parsedWith("llm-248/Q38-Flash-Next"))).toBe(131072);
+  });
 });

@@ -2,7 +2,7 @@ import { modelRecordValue } from "../../reasoning-effort";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../types";
 
 export function resolveMaxTokens(provider: OcxProviderConfig, parsed: OcxParsedRequest): number | undefined {
-  const configured = modelRecordValue(provider.modelMaxOutputTokens, parsed.modelId)
+  const configured = configuredMaxOutputTokens(provider, parsed.modelId)
     ?? provider.defaultMaxOutputTokens;
   const requested = parsed.options.maxOutputTokens;
   // `modelMaxOutputTokens` declares what the engine can actually emit, so it caps the caller's
@@ -14,6 +14,24 @@ export function resolveMaxTokens(provider: OcxProviderConfig, parsed: OcxParsedR
   // the ceiling is still served exactly what it asked for.
   if (configured === undefined) return requested;
   return requested === undefined ? configured : Math.min(requested, configured);
+}
+
+/**
+ * `modelRecordValue` matches an exact id, a colon-delimited family, and case folds, but it
+ * does not see through a `provider/model` id. The shadow intercept rewrites `parsed.modelId` to
+ * the provider-qualified replacement, so a record keyed by the bare model id would be missed and
+ * the ceiling would silently not apply. Try the qualified id first, then its bare tail.
+ */
+function configuredMaxOutputTokens(
+  provider: OcxProviderConfig,
+  modelId: string,
+): number | undefined {
+  const direct = modelRecordValue(provider.modelMaxOutputTokens, modelId);
+  if (direct !== undefined) return direct;
+  const slash = modelId.indexOf("/");
+  return slash > 0 && slash < modelId.length - 1
+    ? modelRecordValue(provider.modelMaxOutputTokens, modelId.slice(slash + 1))
+    : undefined;
 }
 
 function textContent(value: unknown): string | undefined {
