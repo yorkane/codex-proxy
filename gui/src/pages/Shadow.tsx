@@ -177,6 +177,39 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
     replayMaxLimit,
     Math.max(replayMaxMin, Math.trunc(shadowCall?.emptyCompletionRetryMax ?? 1)),
   );
+  // Draft while the field has focus. A controlled number input that refuses to accept the empty
+  // string can never be cleared - React immediately re-renders the last value, so backspace does
+  // nothing and the box is impossible to edit. The draft is committed on blur/Enter and reverted
+  // when invalid, which keeps the guard without making the field read-only.
+  const [replayMaxDraft, setReplayMaxDraft] = useState<string | null>(null);
+  const replayMaxField = replayMaxDraft ?? String(replayMax);
+  const writeReplayMax = (raw: string): void => {
+    if (raw.trim() === "") return;
+    const value = Number(raw.trim());
+    if (!Number.isInteger(value) || value < replayMaxMin || value > replayMaxLimit) return;
+    if (value === replayMax) return;
+    // Functional update: this section renders before the settings have loaded, so shadowCall may
+    // still be null here (unlike the phantom block, which is guarded).
+    setShadowCall(prev => (prev ? { ...prev, emptyCompletionRetryMax: value } : prev));
+    void saveShadowCall({ emptyCompletionRetryMax: value });
+  };
+  // On blur an unfinished draft is discarded, which is the only honest reading of a cleared or
+  // out-of-range field: snap back to what the server actually holds instead of leaving a number on
+  // screen that was never saved.
+  const settleReplayMax = (): void => {
+    if (replayMaxDraft === null) return;
+    const raw = replayMaxDraft.trim();
+    setReplayMaxDraft(null);
+    if (raw !== "") {
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < replayMaxMin || value > replayMaxLimit) {
+        setFeedback({
+          ok: false,
+          message: `Replays must be a whole number between ${replayMaxMin} and ${replayMaxLimit}; kept ${replayMax}.`,
+        });
+      }
+    }
+  };
 
   return (
     <>
@@ -433,21 +466,15 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
                 min={replayMaxMin}
                 max={replayMaxLimit}
                 step={1}
-                value={replayMax}
+                value={replayMaxField}
                 disabled={saving}
                 aria-label="Empty completion replays"
-                onChange={e => {
-                  // An emptied field reads as "" and Number("") is 0, which would silently save
-                  // "replay nothing" the moment someone selects-all to retype. Only a non-empty,
-                  // integral, in-range value is a write; anything else leaves the last good number.
-                  const raw = e.target.value.trim();
-                  if (raw === "") return;
-                  const value = Number(raw);
-                  if (!Number.isInteger(value) || value < replayMaxMin || value > replayMaxLimit) return;
-                  // Functional update: this section renders before the settings have loaded, so
-                  // shadowCall may still be null here (unlike the phantom block, which is guarded).
-                  setShadowCall(prev => (prev ? { ...prev, emptyCompletionRetryMax: value } : prev));
-                  void saveShadowCall({ emptyCompletionRetryMax: value });
+                onFocus={() => setReplayMaxDraft(String(replayMax))}
+                onChange={e => { setReplayMaxDraft(e.target.value); writeReplayMax(e.target.value); }}
+                onBlur={settleReplayMax}
+                onKeyDown={e => {
+                  if (e.key === "Enter") { e.preventDefault(); if (replayMaxDraft !== null) writeReplayMax(replayMaxDraft); setReplayMaxDraft(null); }
+                  if (e.key === "Escape") setReplayMaxDraft(null);
                 }}
               />
             </label>

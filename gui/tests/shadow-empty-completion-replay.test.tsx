@@ -86,6 +86,28 @@ async function setCount(container: HTMLElement, value: string): Promise<void> {
   });
 }
 
+/** Select-all then backspace, the way someone actually retypes the number. */
+async function clearCount(container: HTMLElement): Promise<string> {
+  const input = replayCountInput(container);
+  await act(async () => {
+    input.focus();
+    const setter = Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")!.set!;
+    setter.call(input, "");
+    input.dispatchEvent(new testWindow.Event("input", { bubbles: true }) as unknown as Event);
+    await flush();
+  });
+  return input.value;
+}
+
+async function blurCount(container: HTMLElement): Promise<void> {
+  const input = replayCountInput(container);
+  await act(async () => {
+    input.blur();
+    input.dispatchEvent(new testWindow.Event("focusout", { bubbles: true }) as unknown as Event);
+    await flush();
+  });
+}
+
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map(k => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
   testWindow = new Window({ url: "http://localhost/#shadow" });
@@ -180,6 +202,43 @@ test("changing the count PUTs only the budget field", async () => {
     expect(puts).toHaveLength(1);
     expect(puts[0]!.body).toEqual({ emptyCompletionRetryMax: 3 });
     expect(replayCountInput(container).value).toBe("3");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+// Regression: the guard against Number("") === 0 used to return from onChange without touching
+// state, so React re-rendered the old value and the field could never be cleared. A read-only-
+// looking box is worse than a missing guard: nobody can retype the number at all.
+test("the field can be cleared and retyped instead of snapping back", async () => {
+  settings = { enabled: false, model: "", emptyCompletionRetry: true, emptyCompletionRetryMax: 2 };
+  const { container, root } = await mountShadow();
+  try {
+    expect(replayCountInput(container).value).toBe("2");
+    const cleared = await clearCount(container);
+    expect(cleared).toBe("");
+    // Nothing was written by the act of clearing.
+    expect(puts).toHaveLength(0);
+    await setCount(container, "3");
+    expect(replayCountInput(container).value).toBe("3");
+    expect(puts).toHaveLength(1);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("an out-of-range draft snaps back to the saved value on blur, without a PUT", async () => {
+  settings = { enabled: false, model: "", emptyCompletionRetry: true, emptyCompletionRetryMax: 2 };
+  const { container, root } = await mountShadow();
+  try {
+    await clearCount(container);
+    await setCount(container, "9");
+    expect(puts).toHaveLength(0);
+    await blurCount(container);
+    expect(replayCountInput(container).value).toBe("2");
+    expect(puts).toHaveLength(0);
+    // The refusal is announced in the page-level toast, which renders outside the container.
+    expect(document.body.querySelector(".toast-notice")?.textContent).toContain("whole number between");
   } finally {
     await act(async () => root.unmount());
   }
