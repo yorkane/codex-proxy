@@ -53,9 +53,16 @@ jobs:
         run: |
           set -e
           test "$(tar xzOf "$TGZ" package/src/server/responses-undeclared-tool-guard.ts | grep -c stripDroppableToolCalls)" = "5"
-          test "$(tar xzOf "$TGZ" package/src/bridge.ts | grep -c repairExecEnvelopeLeak)" -ge "3"
+          # 2.73+ split bridge.ts into src/bridge/*; the envelope repair lives in sse.ts +
+          # response-json.ts, and vite puts the Shadow page in App-*.js, not index-*.js.
+          # Match across the real locations so the gate tracks the artifact, not a stale layout.
+          test "$(tar --wildcards -xzOf "$TGZ" 'package/src/bridge/*.ts' | grep -c repairExecEnvelopeLeak)" -ge "3"
           tar xzOf "$TGZ" package/src/responses/emitted-call-guard.ts | grep -q resolveEmittedCall
-          test "$(tar --wildcards -xzOf "$TGZ" 'package/gui/dist/assets/index-*.js' | grep -c models-shadow-source-name)" -ge "1"
+          test "$(tar --wildcards -xzOf "$TGZ" 'package/gui/dist/assets/*.js' | grep -c models-shadow-source-name)" -ge "1"
+          test "$(tar --wildcards -xzOf "$TGZ" 'package/gui/dist/assets/*.js' | grep -c 'Phantom tools')" -ge "1"
+          test "$(tar --wildcards -xzOf "$TGZ" 'package/gui/dist/assets/*.js' | grep -c 'Empty completion replay')" -ge "1"
+          test "$(tar xzOf "$TGZ" package/src/server/responses/shadow-call-route.ts | grep -c probeRoute)" -ge "3"
+          test "$(tar xzOf "$TGZ" package/src/adapters/openai-chat/summary-budget.ts | grep -c 'Math.min(requested')" = "1"
 
       - name: Publish rolling GitHub Release
         run: |
@@ -65,8 +72,8 @@ jobs:
             echo ""
             echo "安装：\`npm install -g --allow-scripts=bun <本文件>\`，配置与运行见仓库根目录 \`deploy.md\`。"
             echo ""
-            echo "本 fork 定制（相对上游）：影子调用按来源模型映射、管理 API 免认证/免 Origin、"
-            echo "emitted-call-guard 统一错误工具名修复（形态修复/命名空间泄漏反馈/幻影丢弃/fail-closed）。"
+            echo "本 fork 定制（相对上游）：影子调用按来源模型映射（含自定义来源）、全局幻影工具名单+指令纠错、"
+            echo "exec 信封泄漏修复、命名空间泄漏反馈、调用形态修复、输出上限封顶、空完成重放（Shadow 页开关）。"
           } > "$NOTE"
           gh release delete rolling-fork-build --yes --cleanup-tag 2>/dev/null || true
           gh release create rolling-fork-build "$TGZ" \
