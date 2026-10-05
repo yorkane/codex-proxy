@@ -341,7 +341,11 @@ describe("durable row contract", () => {
     // The recorded name is text the model chose, so it gets the same reduction every other
     // model-sourced log field gets. A name carrying a secret-shaped run must not reach the ledger
     // intact, and neither may one carrying a record-boundary control character.
-    const secret = "sk-proj-abc123DEF456ghi789JKL012mnop345";
+    // The sentinel is named to the scanner's own test-fixture convention (scripts/privacy-scan.ts
+    // allows `sk-test-<digits><lowercase>`), so a credential-shaped literal in this test does not
+    // turn the privacy gate red. redactSecretString still matches it, which is the point of the
+    // assertion - verified by running the sanitizer, not assumed.
+    const secret = "sk-test-1234567890abcdefghij";
     const attempt: AttemptDeliveryTarget = {};
     const budget = createTestTranslatorBudget();
     bindAttemptDeliveryRecorder(budget, () => attempt);

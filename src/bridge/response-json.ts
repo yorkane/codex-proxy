@@ -6,7 +6,7 @@ import type {
   OcxReasoningReplayScopeRef,
   OcxUsage,
 } from "../types";
-import { coerceIntegerToolArguments } from "../lib/tool-argument-integers";
+import { repairToolCallArguments } from "../responses/tool-arg-repair";
 import { attemptDeliveryRecorder } from "../usage/attempt-delivery";
 import {
   adapterFailureFromMessage,
@@ -351,11 +351,16 @@ function buildResponseJSONWithBudget(
       : (options?.freeformToolNames?.has(realName) ?? false));
     // #1611: same integral-float repair as the streaming path. Keyed by the wire name
     // the request declared, which is the pre-namespace-mapping `currentToolCallName`.
-    const coercedArgs = coerceIntegerToolArguments(
+    const argRepair = repairToolCallArguments(
       currentToolCallArgs,
       options?.toolParameterSchemas?.get(currentToolCallName),
-      ns === undefined ? realName : undefined,
+      realName,
+      ns,
     );
+    const coercedArgs = argRepair.value;
+    if (argRepair.numericRepairs > 0 || argRepair.aliasRepaired) {
+      delivery?.noteArgRepairs(argRepair.numericRepairs + (argRepair.aliasRepaired ? 1 : 0));
+    }
     // Freeform tools serialize as custom_tool_call without extra_content; remember the
     // signature server-side regardless so the replayed call can be re-signed (#1735).
     void rememberExtraContentForReplay(currentToolCallId, currentToolCallProviderMetadata, replayCacheScope);

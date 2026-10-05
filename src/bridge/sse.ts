@@ -6,7 +6,7 @@ import type {
   OcxReasoningReplayScopeRef,
   OcxUsage,
 } from "../types";
-import { coerceIntegerToolArguments } from "../lib/tool-argument-integers";
+import { repairToolCallArguments } from "../responses/tool-arg-repair";
 import {
   adapterFailureFromMessage,
   classifyError,
@@ -607,11 +607,16 @@ export function bridgeToResponsesSSE(
         // #1611: Grok serializes integer arguments through a float, so `120000.0`
         // reaches Codex and is REJECTED before the tool runs. Repair integral floats
         // against the declared schema; a non-integral value stays an error.
-        const argsStr = coerceIntegerToolArguments(
+        const argRepair = repairToolCallArguments(
           currentToolCall.args || "{}",
           options?.toolParameterSchemas?.get(currentToolCall.name),
-          currentToolCall.namespace === undefined ? currentToolCall.name : undefined,
+          currentToolCall.name,
+          currentToolCall.namespace,
         );
+        const argsStr = argRepair.value;
+        if (argRepair.numericRepairs > 0 || argRepair.aliasRepaired) {
+          delivery?.noteArgRepairs(argRepair.numericRepairs + (argRepair.aliasRepaired ? 1 : 0));
+        }
         // Finalize streamed function-call arguments so Codex commits the call (incl. MCP / computer_use).
         if (!currentToolCall.freeform && !currentToolCall.toolSearch) {
           emit("response.function_call_arguments.done", {

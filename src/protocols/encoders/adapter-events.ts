@@ -30,7 +30,7 @@
  */
 import type { AdapterEvent, OcxMessagePhase, OcxProviderContinuationState, OcxUsage } from "../../types";
 import { normalizeDeclaredToolName } from "../../types";
-import { coerceIntegerToolArguments } from "../../lib/tool-argument-integers";
+import { repairToolCallArguments } from "../../responses/tool-arg-repair";
 import { classifyError, isCyberPolicyCode, type OcxErrorPayload } from "../../lib/errors";
 import { redactSecretString } from "../../lib/redact";
 import { isTranslatorBudgetExceededError, type TranslatorBudget } from "../../lib/translator-budget";
@@ -38,7 +38,7 @@ import { createCitationMarkerFilter, type CitationMarkerFilter } from "../../res
 import { isTruncatedStopReason, truncationReasonFor } from "../../responses/truncated-stop-reason";
 import { safeWebSearchSources } from "../../web-search/sources";
 import { resolveStallTimeoutSec } from "../../stall-timeout";
-import type { RelayedEventObservation } from "../../usage/attempt-delivery";
+import { attemptDeliveryRecorder, type RelayedEventObservation } from "../../usage/attempt-delivery";
 import {
   adapterFailureFromEvent,
   toolCallArgumentsCouldBeJson,
@@ -385,11 +385,17 @@ export function encodeAdapterEventStream(
     if (!currentToolCall) return;
     const call = currentToolCall;
     // Empty input serializes as "{}"; integral floats are repaired against the schema (#1611).
-    const argsStr = coerceIntegerToolArguments(
+    const argRepair = repairToolCallArguments(
       call.args || "{}",
       options.toolParameterSchemas?.get(call.name),
-      call.namespace === undefined ? call.name : undefined,
+      call.name,
+      call.namespace,
     );
+    const argsStr = argRepair.value;
+    if (argRepair.numericRepairs > 0 || argRepair.aliasRepaired) {
+      attemptDeliveryRecorder(options.translatorBudget)
+        ?.noteArgRepairs(argRepair.numericRepairs + (argRepair.aliasRepaired ? 1 : 0));
+    }
     if (call.kind === "function") writer.toolArgsDone(call.itemId, argsStr);
     writer.toolDone({
       itemId: call.itemId, callId: call.callId, name: call.name, kind: call.kind,

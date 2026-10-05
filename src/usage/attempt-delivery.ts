@@ -22,6 +22,14 @@ const MAX_DROPPED_EMIT_ROWS = 16;
 export interface AttemptDeliveryTarget {
   deliverySummary?: AttemptDeliverySummary;
   /**
+   * Client tool-call argument fields this attempt had REPAIRED against the declared schema
+   * before relaying (quoted numbers unquoted, the direct exec_command command->cmd alias).
+   * Absent on ordinary attempts, so pre-instrumentation rows keep their exact shape.
+   * Counts only — repaired names/values never persist, because the repaired text is model
+   * output and this ledger keeps no model-produced strings beyond the capped dropped-emit rows.
+   */
+  argRepairs?: number;
+  /**
    * Client tool calls this attempt had REMOVED from the relay by the emitted-call guard,
    * as opposed to calls the model never made. Absent on ordinary attempts, so pre-instrumentation
    * rows keep their exact shape.
@@ -47,6 +55,12 @@ export interface AttemptDeliveryRecorder {
    * and a silent removal on a deferred one, and the two must not be reported as the same event.
    */
   noteDroppedEmit(info: { emitted: string; effective: string; decision: DroppedEmitDecision }): void;
+  /**
+   * Record that schema-bound argument repairs fired on a relayed call (see tool-arg-repair).
+   * Like noteDroppedEmit this is an attempt fact, not a delivery-summary fact: it must not
+   * conjure an all-zero summary on an attempt that relayed no frames.
+   */
+  noteArgRepairs(by: number): void;
 }
 
 export function createAttemptDeliverySummary(): AttemptDeliverySummary {
@@ -189,6 +203,11 @@ export function bindAttemptDeliveryRecorder(
       // otherwise grow with them. The first MAX_DROPPED_EMIT_ROWS are the diagnostic sample.
       if (rows.length >= MAX_DROPPED_EMIT_ROWS) return;
       rows.push({ name: info.emitted, effective: info.effective, decision: info.decision, count: 1 });
+    },
+    noteArgRepairs(by): void {
+      const attempt = attemptFor();
+      if (!attempt || !Number.isFinite(by) || by <= 0) return;
+      attempt.argRepairs = bump(attempt.argRepairs ?? 0, by);
     },
     noteRelayedEvent(observation): void {
       const summary = summaryFor();

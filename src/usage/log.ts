@@ -212,6 +212,13 @@ export interface PersistedUsageAttempt {
    */
   droppedEmits?: AttemptDroppedEmit[];
   /**
+   * How many tool-call argument payloads this attempt repaired before relay - quoted numbers the
+   * declared schema wanted as integers, and the exec_command `command` alias. Each of these would
+   * otherwise be a CLIENT-SIDE schema rejection, which is a terminal outcome: one bad argument
+   * ends the whole turn instead of the one call. Absent on attempts that needed no repair.
+   */
+  argRepairs?: number;
+  /**
    * How far this attempt's exchange got and why it failed, in the shared vocabulary (#2366).
    *
    * Both values are closed roster members, so the pair can be a metric label and a grouping key
@@ -776,6 +783,10 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
     ...(droppedEmits ? { droppedEmits } : {}),
+    // A count, not a roster: no label, no i18n, and absent unless something was actually repaired.
+    ...(isNonNegativeFiniteNumber(attempt.argRepairs) && attempt.argRepairs > 0
+      ? { argRepairs: attempt.argRepairs }
+      : {}),
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     ...(recoveryWithheld.length ? { recoveryWithheld } : {}),
