@@ -83,7 +83,7 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run typecheck
-          bun test ./tests/undeclared-tool-phantom-allowlist.test.ts ./tests/emitted-call-guard.test.ts ./tests/emitted-call-shape-repair.test.ts ./tests/exec-envelope-repair.test.ts ./tests/shadow-call*.test.ts ./tests/auth-cors*.test.ts ./tests/bridge.test.ts
+          bun test ./tests/responses/undeclared-tool-phantom-allowlist.test.ts ./tests/responses/emitted-call-guard.test.ts ./tests/responses/emitted-call-shape-repair.test.ts ./tests/responses/exec-envelope-repair.test.ts ./tests/responses/namespace-leak-feedback.test.ts ./tests/responses/responses-shadow-intercept.test.ts ./tests/responses/shadow-intercept-target-lifecycle.test.ts ./tests/adapters/bridge.test.ts
 
       - name: Report test failure and stop
         if: failure() && steps.merge.outputs.MERGED == 1
