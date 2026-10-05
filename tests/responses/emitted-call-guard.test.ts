@@ -6,7 +6,7 @@
  * never be dropped, and a namespace leak must never be silently discarded.
  */
 import { describe, expect, test } from 'bun:test';
-import { resolveEmittedCall } from '../src/responses/emitted-call-guard';
+import { resolveEmittedCall } from '../../src/responses/emitted-call-guard';
 
 const collab = new Set(['collaboration__spawn_agent', 'collaboration__update_plan', 'exec', 'web__run']);
 const freeform = new Set(['exec']);

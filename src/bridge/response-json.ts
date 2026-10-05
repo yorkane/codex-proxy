@@ -18,9 +18,17 @@ import {
 } from "../lib/errors";
 import { mayBecomePatchEnvelope, repairFreeformToolInput } from "../responses/apply-patch-envelope";
 import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "../responses/exec-envelope-repair";
-import { resolveEmittedCall } from "../responses/emitted-call-guard";
+import {
+  isDroppedNamespaceContainer,
+  resolveEmittedCall,
+  shouldEnforceDeclaredToolNames,
+} from "../responses/emitted-call-guard";
 import { encodeCompactionSummary, releaseCompactionCiphertextLease } from "../responses/compaction";
-import { compileCodeModeHelperInput, resolveCodeModeHelperName } from "../responses/code-mode-helper-compat";
+import {
+  compileCodeModeHelperInput,
+  normalizeCodeModeHelperName,
+  resolveCodeModeHelperName,
+} from "../responses/code-mode-helper-compat";
 import { isTruncatedStopReason, truncationReasonFor } from "../responses/truncated-stop-reason";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "../responses/reasoning-envelope";
 import { rememberReasoningForCall } from "../responses/reasoning-replay-cache";
@@ -237,7 +245,10 @@ function buildResponseJSONWithBudget(
     codeModeHelperName?: string,
   ): string => {
     const helper = resolveCodeModeHelperName(codeModeHelperName, toolName, args, namespace, options?.declaredToolNames);
-    if (helper) return compileCodeModeHelperInput(args, helper, codeModeHelperName ?? toolName);
+    if (helper)
+      return compileCodeModeHelperInput(
+        args, helper, normalizeCodeModeHelperName(codeModeHelperName) ?? toolName,
+      );
     // exec is freeform JavaScript for the client VM; a leaked tool-call envelope is
     // dead-on-arrival syntax there, so convert it into an actionable directive error.
     const unwrapped = repairFreeformToolInput(args, toolName, namespace);
@@ -479,13 +490,12 @@ function buildResponseJSONWithBudget(
         }
         flushToolCall();
         // Same single decision point as the streaming twin in bridge/sse.ts.
+        // Upstream #4735: one enforcement predicate, shared with the fail-closed branch below
+        // (same contract as the streaming twin in bridge/sse.ts).
+        const enforceDeclared = shouldEnforceDeclaredToolNames(options ?? {});
         const verdict = resolveEmittedCall(e.name, {
           declaredToolNames: options?.declaredToolNames,
-          // Upstream #4735: a catalog that is merely PRESENT (even explicitly empty)
-          // authorizes enforcement unless the inbound wire opted out; an explicit true
-          // enforces even without a catalog.
-          enforceDeclaredToolNames: options?.enforceDeclaredToolNames !== false
-            && (options?.enforceDeclaredToolNames === true || options?.declaredToolNames != null),
+          enforceDeclaredToolNames: enforceDeclared,
           freeformToolNames: options?.freeformToolNames,
           phantomNames: options?.undeclaredToolPhantomNames,
           undeclaredFeedback: options?.undeclaredToolFeedback,
@@ -501,13 +511,20 @@ function buildResponseJSONWithBudget(
               || options.undeclaredToolPhantomNames.has(e.name))) {
             break;
           }
-          if (options?.enforceDeclaredToolNames !== false) {
+          if (enforceDeclared) {
             errorEvent = {
               type: "error",
               message: `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
               status: 502,
               errorType: "upstream_error",
             };
+            break;
+          }
+          // Enforcement deferred (#4735): match the streaming twin - a tool NAMESPACE container is
+          // never callable, so it stays dropped instead of reaching a client whose tool router ends
+          // the turn with `unsupported call: <ns>`.
+          if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
+            || isDroppedNamespaceContainer(e.name, options?.declaredToolNames)) {
             break;
           }
         }
@@ -525,7 +542,7 @@ function buildResponseJSONWithBudget(
         budget?.openCall(e.id);
         currentToolCallName = effectiveName;
         currentToolCallCodeModeHelperName = effectiveName === "exec" && e.name !== effectiveName
-          ? e.name
+          ? normalizeCodeModeHelperName(e.name)
           : undefined;
         currentToolCallArgs = "";
         currentToolCallArgsBytes = 0;

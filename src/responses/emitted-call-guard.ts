@@ -36,9 +36,46 @@ import {
   buildUndeclaredToolFeedback,
   EXEC_REPAIR_TOOL_NAME,
   repairExecEnvelopeLeak,
+  isNamespaceContainerName,
 } from "./exec-envelope-repair";
 
 export { EXEC_REPAIR_TOOL_NAME };
+
+/** Empty catalog used by callers that must ask "is this a namespace?" without one. */
+const EMPTY_DECLARED_TOOL_NAMES: ReadonlySet<string> = new Set();
+
+/**
+ * The enforcement predicate shared by the verdict and the caller's fail-closed branch.
+ *
+ * Both sides must read ONE definition. The bridge used to hand the raw wire opt-out to
+ * `resolveEmittedCall` and then re-derive the decision from `!== false` alone, so a request with
+ * no catalog at all - where nothing is enforceable - could still be failed closed by a drop the
+ * verdict produced for an unrelated reason. Upstream #4735 semantics are unchanged: a catalog
+ * that is merely present (even empty) and an explicit `true` both enforce.
+ */
+export function shouldEnforceDeclaredToolNames(options: {
+  enforceDeclaredToolNames?: boolean;
+  declaredToolNames?: ReadonlySet<string>;
+}): boolean {
+  return options.enforceDeclaredToolNames !== false
+    && (options.enforceDeclaredToolNames === true || options.declaredToolNames != null);
+}
+
+/**
+ * Whether a DROPPED emitted name is a tool namespace container (`tools`, `collaboration`).
+ *
+ * Bridge callers use this to make the drop verdict unconditional for containers: a container is
+ * not a callable tool on any wire, so the #4735 "inbound wire defers enforcement" opt-out —
+ * which exists to tolerate provider echoes of names the proxy's catalog view missed — must not
+ * turn it into a relay. Relaying it only moves the failure to the client, whose tool router
+ * reports `unsupported call: <ns>` and ends the turn.
+ */
+export function isDroppedNamespaceContainer(
+  name: string,
+  declaredToolNames?: ReadonlySet<string>,
+): boolean {
+  return isNamespaceContainerName(name, declaredToolNames ?? EMPTY_DECLARED_TOOL_NAMES);
+}
 
 /** What the caller should do with one emitted tool call. */
 export type EmittedCallVerdict =
@@ -111,6 +148,14 @@ export function resolveEmittedCall(
     if (options.enforceDeclaredToolNames === true) {
       // Nothing is declared, so nothing is authorized: the caller asked for fail-closed.
       options.onDecision?.({ emitted, effective: emitted, decision: "undeclared" });
+      return { kind: "drop", name: emitted };
+    }
+    // Without a catalog nothing can be recognised as undeclared, so the call is relayed - except
+    // for a tool NAMESPACE container, which is provably not callable whatever the catalog says
+    // (`tools` is the exec sandbox namespace and never a declared wire name). Relaying it would
+    // hand the client an `unsupported call: <ns>` that ends the turn.
+    if (isNamespaceContainerName(emitted, EMPTY_DECLARED_TOOL_NAMES)) {
+      options.onDecision?.({ emitted, effective: emitted, decision: "namespace-leak" });
       return { kind: "drop", name: emitted };
     }
     return { kind: "allow", name: emitted, repaired: false };

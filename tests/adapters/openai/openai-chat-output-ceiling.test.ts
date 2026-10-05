@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { resolveMaxTokens } from "../../src/adapters/openai-chat/summary-budget";
-import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { resolveMaxTokens } from "../../../src/adapters/openai-chat/summary-budget";
+import type { OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 
 /**
  * Codex sends the whole advertised context window as max_output_tokens because the Codex model

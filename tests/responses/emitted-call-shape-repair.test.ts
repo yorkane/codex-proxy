@@ -5,9 +5,9 @@
  * Ambiguous or unmatched names stay fail-closed.
  */
 import { describe, expect, test } from 'bun:test';
-import { repairEmittedToolName } from '../src/types';
-import { bridgeToResponsesSSE, buildResponseJSON } from '../src/bridge';
-import type { AdapterEvent } from '../src/types';
+import { repairEmittedToolName } from '../../src/types';
+import { bridgeToResponsesSSE, buildResponseJSON } from '../../src/bridge';
+import type { AdapterEvent } from '../../src/types';
 
 async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
@@ -87,5 +87,71 @@ describe('bridge call-shape repair', () => {
     const built = buildResponseJSON(events, 'llm-248/x', { declaredToolNames: collabDeclared });
     expect(JSON.stringify(built)).toContain('spawn_agent');
     expect(JSON.stringify(built)).not.toContain('undeclared client tool');
+  });
+});
+
+// Client-log census (2026-10-04, ~/.codex/logs_2.sqlite, 30d): the model copies the
+// code-mode qualification 'tools.x' into a wire-level tool call and mangles the
+// separator. Every spelling this function fails to repair ends the whole turn with
+// 'unsupported call' on the client, so the = and / forms need the same treatment the
+// older __ and . forms already get.
+const sandboxDeclared = new Set([
+  'exec',
+  'exec_command',
+  'apply_patch',
+  'view_image',
+  'write_stdin',
+  'update_plan',
+  'text',
+  'commentary',
+  'agent',
+  'collaboration__spawn_agent',
+  'collaboration__send_message',
+  'collaboration__update_plan',
+  'web__run',
+  'web__search',
+]);
+
+describe('sandbox-namespace composition repair: = and / spellings', () => {
+  test('tools= repairs to the declared tool', () => {
+    expect(repairEmittedToolName('tools=exec', sandboxDeclared)).toBe('exec');
+    expect(repairEmittedToolName('tools=exec_command', sandboxDeclared)).toBe('exec_command');
+    expect(repairEmittedToolName('tools=apply_patch', sandboxDeclared)).toBe('apply_patch');
+    expect(repairEmittedToolName('tools=write_stdin', sandboxDeclared)).toBe('write_stdin');
+    expect(repairEmittedToolName('tools=view_image', sandboxDeclared)).toBe('view_image');
+  });
+  test('tools/ repairs to the declared tool', () => {
+    expect(repairEmittedToolName('tools/exec_command', sandboxDeclared)).toBe('exec_command');
+  });
+  test('separator-insensitive match still works through the = and / prefixes', () => {
+    // web__run is declared; the model collapses the namespace separator to web_run.
+    expect(repairEmittedToolName('tools=web_run', sandboxDeclared)).toBe('web__run');
+    expect(repairEmittedToolName('tools/web_run', sandboxDeclared)).toBe('web__run');
+  });
+  test('empty or unknown remainder after the prefix stays fail-closed', () => {
+    expect(repairEmittedToolName('tools=', sandboxDeclared)).toBe('tools=');
+    expect(repairEmittedToolName('tools=', new Set(['exec']))).toBe('tools=');
+    expect(repairEmittedToolName('tools=__NA__', sandboxDeclared)).toBe('tools=__NA__');
+    expect(repairEmittedToolName('tools=not_a_tool', sandboxDeclared)).toBe('tools=not_a_tool');
+    expect(repairEmittedToolName('tools/unknown_thing', sandboxDeclared)).toBe('tools/unknown_thing');
+    expect(repairEmittedToolName('tools/', sandboxDeclared)).toBe('tools/');
+  });
+  test('ambiguous strip after the = prefix stays fail-closed', () => {
+    // web__run and web_run both declared, so tools=web_run names two candidates.
+    const ambiguous = new Set(['web__run', 'web_run', 'exec']);
+    expect(repairEmittedToolName('tools=web_run', ambiguous)).toBe('tools=web_run');
+  });
+  test('already-declared names are untouched by the new prefixes', () => {
+    expect(repairEmittedToolName('exec', sandboxDeclared)).toBe('exec');
+    expect(repairEmittedToolName('web__run', sandboxDeclared)).toBe('web__run');
+  });
+  test('bare tools keeps its current passthrough behaviour', () => {
+    // The bare namespace form belongs to the namespace-leak feedback path; lock the
+    // behaviour so the prefix table cannot silently start rewriting it.
+    expect(repairEmittedToolName('tools', sandboxDeclared)).toBe('tools');
+  });
+  test('similar-but-different prefixes are not swallowed by the table', () => {
+    expect(repairEmittedToolName('toolz=exec', sandboxDeclared)).toBe('toolz=exec');
+    expect(repairEmittedToolName('toolset=exec', sandboxDeclared)).toBe('toolset=exec');
   });
 });

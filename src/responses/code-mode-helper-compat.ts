@@ -3,7 +3,11 @@ import {
   normalizeApplyPatchDelimiters,
   unwrapFreeformToolInput,
 } from "./apply-patch-envelope";
-import { declaresCodeModeExec, isCodeModeMcpDirectName } from "../types/tools";
+import {
+  CODE_MODE_HELPER_WIRE_NAMES,
+  declaresCodeModeExec,
+  isCodeModeMcpDirectName,
+} from "../types/tools";
 import { parseCodeModeShellInput } from "./code-mode-shell-input";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -111,6 +115,51 @@ export function compileCodeModeHelperInput(
   return `const result = await tools.exec_command(${JSON.stringify(args)});\ntext(result);`;
 }
 
+const HELPER_NAMESPACE_PREFIXES = [
+  "tools__",
+  "tools.",
+  "tools=",
+  "tools/",
+  "functions__",
+  "functions.",
+  "default.",
+  "default__",
+] as const;
+
+function stripKnownHelperPrefixes(name: string): string {
+  let out = name;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of HELPER_NAMESPACE_PREFIXES) {
+      if (out.length > prefix.length && out.startsWith(prefix)) {
+        out = out.slice(prefix.length);
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The helper a call genuinely belongs to, or undefined when the recorded name names
+ * nothing the compiler knows.
+ *
+ * Call-shape repair rewrites a mis-shaped name (tools=exec) to the declared name, so the
+ * ORIGINAL emitted string kept on the call is no longer guaranteed to be a helper: it can
+ * be a sandbox-prefixed spelling of exec itself, which is the tool rather than a nested
+ * helper. Compiling against such a name silently loses the wrapper semantics -- a patch
+ * body would reach exec_command still wrapped as {input: ...} -- so recognition resolves
+ * through the prefixes to a member of the known-helper vocabulary and otherwise declines,
+ * letting body inference make the call exactly as it does for a plain exec.
+ */
+export function normalizeCodeModeHelperName(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  const bare = stripKnownHelperPrefixes(name);
+  if (bare === "") return undefined;
+  return CODE_MODE_HELPER_WIRE_NAMES.has(bare) || isCodeModeMcpDirectName(bare) ? bare : undefined;
+}
+
 /**
  * Resolve the effective code-mode helper for one freeform call.
  *
@@ -134,7 +183,8 @@ export function resolveCodeModeHelperName(
   namespace?: string,
   declaredNames?: ReadonlySet<string>,
 ): string | undefined {
-  if (codeModeHelperName) return codeModeHelperName;
+  const declaredHelper = normalizeCodeModeHelperName(codeModeHelperName);
+  if (declaredHelper) return declaredHelper;
   if (toolName !== "exec" || namespace !== undefined) return undefined;
   // `exec` is a name, not a guarantee. Without a catalog that is genuinely code mode, a
   // caller-defined `exec` could legitimately take patch text, and handing it generated

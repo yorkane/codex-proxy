@@ -93,6 +93,21 @@ const CODE_MODE_HELPER_TOOL_NAMES = [
 export const CODE_MODE_EXEC_TOOL_NAME = "exec";
 
 /**
+ * Sandbox-namespace prefixes a routed model sticks in front of a real tool name.
+ *
+ * Codex code-mode tools are reached as `await tools.exec_command({...})` inside the
+ * `exec` freeform channel, so the model learns them under that qualified spelling.
+ * When it later emits one as a wire-level tool call it copies the qualification and
+ * mangles the separator: `tools__exec_command` (it flattens the member access the way
+ * the wire format does), `tools.exec_command` (it keeps the dot), `tools=exec_command`
+ * (it renders the call as an assignment, the shape it saw in the argument syntax), or
+ * `tools/exec_command` (it treats the namespace like a path). All four name the same
+ * single tool, so the prefix is recoverable; an empty or unknown remainder stays
+ * phantom and goes to the undeclared guard.
+ */
+const SANDBOX_NAMESPACE_PREFIXES = ["tools__", "tools.", "tools=", "tools/"] as const;
+
+/**
  * Collaboration/sub-agent call-shape repair.
  *
  * Routed models (Q38-class) frequently emit a Codex tool in a different naming
@@ -131,17 +146,18 @@ export function repairEmittedToolName(name: string, declared: ReadonlySet<string
   // Sandbox-namespace composition: tools__web_run means the model prefixed the JS
   // sandbox namespace onto a real tool name. Strip the prefix when the remainder
   // is declared (the intended call is recoverable), otherwise leave it phantom.
-  if (candidates.length === 0 && (name.startsWith("tools__") || name.startsWith("tools."))) {
-    const stripped = name.startsWith("tools__") ? name.slice("tools__".length) : name.slice("tools.".length);
-    if (stripped.length > 0) {
-      push(stripped);
-      // The model also tends to collapse the namespace separator itself
-      // (tools__web_run -> web_run for declared web__run), so fall back to a
-      // separator-insensitive exact match when the plain strip misses.
-      const squashed = stripped.replaceAll("__", "_");
-      for (const d of declared) {
-        if (d.replaceAll("__", "_") === squashed) push(d);
-      }
+  if (candidates.length === 0) {
+    const prefix = SANDBOX_NAMESPACE_PREFIXES.find((p) => name.startsWith(p));
+    if (prefix === undefined) return name;
+    const stripped = name.slice(prefix.length);
+    if (stripped.length === 0) return name;
+    push(stripped);
+    // The model also tends to collapse the namespace separator itself
+    // (tools__web_run -> web_run for declared web__run), so fall back to a
+    // separator-insensitive exact match when the plain strip misses.
+    const squashed = stripped.replaceAll("__", "_");
+    for (const d of declared) {
+      if (d.replaceAll("__", "_") === squashed) push(d);
     }
   }
   return candidates.length === 1 ? candidates[0] : name;

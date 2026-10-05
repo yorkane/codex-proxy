@@ -77,7 +77,19 @@ export const EXEC_REPAIR_TOOL_NAME = EXEC_TOOL_NAME;
 
 const SANDBOX_NAMESPACE = "tools";
 
-function isNamespaceLeakName(name: string, declaredToolNames: ReadonlySet<string>): boolean {
+/**
+ * Whether an emitted name is a tool NAMESPACE container rather than a callable tool.
+ *
+ * Exported so every consumer of the verdict shares one definition: the bridge must be able to
+ * recognise the shape even when the phantom allowlist is empty (a direct, non-shadow route),
+ * because a container call is never legitimate on any wire — relaying it only moves the failure
+ * to the client, which reports `unsupported call: <ns>` and ends the turn.
+ *
+ * `tools` is the JS sandbox namespace inside exec bodies (tools.exec_command, ...), which never
+ * appears in the declared tool list; any other name counts as a namespace only when a declared
+ * tool actually lives under it (`collaboration` for `collaboration__update_plan`).
+ */
+export function isNamespaceContainerName(name: string, declaredToolNames: ReadonlySet<string>): boolean {
   if (name === SANDBOX_NAMESPACE) return true;
   const prefix = name + "__";
   for (const declared of declaredToolNames) {
@@ -99,7 +111,7 @@ export function buildNamespaceLeakFeedback(
 ): string | undefined {
   if (!declaredToolNames || !freeformToolNames) return undefined;
   if (!declaredToolNames.has(EXEC_TOOL_NAME) || !freeformToolNames.has(EXEC_TOOL_NAME)) return undefined;
-  if (!isNamespaceLeakName(name, declaredToolNames)) return undefined;
+  if (!isNamespaceContainerName(name, declaredToolNames)) return undefined;
   const message =
     "opencodex namespace-leak repair: \"" + name + "\" is a tool namespace, not a callable tool, " +
     "so the call was intercepted and not executed. Emit the call with the flattened form " +

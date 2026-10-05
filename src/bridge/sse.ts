@@ -22,10 +22,18 @@ import {
   repairFreeformToolInput,
 } from "../responses/apply-patch-envelope";
 import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "../responses/exec-envelope-repair";
-import { resolveEmittedCall } from "../responses/emitted-call-guard";
+import {
+  isDroppedNamespaceContainer,
+  resolveEmittedCall,
+  shouldEnforceDeclaredToolNames,
+} from "../responses/emitted-call-guard";
 import { progressiveFreeformInput } from "../responses/progressive-freeform-input";
 import { encodeCompactionSummary, releaseCompactionCiphertextLease } from "../responses/compaction";
-import { compileCodeModeHelperInput, resolveCodeModeHelperName } from "../responses/code-mode-helper-compat";
+import {
+  compileCodeModeHelperInput,
+  normalizeCodeModeHelperName,
+  resolveCodeModeHelperName,
+} from "../responses/code-mode-helper-compat";
 import { mayBecomeCodeModeShellInput } from "../responses/code-mode-shell-input";
 import { isTruncatedStopReason, truncationReasonFor } from "../responses/truncated-stop-reason";
 import { encodeReasoningEnvelope, type ReasoningEnvelope } from "../responses/reasoning-envelope";
@@ -178,7 +186,10 @@ export function bridgeToResponsesSSE(
     codeModeHelperName?: string,
   ): string => {
     const helper = resolveCodeModeHelperName(codeModeHelperName, toolName, args, namespace, options?.declaredToolNames);
-    if (helper) return compileCodeModeHelperInput(args, helper, codeModeHelperName ?? toolName);
+    if (helper)
+      return compileCodeModeHelperInput(
+        args, helper, normalizeCodeModeHelperName(codeModeHelperName) ?? toolName,
+      );
     // exec is freeform JavaScript for the client VM; a leaked tool-call envelope is
     // dead-on-arrival syntax there, so convert it into an actionable directive error.
     const unwrapped = repairFreeformToolInput(args, toolName, namespace);
@@ -1050,13 +1061,13 @@ export function bridgeToResponsesSSE(
               if (currentToolCall) closeCurrentToolCall();
               // One decision point for every wrong-name symptom: shape repair,
               // namespace-leak feedback, phantom drop, or fail closed.
+              // Upstream #4735: a catalog that is merely PRESENT (even explicitly empty) authorizes
+              // enforcement unless the inbound wire opted out; an explicit true enforces even
+              // without a catalog. One predicate, shared with the fail-closed branch below.
+              const enforceDeclared = shouldEnforceDeclaredToolNames(options ?? {});
               const verdict = resolveEmittedCall(event.name, {
                 declaredToolNames: options?.declaredToolNames,
-                // Upstream #4735: a catalog that is merely PRESENT (even explicitly empty)
-                // authorizes enforcement unless the inbound wire opted out; an explicit true
-                // enforces even without a catalog.
-                enforceDeclaredToolNames: options?.enforceDeclaredToolNames !== false
-                  && (options?.enforceDeclaredToolNames === true || options?.declaredToolNames != null),
+                enforceDeclaredToolNames: enforceDeclared,
                 freeformToolNames,
                 phantomNames: options?.undeclaredToolPhantomNames,
                 undeclaredFeedback: options?.undeclaredToolFeedback,
@@ -1073,7 +1084,7 @@ export function bridgeToResponsesSSE(
                     || options.undeclaredToolPhantomNames.has(event.name))) {
                   break;
                 }
-                if (options?.enforceDeclaredToolNames !== false) {
+                if (enforceDeclared) {
                   const failure = responseError(
                     502,
                     "upstream_error",
@@ -1088,6 +1099,13 @@ export function bridgeToResponsesSSE(
                   });
                   reportTerminal("failed");
                   terminalEvent = true;
+                  break;
+                }
+                // Enforcement deferred (#4735): an undeclared provider echo is relayed best-effort,
+                // but a tool NAMESPACE container is never callable on any wire, so it stays dropped.
+                // Relaying it produced the client-side `unsupported call: <ns>` that ends the turn.
+                if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
+                  || isDroppedNamespaceContainer(event.name, options?.declaredToolNames)) {
                   break;
                 }
               }
@@ -1111,7 +1129,7 @@ export function bridgeToResponsesSSE(
               }
               const effectiveName = verdict.name;
               const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
-                ? event.name
+                ? normalizeCodeModeHelperName(event.name)
                 : undefined;
               const mapped = toolNsMap?.get(effectiveName);
               const realName = mapped?.name ?? effectiveName;

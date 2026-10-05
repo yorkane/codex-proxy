@@ -10,16 +10,16 @@
  * path, and the guard's fail-closed twin.
  */
 import { describe, expect, test } from "bun:test";
-import { bridgeToResponsesSSE, buildResponseJSON } from "../src/bridge";
+import { bridgeToResponsesSSE, buildResponseJSON } from "../../src/bridge";
 import {
   createUndeclaredToolCallGuardBlockRewrite,
   stripDroppableToolCallsInJsonString,
   stripDroppableToolCallsInResponse,
   undeclaredToolCallName,
-} from "../src/server/responses-undeclared-tool-guard";
-import { relaySseWithBlockRewrite } from "../src/server/sse-payload-rewrite";
-import type { AdapterEvent } from "../src/types";
-import { createTestTranslatorBudget } from "./helpers/translator-budget";
+} from "../../src/server/responses-undeclared-tool-guard";
+import { relaySseWithBlockRewrite } from "../../src/server/sse-payload-rewrite";
+import type { AdapterEvent } from "../../src/types";
+import { createTestTranslatorBudget } from "../helpers/translator-budget";
 
 async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();

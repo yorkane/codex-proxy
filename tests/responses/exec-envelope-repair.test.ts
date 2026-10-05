@@ -5,9 +5,9 @@
  * every other input - genuine JavaScript first of all - byte-identical.
  */
 import { describe, expect, test } from 'bun:test';
-import { bridgeToResponsesSSE, buildResponseJSON } from '../src/bridge';
-import { looksLikeExecEnvelopeLeak, repairExecEnvelopeLeak } from '../src/responses/exec-envelope-repair';
-import type { AdapterEvent } from '../src/types';
+import { bridgeToResponsesSSE, buildResponseJSON } from '../../src/bridge';
+import { looksLikeExecEnvelopeLeak, repairExecEnvelopeLeak } from '../../src/responses/exec-envelope-repair';
+import type { AdapterEvent } from '../../src/types';
 
 async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
