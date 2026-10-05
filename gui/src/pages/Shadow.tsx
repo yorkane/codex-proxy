@@ -144,6 +144,9 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
   };
 
   const phantomEnabled = shadowCall?.phantomToolAllowlistEnabled !== false;
+  // The empty-completion guard is a TOP-LEVEL config field, independent of whether shadow
+  // interception is on, so its section renders whether or not the intercept is enabled.
+  const emptyCompletionRetryOn = shadowCall?.emptyCompletionRetry === true;
 
   return (
     <>
@@ -378,6 +381,37 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
             </div>
           </>
         )}
+        <div className="models-phantom-section shadow-page-section">
+          <h3 className="shadow-page-heading">Empty completion replay</h3>
+          <div className="models-shadow-row row muted text-control">
+            <span className="models-shadow-label">
+              Replay an empty completion{" "}
+              <Tooltip
+                content="When the upstream answers 200 and the turn ends with reasoning but no output text and no tool call, the proxy suppresses that silent stop and replays the identical request once. A second empty turn surfaces as a stated failure. Applies to every routed Responses turn, not only shadow-intercepted ones."
+                side="top"
+                maxWidth={320}
+              >
+                <span style={{ cursor: "help" }} aria-label="Empty completion replay help">ⓘ</span>
+              </Tooltip>
+            </span>
+            <Switch
+              on={emptyCompletionRetryOn}
+              onClick={() => void saveShadowCall({ emptyCompletionRetry: !emptyCompletionRetryOn })}
+              disabled={!shadowCall || saving}
+              label="Enable"
+            />
+          </div>
+          <p className="muted text-control">
+            A model that answers with only reasoning and no text or tool call used to look like a random stop;
+            the user had to type "please continue". With this on the proxy replays that turn once instead.
+          </p>
+          {shadowCall?.emptyCompletionRetryEnvOverride && (
+            <p className="muted text-control">
+              Forced off: OCX_EMPTY_COMPLETION_RETRY=0 is set in the service environment, so this switch has no
+              effect until the variable is removed.
+            </p>
+          )}
+        </div>
       </div>
       {feedback && (
         <ToastNotice

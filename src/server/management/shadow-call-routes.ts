@@ -10,6 +10,7 @@ import {
   shadowPhantomToolList,
   shadowSourceModels,
 } from "../../lib/shadow-call";
+import { EMPTY_COMPLETION_RETRY_ENV } from "../responses/empty-completion-guard";
 import { jsonResponse } from "../auth-cors";
 import { isPlainRecord } from "./shared";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
@@ -33,6 +34,11 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
      phantomToolAllowlist: shadowPhantomToolList(sci),
      phantomToolDefaults: [...DEFAULT_PHANTOM_TOOL_ALLOWLIST],
      phantomToolFeedbackMax: sci.phantomToolFeedbackMax ?? 2,
+    // Top-level empty-completion replay switch. The guard lives outside the intercept
+    // block, so it is projected here too: the Shadow page owns its only edit surface.
+    emptyCompletionRetry: config.emptyCompletionRetry === true,
+    // The disable-only emergency override: while it is set, the persisted switch has no effect.
+    emptyCompletionRetryEnvOverride: process.env[EMPTY_COMPLETION_RETRY_ENV] === "0",
   });
 }
 
@@ -40,9 +46,14 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    let raw: unknown;
    try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
    if (!isPlainRecord(raw)) return jsonResponse({ error: "body must be a JSON object" }, 400);
-   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown };
+   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown };
    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
      return jsonResponse({ error: "enabled must be a boolean" }, 400);
+   }
+   // Strictly boolean-or-absent, mirroring src/config/diagnostics.ts. A "true" string is a
+   // client bug: reject it with 400 instead of coercing it into the persisted config.
+   if (body.emptyCompletionRetry !== undefined && typeof body.emptyCompletionRetry !== "boolean") {
+     return jsonResponse({ error: "emptyCompletionRetry must be a boolean" }, 400);
    }
   if (body.model !== undefined && typeof body.model !== "string") {
     return jsonResponse({ error: "model must be a string" }, 400);
@@ -116,6 +127,11 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    if (typeof body.phantomToolFeedbackMax === "number") {
      config.shadowCallIntercept.phantomToolFeedbackMax = body.phantomToolFeedbackMax;
    }
+  // Assigned on the LIVE config object -- the same reference the request pipeline reads --
+  // so the guard flips for the next turn without a restart, exactly like the phantom list.
+  if (typeof body.emptyCompletionRetry === "boolean") {
+    config.emptyCompletionRetry = body.emptyCompletionRetry;
+  }
   saveConfigPreservingClaudeCode(config);
   const sci = config.shadowCallIntercept;
   return jsonResponse({
@@ -127,6 +143,8 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     phantomToolAllowlistEnabled: sci.phantomToolAllowlistEnabled !== false,
     phantomToolAllowlist: shadowPhantomToolList(sci),
     phantomToolFeedbackMax: sci.phantomToolFeedbackMax ?? 2,
+    emptyCompletionRetry: config.emptyCompletionRetry === true,
+    emptyCompletionRetryEnvOverride: process.env[EMPTY_COMPLETION_RETRY_ENV] === "0",
   });
 }
   return null;

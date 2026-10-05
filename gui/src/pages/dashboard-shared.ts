@@ -133,7 +133,20 @@ export interface SidecarPatch {
     timeoutMs?: number;
   };
 }
-export interface ShadowCallData { enabled: boolean; model: string; modelMap?: Record<string, string>; sourceModels?: string[]; phantomToolAllowlistEnabled?: boolean; phantomToolAllowlist?: string[]; phantomToolDefaults?: string[]; phantomToolFeedbackMax?: number }
+export interface ShadowCallData {
+  enabled: boolean;
+  model: string;
+  modelMap?: Record<string, string>;
+  sourceModels?: string[];
+  phantomToolAllowlistEnabled?: boolean;
+  phantomToolAllowlist?: string[];
+  phantomToolDefaults?: string[];
+  phantomToolFeedbackMax?: number;
+  /** Top-level config: replay an empty (reasoning-only) completion once. */
+  emptyCompletionRetry?: boolean;
+  /** True while OCX_EMPTY_COMPLETION_RETRY=0 forces the guard off regardless of the switch. */
+  emptyCompletionRetryEnvOverride?: boolean;
+}
 export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: { requests: number; totalTokens: number; coverageRatio: number } };
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "bun" | "mise" | "npm" | "pnpm" | "source";
