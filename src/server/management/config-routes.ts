@@ -118,6 +118,7 @@ import {
 import type { OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../../types";
 import { shadowCallModelMapErrors, shadowCallTargetError } from "./shadow-call-validation";
 import { handleShadowCallRoutes } from "./shadow-call-routes";
+import { handleShadowDiagnosticsRoutes } from "./shadow-diagnostics-routes";
 import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
@@ -1159,5 +1160,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
   // Fork: shadow-call intercept settings (kept in its own module to minimize upstream merge surface).
   const shadowCallResponse = await handleShadowCallRoutes(ctx);
   if (shadowCallResponse !== null) return shadowCallResponse;
+
+  // Fork: diagnostics feed behind the Shadow page; same rationale - one-line delegation.
+  const shadowDiagnosticsResponse = await handleShadowDiagnosticsRoutes(ctx);
+  if (shadowDiagnosticsResponse !== null) return shadowDiagnosticsResponse;
   return null;
 }

@@ -81,6 +81,15 @@ export const DROPPED_EMIT_DECISION_ROSTER = Object.freeze([
   "namespace-container",
   /** The emitted name matched the shadow-scoped phantom allowlist. */
   "phantom",
+  /**
+   * The emitted name was undeclared AND the request had an exec channel plus budget left, so the
+   * call was replaced by a synthetic exec whose body throws a directive correction. The original
+   * emit is still REMOVED from the relay, which is what this field records - only the stand-in
+   * differs from the two above. Without it the correction is the one disposition that leaves no
+   * trace, and it is the disposition an operator most wants to see: the model got taught the right
+   * spelling and the turn survived, which is invisible next to a bare drop.
+   */
+  "directive-feedback",
 ] as const);
 
 export type DroppedEmitDecision = typeof DROPPED_EMIT_DECISION_ROSTER[number];

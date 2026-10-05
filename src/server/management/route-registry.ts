@@ -212,6 +212,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/settings", module: "server/management/config-routes", mutates: false },
   // Fork: the handler lives in shadow-call-routes.ts; config-routes.ts only delegates.
   { method: "GET", path: "/api/shadow-call-settings", module: "server/management/shadow-call-routes", mutates: false },
+  { method: "GET", path: "/api/shadow-diagnostics", module: "server/management/shadow-diagnostics-routes", mutates: false },
   { method: "GET", path: "/api/sidecar-settings", module: "server/management/config-routes", mutates: false },
   { method: "GET", path: "/api/startup-health", module: "server/management/config-routes", mutates: false },
   { method: "GET", path: "/api/update/check", module: "server/management/config-routes", mutates: false },

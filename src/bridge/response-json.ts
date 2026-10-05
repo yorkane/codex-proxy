@@ -544,6 +544,14 @@ function buildResponseJSONWithBudget(
         }
         if (verdict.kind === "feedback") {
           // Namespace leak / undeclared correction: emit the directive-error exec feedback.
+          // The original emit is still removed from the relay, so it belongs in the same record
+          // as a drop; without this the one disposition that actually saved the turn is the one an
+          // operator cannot see afterwards.
+          noteDroppedEmitSafely(delivery, {
+            emitted: e.name,
+            effective: verdict.name,
+            decision: "directive-feedback",
+          });
           pushOutput({
             type: "custom_tool_call", id: `ctc_${uuid()}`,
             call_id: e.id, name: EXEC_REPAIR_TOOL_NAME,

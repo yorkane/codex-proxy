@@ -1124,6 +1124,14 @@ export function bridgeToResponsesSSE(
                 // Namespace leak or undeclared correction: emit a synthetic exec call
                 // whose body throws a directive error, so the client runs it and the
                 // model receives an actionable correction.
+                // The original emit is still removed from the relay, so it belongs in the same
+                // record as a drop; without this the one disposition that actually saved the turn
+                // is the one an operator cannot see afterwards.
+                noteDroppedEmitSafely(delivery, {
+                  emitted: event.name,
+                  effective: verdict.name,
+                  decision: "directive-feedback",
+                });
                 const fbId = `ctc_${uuid()}`;
                 emit("response.output_item.added", {
                   output_index: outputIndex,

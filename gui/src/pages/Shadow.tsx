@@ -16,6 +16,7 @@ import {
   shadowCallModelOptions,
   type ModelInfo,
   type ShadowCallData,
+  type ShadowDiagnosticsData,
 } from "./dashboard-shared";
 import {
   DEFAULT_SOURCE_MODELS,
@@ -34,6 +35,26 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
   const [customTargetDraft, setCustomTargetDraft] = useState("");
   const [phantomNameDraft, setPhantomNameDraft] = useState("");
   const [showPhantomList, setShowPhantomList] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<ShadowDiagnosticsData | null>(null);
+  const [diagnosticsKind, setDiagnosticsKind] = useState("");
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+
+  const loadDiagnostics = useCallback(async () => {
+    setDiagnosticsLoading(true);
+    const bounded = createBoundedFetch(15_000);
+    try {
+      const query = diagnosticsKind ? `?kind=${encodeURIComponent(diagnosticsKind)}&limit=50` : "?limit=50";
+      const r = await fetch(`${apiBase}/api/shadow-diagnostics${query}`, { signal: bounded.signal });
+      const data = await readJsonIfOk<ShadowDiagnosticsData>(r);
+      if (data) setDiagnostics(data);
+    } catch { /* older server without the route: keep the section empty rather than erroring */ }
+    finally {
+      setDiagnosticsLoading(false);
+      bounded.clear();
+    }
+  }, [apiBase, diagnosticsKind]);
+
+  useEffect(() => { void loadDiagnostics(); }, [loadDiagnostics]);
 
   // Action feedback as a fixed toast (same convention as the Models page).
   useEffect(() => {
@@ -478,6 +499,72 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
           {feedback.message}
         </ToastNotice>
       )}
+      <div className="models-phantom-section shadow-page-section">
+        <h3 className="shadow-page-heading">Diagnostics</h3>
+        <div className="models-shadow-row row muted text-control">
+          <span className="models-shadow-label">
+            Diagnostics{" "}
+            <Tooltip
+              content="Recent tool-call dispositions and empty-completion replays from the in-memory request log. This is where a turn that stopped for no visible reason becomes attributable: a removed call, a directive correction, a replay, or a fail-closed undeclared call."
+              side="top"
+              maxWidth={320}
+            >
+              <span style={{ cursor: "help" }} aria-label="Diagnostics feed">ⓘ</span>
+            </Tooltip>
+          </span>
+          <select
+            className="text-control"
+            value={diagnosticsKind}
+            onChange={e => setDiagnosticsKind(e.target.value)}
+            aria-label="Filter diagnostics by kind"
+          >
+            <option value="">All kinds</option>
+            {(diagnostics?.kinds ?? []).map(kind => (
+              <option key={kind} value={kind}>{kind}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => void loadDiagnostics()}
+            disabled={diagnosticsLoading}
+          >
+            {diagnosticsLoading ? "Refreshing…" : "Refresh"}
+          </button>
+          {diagnostics && <span className="muted">{diagnostics.total} event(s)</span>}
+        </div>
+        {diagnostics && diagnostics.events.length === 0 && !diagnosticsLoading && (
+          <p className="muted text-control">No events in the current request-log window.</p>
+        )}
+        {diagnostics && diagnostics.events.length > 0 && (
+          <div className="models-shadow-row models-shadow-row-full muted text-control" style={{ flexDirection: "column", gap: "0.3rem" }}>
+            {diagnostics.events.map((event, index) => (
+              <div
+                key={`${event.requestId}-${event.kind}-${event.names.join(",")}-${index}`}
+                className="row"
+                style={{ gap: "0.5rem", flexWrap: "wrap" }}
+              >
+                <code className="models-shadow-source-name">{event.kind}</code>
+                <span>{new Date(event.ts).toLocaleTimeString()}</span>
+                <span className="muted">{event.model}</span>
+                {event.names.map(name => (
+                  <code key={name} className="models-shadow-source-name">{name}</code>
+                ))}
+                {event.count > 1 && <span className="muted">×{event.count}</span>}
+                <span>{event.detail}</span>
+                <code
+                  className="models-shadow-source-label"
+                  title="Click to copy the request id"
+                  style={{ cursor: "pointer" }}
+                  onClick={() => void navigator.clipboard?.writeText(event.requestId)}
+                >
+                  {event.requestId}
+                </code>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </>
   );
 }

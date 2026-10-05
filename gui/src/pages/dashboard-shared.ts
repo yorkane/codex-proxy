@@ -157,6 +157,29 @@ export interface ShadowCallData {
   /** True while OCX_EMPTY_COMPLETION_RETRY_MAX overrides the persisted budget. */
   emptyCompletionRetryMaxEnvOverride?: boolean;
 }
+/**
+ * Recent tool-call dispositions and empty-completion replays, projected from the in-memory
+ * request log by GET /api/shadow-diagnostics. `kinds` is the server's list so the filter cannot
+ * offer a category the feed never produces.
+ */
+export interface ShadowDiagnosticEvent {
+  ts: number;
+  kind: string;
+  requestId: string;
+  model: string;
+  provider: string;
+  status: number;
+  detail: string;
+  names: string[];
+  count: number;
+}
+export interface ShadowDiagnosticsData {
+  generatedAt: number;
+  timeZone: string;
+  kinds: string[];
+  total: number;
+  events: ShadowDiagnosticEvent[];
+}
 export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: { requests: number; totalTokens: number; coverageRatio: number } };
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "bun" | "mise" | "npm" | "pnpm" | "source";

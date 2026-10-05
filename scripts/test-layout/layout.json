@@ -1181,6 +1181,7 @@
     "management-provider-validation.test.ts": "server",
     "management-provider-verbosity.test.ts": "server",
     "management-route-registry.test.ts": "server",
+    "shadow-diagnostics-feed.test.ts": "server",
     "protocol-routes.test.ts": "server",
     "protocol-settings-route.test.ts": "server",
     "protocol-provider-summary.test.ts": "server",
