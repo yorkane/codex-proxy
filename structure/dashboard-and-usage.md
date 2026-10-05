@@ -118,8 +118,7 @@ Provider marks remain a name-to-asset projection in `gui/src/provider-icons.ts`.
 maps to the self-hosted multicolor `gui/public/provider-icons/crusoe.svg`; the gradient is rendered
 as an image rather than flattened through the monochrome mask path.
 
-The sidebar exposes eleven pages (`gui/src/App.tsx` `NAV`). Several are workspace shells rather than
-single forms, and the shell pattern is the part worth keeping stable:
+The sidebar exposes eight rows (`gui/src/nav-groups.ts` `NAV_GROUPS`), in order: Dashboard, Connect, Codex, Providers, Models, Subagents, Usage & Logs, and Remote Link. Connect opens Integrations with the heading Connect; its tab strip orders Codex, Claude, Claude Desktop, and Grok Build before the remaining integrations. Claude is marked by `NavGroup.embedded` and has no sub-tabs and renders the Claude Code settings directly; `#claude` and `#claude/code` both open it and the former `#claude/settings` redirects to `#claude/code`. Claude Desktop is a separate Connect tab at `#claude/desktop`, containing the status row with Save / Save & apply, mode picker, and model families. Connect has no section switcher. Usage & Logs contains Usage (opened first), Logs & Debug, and Storage with the pill section switcher. The last row, Remote Link, groups Remote Link (`#remote`) and Remote Workspace (`#remote-workspace`, only when available) with the pill section switcher. Codex is the renamed Codex Set and retains `#codex-set`; preserved Claude URLs are `#claude`, `#claude/code`, and `#claude/desktop`. Account management lives only on Providers > Anthropic > Accounts; the former `#claude/account` bookmark redirects to `#providers?provider=anthropic&tab=accounts`. Legacy `#integrations/claude` and `#integrations/claude/desktop` still redirect to `#claude/code` and `#claude/desktop`. Startup (`#startup`) stays outside the sidebar. Several member pages are workspace shells rather than single forms, and the shell pattern is the part worth keeping stable:
 
 | Surface | Shape |
 | --- | --- |
@@ -253,7 +252,7 @@ A private per-dispatch identity generation fences the diagnostic independently o
 quota metadata. Both snapshot and account DTO publication omit externally invalidated
 attempts; the generation itself is never serialized or stored in the quota cache.
 The CLI reconstructs the object using a fixed vocabulary and bounded numeric HTTP
-status, so an unexpected management response cannot add raw upstream material.
+status, so an unexpected management response cannot add raw upstream material. An `http_error` may carry `code` only from `CODEX_TERMINAL_AUTH_CODES` (`src/codex/quota-refresh-outcome.ts`; e.g. `token_invalidated` after a plan change revokes the session), and a failed read keeps the main row's last-known plan. Reauth attribution uses current terminal-auth evidence behind the same generation fence; a transient HTTP401 diagnostic does not replace an existing refresh-failure cause.
 
 > Decision record: [ADR-0078](decisions/ADR-0078-usage-accounting.md)
 
@@ -334,7 +333,7 @@ selectors, a vendor-only inferred price is unavailable; exact provider and user 
 eligible. Missing trace evidence is not reconstructed from today's configuration. Provider-detail
 model shares use that provider's token total, not the global total. Unknown reserved `policy/`
 selectors are rejected before upstream dispatch; historical rows remain unchanged.
-Expected-price overlays are estimates, not billing reproductions: the Z.AI GLM rows (`zai`, `zhipu-bigmodel`, `zhipu-bigmodel-coding`, `zhipu-bigmodel-responses`) display the published z.ai USD list price on surfaces that actually bill by Coding Plan subscription or CNY-tiered domestic PAYG, and every such row is marked `verified-derived` so the estimate flag reaches the UI.
+Expected-price overlays are estimates, not billing reproductions: the Z.AI GLM rows (`zai`, `zhipu-bigmodel`, `zhipu-bigmodel-coding`, `zhipu-bigmodel-responses`) display the published z.ai USD list price on surfaces that actually bill by Coding Plan subscription or CNY-tiered domestic PAYG, and every such row is marked `verified-derived` so the estimate flag reaches the UI. Antigravity Claude Sonnet and Opus 5.5 base/tier overlays in `src/usage/expected-prices.ts` likewise use Anthropic reference prices with `verified-derived`, so even reported tokens retain an estimated-cost flag.
 
 The management API retains the compact accumulator plus bounded query summaries; it never retains
 normalized per-request rows after a response. File identity changes, shrinkage, same-size metadata

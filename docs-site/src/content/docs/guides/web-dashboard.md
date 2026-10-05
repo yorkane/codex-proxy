@@ -71,6 +71,8 @@ host and port over a LAN IP or an alias.
 
 ## Dashboard layout
 
+The sidebar has eight rows, in order: **Dashboard**, **Connect**, **Codex**, **Providers**, **Models**, **Subagents**, **Usage & Logs**, and **Remote Link**. **Connect** opens the page headed **Connect**, with its tab strip ordered **Codex**, **Claude**, **Claude Desktop**, **Grok Build**, then the remaining integrations. Claude has no sub-tabs; it shows the Claude Code settings directly. Claude Desktop is a separate Connect tab at `#claude/desktop`. Connect has no section switcher. **Usage & Logs** opens Usage and groups Usage, Logs & Debug, and Storage with a pill-shaped section switcher. The last row, **Remote Link**, groups Remote Link (`#remote`) and Remote Workspace (`#remote-workspace`, when available) with the same switcher. **Codex** is the renamed **Codex Set** row; the preserved URLs include `#codex-set`, `#claude`, `#claude/code`, and `#claude/desktop`; the former `#claude/settings` bookmark opens Code. The former `#claude/account` bookmark redirects to `#providers?provider=anthropic&tab=accounts`. Startup (`#startup`) stays outside the sidebar.
+
 Responses first-output timing includes streamed function arguments and custom-tool input, as well
 as text and reasoning. A tool-only turn can therefore have a first-output time even without prose.
 Empty deltas and tool-start notifications do not start this timer. It measures the proxy's first
@@ -259,7 +261,7 @@ they have been synchronized. See
 
 ## Remote Hub sessions, keys, and usage
 
-The dashboard's management plane is separate from direct client→hub model traffic. **Integrations → API Keys** shows pending rotations, displays a replacement secret only once, and requires explicit commit or abort. Browser logout invalidates only the current remote session. Connected usage is the hub store filtered by the client's `apiKeyId`; disconnected usage is local, with no mirroring.
+The dashboard's management plane is separate from direct client→hub model traffic. **Connect → API Keys** shows pending rotations, displays a replacement secret only once, and requires explicit commit or abort. Browser logout invalidates only the current remote session. Connected usage is the hub store filtered by the client's `apiKeyId`; disconnected usage is local, with no mirroring.
 
 The spawn override guarantee applies to the **built-in** v2 guidance text. A custom
 `injectionPrompt` replaces that text entirely and must include `{{model}}` and `{{effort}}`
@@ -409,6 +411,14 @@ Usage heatmap days have one Tab entry point. Use Up/Down for adjacent days and L
 
 ### Claude
 
-The **Claude** sidebar page sits directly below **Codex**. One header and tab strip stay in place while you switch tabs, ordered Account, Code, Desktop, Settings. The Account tab shows what the Anthropic provider's **Accounts** tab shows on **Providers**: login, the browser option, the Claude account roster with switch, pause, remove, and reauthentication, the paste-code field, account pool settings, and quota. Provider-level controls such as the default provider, removal, and the enabled switch stay on **Providers**. When Anthropic is not configured, **Add Anthropic** starts Claude sign-in directly, after the same risk notice the Add provider dialog shows. Opening Claude without a tab selects Account when Anthropic is configured, otherwise Code. Code holds the Claude connection switch; Settings shows that connection as On or Off, interception as Running or Stopped, and the intercept port. When interception is stopped, Settings shows why and offers **Start interception**, which starts it in place without restarting OpenCodex. On Desktop, one status row shows whether Claude Desktop runs the profile and whether it is saved, with Save and Save & apply beside it. Compatibility, agent instructions, and context controls remain on Code.
+**Claude** is a tab inside **Connect**, whose tab strip places Codex, Claude, Claude Desktop, and Grok Build in that order. Claude has no sub-tabs: it shows the Claude Code settings directly. The page starts with **Claude Code CLI first-party**, followed by **Get started**, **General**
+(compatibility, agent instructions, and context controls), **Background helper model**,
+**Model interception**, **Available models**, and finally **Claude connection**. A sticky Save bar
+shows **No changes** or **Unsaved changes**, with **Revert** to discard edits and **Save** to commit
+them. Both switches apply immediately; **Save** never changes them. When interception is stopped, the page shows why and offers **Start interception**, which starts it in place without restarting OpenCodex. The former Code, Settings, and Account sub-tabs are gone; everything the read-only Settings view showed except the intercept port number is on this page.
 
-Bookmarks select a tab directly: `#claude/account`, `#claude/code`, `#claude/desktop`, and `#claude/settings`. The former `#integrations/claude` and `#integrations/claude/desktop` bookmarks redirect to Code and Desktop. Arrow keys move between tabs; Home and End select the first and last tab.
+**Claude Desktop** is its own Connect tab at `#claude/desktop`. It contains the Desktop mode picker and model families. One status row shows whether Claude Desktop runs the profile and whether it is saved, with **Save** and **Save & apply** beside it.
+
+Claude/Anthropic accounts are managed only on **Providers > Anthropic > Accounts**: login and the browser option, the account roster with switch, pause, remove, and reauthentication, the paste-code field, account pool settings, and quota. Claude no longer has an Account sub-tab. Provider-level controls such as the default provider, removal, and the enabled switch stay on Providers.
+
+The bookmarks `#claude` and `#claude/code` open this page, and the former `#claude/settings` redirects to `#claude/code`; `#claude/desktop` selects the separate Claude Desktop tab. The old `#claude/account` bookmark redirects to `#providers?provider=anthropic&tab=accounts`. Legacy `#integrations/claude` and `#integrations/claude/desktop` bookmarks still redirect to `#claude/code` and `#claude/desktop`, respectively. Arrow keys move between tabs; Home and End select the first and last tab.

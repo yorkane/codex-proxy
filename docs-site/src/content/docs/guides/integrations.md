@@ -3,7 +3,7 @@ title: Integrations
 description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline CLI, Kilo and Factory Droid from the dashboard — one switch per client, with a backup taken before every write.
 ---
 
-The **Integrations** tab writes opencodex's provider block into a client's own config
+The **Connect** page writes opencodex's provider block into a client's own config
 file, and removes it again. Seventeen clients work this way, each with a switch:
 
 | Client | Config file | Format | When the change takes effect | Credential |
@@ -15,10 +15,10 @@ file, and removes it again. Seventeen clients work this way, each with a switch:
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON5 | immediately, on a running gateway | `OPENCODEX_OPENCLAW_API_KEY` |
 | Kimi Code | `~/.kimi-code/config.toml` | TOML | on restart, or `/reload` | loopback placeholder |
 | gjc | `~/.gjc/agent/models.yml` | YAML | new sessions, or when you open `/model` |non-secret loopback placeholder |
-| DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | YAML | hot reload | non-secret loopback bearer placeholder |
+| DeepSeek Harness (DSH) | `$DSH_HOME/profiles/desktop/cordis.patch.yml` (default `~/.dsh/profiles/desktop/cordis.patch.yml`); `$DSH_HOME/settings.yaml` until DSH Desktop creates that profile | YAML | hot reload | non-secret loopback bearer placeholder |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | new sessions, or after opening the model picker | loopback placeholder |
 | Prime Agent | `~/.prime/agent/models.json` | JSON | new sessions | loopback placeholder |
-| ZCode | `~/.zcode/v2/config.json` | JSON | on restart | loopback placeholder |
+| ZCode | `~/.zcode/v2/provider_config.json` (schemaVersion 1); legacy fallback: `~/.zcode/v2/config.json` | JSON | on restart | loopback placeholder |
 | Aside | `~/.aside/u/<account>/models.json` | JSON | after fully quitting and reopening Aside | loopback placeholder |
 | Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | immediately on save — Raycast watches the file | none — loopback only |
 | omo (Pi / senpi) | `~/.omo/agent/models.json` | JSON | new sessions | loopback placeholder |
@@ -82,10 +82,16 @@ default — `none` included, offered only when the model's own declared ladder c
 the client selects, the proxy's pinned upstream reasoning policy still governs the request that
 leaves it.
 
-Managed DSH support has a compatibility floor of **DSH 0.1.0-rc.6**. OpenCodex owns only
-`llm-pi-ai.providers.opencodex`; Apply and Refresh replace that fragment, Disable removes only that
-fragment, and Restore puts back a recorded snapshot. DSH hot reloads provider changes. These
-operations do not change the user's default model or the native `deepseek-official` provider.
+Managed DSH support has a compatibility floor of **DSH 0.1.0-rc.6**. DSH 0.1.7+ reads provider
+routes from `[id=llm-pi-ai].config.providers.opencodex` in the Desktop profile patch,
+`$DSH_HOME/profiles/desktop/cordis.patch.yml`, which DSH hot reloads. OpenCodex writes that row when the Desktop profile and its patch exist. If
+`$DSH_HOME/profiles/desktop/package.json` exists but `cordis.patch.yml` is missing, Apply refuses:
+create `cordis.patch.yml` containing `[]` (the empty patch DSH writes for a new profile), then
+enable the integration again. Only when there is no Desktop profile does OpenCodex use
+`llm-pi-ai.providers.opencodex` in `$DSH_HOME/settings.yaml`. OpenCodex owns only that provider
+fragment: Apply and Refresh replace it, Disable removes it, and Restore puts back a recorded
+snapshot. These operations do not change the user's default model or the native
+`deepseek-official` provider.
 The managed DSH integration is currently loopback-only and never writes a real credential.
 
 MiniMax Code follows `MINIMAX_DATA_DIR`, then `MAVIS_DATA_DIR`, before falling
@@ -114,7 +120,7 @@ restart. Aside's block is loopback-only and never carries a real credential.
 
 The managed Raycast integration supports **macOS and Windows**. Custom Providers
 is a **Raycast Pro** feature: on a free plan the file is still written, but
-`ocx integration client status --client raycast` and the Integrations page report
+`ocx integration client status --client raycast` and the **Connect** page report
 a warning, because Raycast will not read it. On macOS or Windows, open Raycast →
 Settings → AI → **Reveal Providers Config** once so the `ai` folder exists.
 On these supported platforms, opencodex uses that folder as its install signal
@@ -249,7 +255,7 @@ Older versions may ignore or discard the option; a valid configuration alone doe
 Hermes sends the header. Conversation isolation, compaction lineage and auxiliary/child requests
 follow Hermes' affinity semantics. This setting does not guarantee a particular cache-hit rate.
 
-For an existing managed integration, open **Integrations → Hermes**, review **Apply**, and confirm
+For an existing managed integration, open **Connect → Hermes**, review **Apply**, and confirm
 the update. Until then, it shows **Update needed** and implicit catalog refresh leaves it unchanged,
 including its model list. Reading the page does not upgrade the configuration. After Apply, normal
 catalog refresh resumes and retains the setting; **Replace** also includes it.
@@ -262,7 +268,7 @@ remain untouched, and the existing snapshot and Restore workflow applies to the 
 
 ## Preview and confirm changes
 
-Apply, Replace, Disable, and Restore now begin with a preview. The dialog shows exactly which
+In the dashboard, Apply, Replace, Disable, and Restore begin with a preview. The dialog shows exactly which
 managed settings will change, including the bounded change paths and whether each change adds,
 updates, or removes a value. Review that plan before confirming.
 
@@ -282,10 +288,11 @@ profiles** remains a separate bulk action and is not bound to one combined previ
 
 **Formatting is generally not preserved.** Applying parses a config and writes it back
 out, so JSON, JSON5 and TOML may be reformatted and comments in JSON5 or TOML are lost.
-OMP, DSH and Hermes are the exceptions: their YAML writers patch only `providers.opencodex` and
-`llm-pi-ai.providers.opencodex`, respectively, preserving
-unrelated provider comments and formatting byte-for-byte. If that exact source range
-cannot be identified safely, the operation refuses instead. For other clients, use
+OMP, DSH and Hermes are the exceptions: OMP and Hermes patch only `providers.opencodex`.
+DSH patches only `[id=llm-pi-ai].config.providers.opencodex` in the Desktop profile patch,
+or `llm-pi-ai.providers.opencodex` in `settings.yaml` when there is no Desktop profile.
+Their YAML writers preserve unrelated provider comments and formatting byte-for-byte. If that exact
+source range cannot be identified safely, the operation refuses instead. For other clients, use
 Restore when you need the previous file bytes: the snapshot is a verbatim copy.
 
 **If a value cannot be rewritten faithfully, the switch refuses instead.** The round
@@ -336,6 +343,84 @@ ocx integration client history --client hermes
 ocx integration client restore --op <opId> [--confirm-drift]
 ```
 
+### Preview and bind a terminal write
+
+The existing direct commands remain supported. To bind a write to a reviewed
+observation, inspect status and save a preview first:
+
+```bash
+ocx integration client preview --help
+ocx integration client status --client hermes --json
+ocx integration client preview --client hermes --operation apply --json > hermes-preview.json
+```
+
+Review `state`, `foreignEdit`, structural `changes`, `canApply` and `willChange`.
+Valid refused and no-op plans exit 0 because inspection succeeded; nothing was
+applied. The plan contains no secret values or full file diff. It uses existing
+passive catalog evidence and never secretly refreshes providers. If unavailable,
+resolve catalog availability separately before requesting a new preview.
+
+Only after reviewing an applicable plan and choosing the write:
+
+```bash
+PLAN_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' hermes-preview.json)"
+ocx integration client enable --client hermes --plan-fingerprint "$PLAN_FINGERPRINT" --json
+ocx integration client status --client hermes --json
+```
+
+Fingerprint is concurrency evidence, not authorization. Commit accepts `pN:`
+followed by 32 lowercase hex digits; a refused `pN:unbound` cannot commit. Repeat
+exact client/action/profile/options. Preview `overwrite` maps to enable with
+`--overwrite-conflict`; preview `disable` maps to disable. Stale commit exits 5,
+prints re-preview guidance on stderr and leaves stdout empty. It never adopts a
+replacement fingerprint or retries. Other failures use usage 2, not-found 4,
+runtime/malformed 1, with safe stderr rather than a JSON error envelope.
+
+### Inspect restoration drift before replacing it
+
+Use a real history opId; `op-example` below is fictional:
+
+```bash
+ocx integration client history --client aside --profile 1 --json
+ocx integration client restore --op op-example --client aside --profile 1 --preview --json
+```
+
+If drift is refused, inspect the edits. When replacing them is explicitly intended,
+preview with `--confirm-drift`, review, then bind that same intent:
+
+```bash
+ocx integration client restore --op op-example --client aside --profile 1 --preview --confirm-drift --json > restore-preview.json
+```
+
+After review:
+
+```bash
+RESTORE_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' restore-preview.json)"
+ocx integration client restore --op op-example --client aside --profile 1 --confirm-drift --plan-fingerprint "$RESTORE_FINGERPRINT" --json
+ocx integration client status --client aside --profile 1 --json
+```
+
+Aside preview/bound writes require one profile, not an aggregate target. Generic
+restore omits client/profile; the server derives the non-Aside client from opId.
+The returned plan does not contain opId or all original command inputs, so retain
+that context. `--preview` cannot combine with `--plan-fingerprint`.
+
+### Retire an old recovery record
+
+This permanently retires the record and backup; it does not restore or disable
+the integration. After inspecting history and choosing to lose that recovery point:
+
+```bash
+ocx integration client history remove --op op-example --client aside --profile 1 --yes --json
+ocx integration client history --client aside --profile 1 --json
+```
+
+Use the actual selected opId. No selector addresses the global journal; `--client aside`
+addresses aggregate Aside history and optional `--profile` narrows it. Other client
+selectors are refused for deletion. The newest row is protected. A receipt with
+`snapshotRemoved:false` is committed retirement with incomplete cleanup and exit 1;
+it is not rollback and must not trigger repeated deletion. `journal remove` is an alias.
+
 `--overwrite-conflict` is the terminal form of **Replace**:
 
 ```bash
@@ -371,7 +456,7 @@ Aside refresh requires a [compatible running proxy](#aside-profile-controls).
 If Models reports **“Model selection saved”** together with a client-refresh warning, the
 selection is already saved; one or more client files could not be updated. The warning names
 the affected client and Aside profile, when applicable, and explains the refusal. Open
-**Integrations** to inspect that client or profile before starting a new session. Resolve the
+**Connect** to inspect that client or profile before starting a new session. Resolve the
 reported issue, then retry `ocx sync`; an overlapping operation must finish first. If the
 warning includes a backup path or says recovery did not finish, inspect that recovery state
 before retrying. A successful selection save alone does not confirm client-file recovery.
@@ -431,6 +516,20 @@ successful bulk operation and HTTP 207 with `ok: false` if any profile refuses. 
 entry in `results`: successful profiles are not rolled back when another fails. Desired
 settings remain saved, so retry after addressing the affected profile rather than assuming
 the entire change failed. If saving those settings fails, no profile files are changed.
+
+For a targeted refresh of eligible Aside profiles, rather than broad catalog sync:
+
+```bash
+ocx integration client sync --client aside --json
+ocx integration client status --client aside --json
+```
+
+This uses the existing attested Aside owner and has no profile selector or local
+fallback. `{results:[]}` exits 0 and means no eligible profiles, not applied writes.
+Any failed row returns exit 1 while successful profiles remain updated. Preserve
+per-profile refusal, residual and separately labeled redacted backup information;
+inspect the affected profile before retrying. This refresh is separate from each
+profile's preview/bound mutation workflow.
 
 Each profile has separate ownership and history. Existing user edits, unsafe paths and linked
 catalogs are refused; the existing explicit overwrite and drift-confirmation controls remain
@@ -517,7 +616,7 @@ supported by this generated integration; it requires unauthenticated loopback ac
 ## GitHub Copilot App
 
 The GitHub Copilot desktop app can use opencodex as an OpenAI-compatible model provider. This is a
-manual client setup with no Integrations-tab switch, and it is separate from the upstream
+manual client setup with no switch on **Connect**, and it is separate from the upstream
 `github-copilot` provider, which uses a Copilot subscription as a backend for opencodex.
 
 1. Start opencodex and confirm it answers:
@@ -650,12 +749,51 @@ Run Droid once to create `~/.factory`, then explicitly enable this integration w
 Chat Completions endpoint. Choose a row from Droid's `/model` picker. Disable
 removes the managed rows; Undo restores the exact saved file. Other settings and
 custom models remain yours.
+If Droid normalizes a `customModels` row by adding `id` or `index`, OpenCodex ignores those two
+client fields when checking ownership so saved reasoning defaults remain available.
 
-Open **Integrations → Factory Droid** (`/#integrations/droid`) to set a reasoning
+Open **Connect → Factory Droid** (`/#integrations/droid`) to set a reasoning
 default for each connected model. Choose from the model's supported efforts,
 review the changes, then confirm. **No default** clears that model's draft setting;
 use **Save / review changes** and confirm to apply the removal.
 Models without a declared effort list show that no default is available.
+
+The CLI supports the same defaults in Droid apply/overwrite. For example, replace
+the fictional model below with an exact connected ID and supported effort:
+
+```bash
+ocx integration client preview --client droid --operation apply --reasoning-default example/model-a=high --json > droid-preview.json
+```
+
+After reviewing the applicable plan and choosing the write:
+
+```bash
+DROID_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' droid-preview.json)"
+ocx integration client enable --client droid --reasoning-default example/model-a=high --plan-fingerprint "$DROID_FINGERPRINT" --json
+ocx integration client status --client droid --json
+```
+
+Repeat `--reasoning-default MODEL=EFFORT` to submit the complete replacement map.
+The last equals sign separates model and effort; case and exact IDs are preserved.
+Duplicate model keys refuse. Omitted flags preserve defaults;
+`--clear-reasoning-defaults` explicitly sends an empty map. To clear, preview with
+that flag and repeat it in the matching enable command. Clear and entries cannot
+combine. These flags are Droid-only and do not apply to disable/restore. Repeat
+the same map in preview and commit; the server validates model-specific efforts
+and refuses stale binding rather than silently accepting a changed map.
+
+For an intended complete clear, preview that separate action:
+
+```bash
+ocx integration client preview --client droid --operation apply --clear-reasoning-defaults --json > droid-clear-preview.json
+```
+
+After reviewing and choosing it:
+
+```bash
+DROID_CLEAR_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' droid-clear-preview.json)"
+ocx integration client enable --client droid --clear-reasoning-defaults --plan-fingerprint "$DROID_CLEAR_FINGERPRINT" --json
+```
 
 The default applies only when Droid omits an effort from its request. An explicit
 request effort takes precedence over this default; existing OpenCodex pins and

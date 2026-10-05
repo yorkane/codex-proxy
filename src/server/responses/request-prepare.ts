@@ -672,6 +672,7 @@ export async function prepareResponsesRequest(
     route,
     options,
     credentialDomainWasRewritten,
+    config,
   );
   // Does the CALLER own the credential this request will authenticate with? Validated exactly
   // the way final auth validates it: the route ownership predicate AND the caller-bearer check
@@ -732,6 +733,7 @@ export async function prepareResponsesRequest(
     // recovery or a profile drain fences the physical identity, final auth drops main and preview
     // has to drop it too. A hardcoded `true` would be wrong in the second case and `false` in
     // the first.
+    requestOwnedMainCredential: previewRequestScopedMainCredential,
     isMainAccountTokenLive: previewRequestScopedMainCredential
       ? () => previewRequestOwnedMainCredentialLive
       : undefined,
@@ -958,6 +960,7 @@ export async function prepareResponsesRequest(
                 route,
                 options,
                 credentialDomainWasRewritten,
+                config,
               );
               const recoveryRequestScopedMainCredential = codexRouteCredentialOwnership(
                 recoveryAuthHeaders,
@@ -989,6 +992,7 @@ export async function prepareResponsesRequest(
               const recoverySelectionOptions = {
                 nativeMainSelectionOnly: !recoveryNativeMainBlocked
                   && recoverySelectionAdmission?.mainProfileDraining === true,
+                requestOwnedMainCredential: recoveryRequestScopedMainCredential,
                 isMainAccountTokenLive: recoveryRequestScopedMainCredential
                   ? () => recoveryRequestOwnedMainCredentialLive
                   : undefined,
