@@ -23,6 +23,7 @@ import {
 } from "../responses/apply-patch-envelope";
 import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "../responses/exec-envelope-repair";
 import {
+  droppedEmitDisposition,
   isDroppedNamespaceContainer,
   resolveEmittedCall,
   shouldEnforceDeclaredToolNames,
@@ -58,7 +59,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
+import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 
 function sseEvent(name: string, data: Record<string, unknown>): string {
@@ -1082,6 +1083,11 @@ export function bridgeToResponsesSSE(
                 if (options?.undeclaredToolPhantomNames
                   && (options.undeclaredToolPhantomNames.has(verdict.name)
                     || options.undeclaredToolPhantomNames.has(event.name))) {
+                  noteDroppedEmitSafely(delivery, {
+                    emitted: event.name,
+                    effective: verdict.name,
+                    decision: droppedEmitDisposition(verdict.name, event.name, options?.declaredToolNames),
+                  });
                   break;
                 }
                 if (enforceDeclared) {
@@ -1106,6 +1112,11 @@ export function bridgeToResponsesSSE(
                 // Relaying it produced the client-side `unsupported call: <ns>` that ends the turn.
                 if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
                   || isDroppedNamespaceContainer(event.name, options?.declaredToolNames)) {
+                  noteDroppedEmitSafely(delivery, {
+                    emitted: event.name,
+                    effective: verdict.name,
+                    decision: "namespace-container",
+                  });
                   break;
                 }
               }

@@ -31,6 +31,7 @@
  */
 
 import { normalizeDeclaredToolName, repairEmittedToolName } from "../types";
+import type { DroppedEmitDecision } from "../usage/telemetry-contract";
 import {
   buildNamespaceLeakFeedback,
   buildUndeclaredToolFeedback,
@@ -81,7 +82,15 @@ export function isDroppedNamespaceContainer(
 export type EmittedCallVerdict =
   /** Relay the call under the resolved name, which shape repair may have rewritten. */
   | { kind: "allow"; name: string; repaired: boolean }
-  /** Drop the call entirely; no output item should ever be opened for it. */
+  /**
+   * Drop the call entirely; no output item should ever be opened for it.
+   *
+   * Deliberately reason-free. The bridge records a drop only at its two SILENT dispositions (the
+   * allowlist removal and the deferred-wire container removal); the third, an undeclared call on an
+   * enforcing wire, becomes a 502 the client already sees. Those two sites know which rule they
+   * are acting on, so a reason field here would be a second statement of a fact the caller holds -
+   * and a second statement is a claim that can disagree with the first.
+   */
   | { kind: "drop"; name: string }
   /**
    * Replace the call with a directive-error exec body: the client runs it and
@@ -151,10 +160,11 @@ export function resolveEmittedCall(
       return { kind: "drop", name: emitted };
     }
     // Without a catalog nothing can be recognised as undeclared, so the call is relayed - except
-    // for a tool NAMESPACE container, which is provably not callable whatever the catalog says
-    // (`tools` is the exec sandbox namespace and never a declared wire name). Relaying it would
-    // hand the client an `unsupported call: <ns>` that ends the turn.
-    if (isNamespaceContainerName(emitted, EMPTY_DECLARED_TOOL_NAMES)) {
+    // for a tool NAMESPACE container, which is not callable on any wire. Relaying it would hand
+    // the client an `unsupported call: <ns>` that ends the turn. The question is asked through
+    // the one exported entry point rather than the raw predicate, so this branch and the caller's
+    // fail-closed branch cannot give one emission two different answers.
+    if (isDroppedNamespaceContainer(emitted, declared)) {
       options.onDecision?.({ emitted, effective: emitted, decision: "namespace-leak" });
       return { kind: "drop", name: emitted };
     }
@@ -208,6 +218,28 @@ export function resolveEmittedCall(
   }
   report("phantom-drop");
   return { kind: "drop", name: effective };
+}
+
+/**
+ * Which telemetry decision describes a drop the bridge is about to carry out.
+ *
+ * Exported so the four bridge drop sites (streaming and buffered, phantom branch and container
+ * branch) cannot each invent their own label for the same event. The container rule is asked
+ * through `isDroppedNamespaceContainer` against both the resolved name and the raw emission -
+ * the same test the caller's own unconditional-drop uses - so a name the guard dropped as a
+ * phantom but which is provably a namespace container reports as the container it is. That
+ * distinction is the entire point of the field: "a known hallucination went away" and "the model
+ * called the namespace itself" have different fixes.
+ */
+export function droppedEmitDisposition(
+  effective: string,
+  emitted: string,
+  declaredToolNames?: ReadonlySet<string>,
+): DroppedEmitDecision {
+  return isDroppedNamespaceContainer(effective, declaredToolNames)
+    || isDroppedNamespaceContainer(emitted, declaredToolNames)
+    ? "namespace-container"
+    : "phantom";
 }
 
 export { repairExecEnvelopeLeak };

@@ -1,4 +1,5 @@
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
+import { EMPTY_COMPLETION_RETRY_MAX_LIMIT } from "../../lib/empty-completion-budget";
 import * as z from "zod/v4";
 import { compactionRecoverySchema } from "./compaction-recovery";
 import { blockedModelRedirectsSchema } from "./blocked-model-redirects";
@@ -219,6 +220,11 @@ export const configSchema = z.object({
   configRebaseProvenance: z.unknown().optional(),
   // A retry can be billable, so absence and malformed hand edits both stay off.
   emptyCompletionRetry: z.boolean().optional().catch(false),
+  // The replay budget behind that switch. A malformed hand edit must not disable a guard the
+  // operator turned on, so it falls back to undefined — which the pipeline resolves to the
+  // historical single replay. The accepted range mirrors EMPTY_COMPLETION_RETRY_MAX_LIMIT: an
+  // out-of-range hand edit is not a hard failure either, it clamps at read time.
+  emptyCompletionRetryMax: z.number().int().min(0).max(EMPTY_COMPLETION_RETRY_MAX_LIMIT).optional().catch(undefined),
   // Header suppression changes what Codex sees, so absence and malformed edits stay off.
   dropCodexSafetyBuffering: z.boolean().optional().catch(false),
   // A malformed hand edit must not silently stop opening the browser: fall back
@@ -326,9 +332,26 @@ export const configSchema = z.object({
   streamMode: z.enum(["auto", "legacy-tee", "eager-relay"]).optional().catch(undefined),
   blockedModelRedirects: blockedModelRedirectsSchema.optional().catch(undefined),
   // Additional exact origins allowed for CORS (e.g. an HTTPS reverse proxy origin).
-  // Fork note: upstream ships no runtime zod entry for this key (types-only +
-  // passthrough); the explicit .catch(undefined) is the fork's degrade-don't-reject
-  // hardening and is deliberately retained.
+  //
+  // DO NOT DELETE AS "REDUNDANT WITH UPSTREAM" -- upstream has no entry here at all, and this
+  // key is NOT decorative. The type is declared in types/config.ts and consumed unguarded by
+  // isExtraAllowedOrigin()/isRemoteGuiBrowserOriginAllowed(), while the top-level schema below
+  // is .passthrough(), so an undeclared key survives parsing verbatim. A hand-edited
+  // `"corsAllowOrigins": "https://one.example"` (a string is the obvious typo shape) then
+  // passes the `!cfg.corsAllowOrigins?.length` guard -- a non-empty string has a truthy
+  // .length -- and dies on `.some()`: TypeError, which escapes fetch and Bun answers
+  // 500 "Something went wrong!". Measured across data plane, /api management plane, the OPTIONS
+  // preflight branch and the remote-GUI origin check: one bad character in an optional key
+  // takes down every cross-origin request, not just the allow-list.
+  //
+  // .catch(undefined) is the right shape specifically: dropping the .catch (strict) is worse,
+  // because the failed parse falls through to the backup-and-defaults repair path and costs the
+  // operator their providers for a typo in an unrelated key; z.unknown() is worse still, since
+  // it forwards the malformed value to the guard untouched. Pinned by
+  // tests/config/config-cors-allow-origins.test.ts, which mutates this exact line.
+  //
+  // Unlike anthropicAccountPool below, this entry deliberately rejects malformed values rather
+  // than passing them through: that field's consumers tolerate unknown subkeys, these do not.
   corsAllowOrigins: z.array(z.string()).optional().catch(undefined),
   // Degrade malformed hand edits locally; candidate writes reject them before parsing.
   // An invalid native preference retains the legacy route instead of enabling native by default.

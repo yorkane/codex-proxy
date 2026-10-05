@@ -10,6 +10,11 @@ import {
   shadowPhantomToolList,
   shadowSourceModels,
 } from "../../lib/shadow-call";
+import {
+  EMPTY_COMPLETION_RETRY_MAX_ENV,
+  EMPTY_COMPLETION_RETRY_MAX_LIMIT,
+  emptyCompletionRetryMax,
+} from "../../lib/empty-completion-budget";
 import { EMPTY_COMPLETION_RETRY_ENV } from "../responses/empty-completion-guard";
 import { jsonResponse } from "../auth-cors";
 import { isPlainRecord } from "./shared";
@@ -39,6 +44,14 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     emptyCompletionRetry: config.emptyCompletionRetry === true,
     // The disable-only emergency override: while it is set, the persisted switch has no effect.
     emptyCompletionRetryEnvOverride: process.env[EMPTY_COMPLETION_RETRY_ENV] === "0",
+    // The replay budget behind that switch, resolved exactly as the pipeline resolves it, plus the
+    // bounds the UI clamps to. The env field is a hint, not the resolved value: an override that
+    // the UI could not see would leave the operator editing a number that has no effect.
+    emptyCompletionRetryMax: emptyCompletionRetryMax(config),
+    emptyCompletionRetryMaxMin: 0,
+    emptyCompletionRetryMaxLimit: EMPTY_COMPLETION_RETRY_MAX_LIMIT,
+    emptyCompletionRetryMaxEnvOverride: process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== undefined
+      && process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== "",
   });
 }
 
@@ -46,7 +59,7 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    let raw: unknown;
    try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
    if (!isPlainRecord(raw)) return jsonResponse({ error: "body must be a JSON object" }, 400);
-   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown };
+   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown; emptyCompletionRetryMax?: unknown };
    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
      return jsonResponse({ error: "enabled must be a boolean" }, 400);
    }
@@ -54,6 +67,14 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    // client bug: reject it with 400 instead of coercing it into the persisted config.
    if (body.emptyCompletionRetry !== undefined && typeof body.emptyCompletionRetry !== "boolean") {
      return jsonResponse({ error: "emptyCompletionRetry must be a boolean" }, 400);
+   }
+   // Strictly integer-or-absent, mirroring src/config/diagnostics.ts. A "2" string or a 1.5 is a
+   // client bug: reject it with 400 rather than letting the number reach the persisted config,
+   // where the schema's catch would leave a value that the pipeline silently ignores.
+   if (body.emptyCompletionRetryMax !== undefined
+     && (typeof body.emptyCompletionRetryMax !== "number" || !Number.isInteger(body.emptyCompletionRetryMax)
+       || body.emptyCompletionRetryMax < 0 || body.emptyCompletionRetryMax > EMPTY_COMPLETION_RETRY_MAX_LIMIT)) {
+     return jsonResponse({ error: `emptyCompletionRetryMax must be an integer 0-${EMPTY_COMPLETION_RETRY_MAX_LIMIT}` }, 400);
    }
   if (body.model !== undefined && typeof body.model !== "string") {
     return jsonResponse({ error: "model must be a string" }, 400);
@@ -132,6 +153,11 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
   if (typeof body.emptyCompletionRetry === "boolean") {
     config.emptyCompletionRetry = body.emptyCompletionRetry;
   }
+  if (typeof body.emptyCompletionRetryMax === "number") {
+    // Same live-object assignment as the switch: the next turn reads the new budget without a
+    // restart, because the request pipeline reads this very reference.
+    config.emptyCompletionRetryMax = body.emptyCompletionRetryMax;
+  }
   saveConfigPreservingClaudeCode(config);
   const sci = config.shadowCallIntercept;
   return jsonResponse({
@@ -145,6 +171,11 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     phantomToolFeedbackMax: sci.phantomToolFeedbackMax ?? 2,
     emptyCompletionRetry: config.emptyCompletionRetry === true,
     emptyCompletionRetryEnvOverride: process.env[EMPTY_COMPLETION_RETRY_ENV] === "0",
+    emptyCompletionRetryMax: emptyCompletionRetryMax(config),
+    emptyCompletionRetryMaxMin: 0,
+    emptyCompletionRetryMaxLimit: EMPTY_COMPLETION_RETRY_MAX_LIMIT,
+    emptyCompletionRetryMaxEnvOverride: process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== undefined
+      && process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== "",
   });
 }
   return null;

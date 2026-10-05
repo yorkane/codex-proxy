@@ -48,7 +48,7 @@ export async function deliverAdapterResponse(
     | "continuationStateForResponse"
     | "notifyResponseComplete"
   >,
-  completionPolicy: Pick<ResponsesCompletionPolicy, "emptyCompletionGuardEnabled">,
+  completionPolicy: Pick<ResponsesCompletionPolicy, "emptyCompletionGuardEnabled" | "emptyCompletionGuardMaxRetries">,
   adapterExchange: Pick<AdapterExchange, "upstreamResponse" | "upstream" | "cleanupUpstreamAbort" | "localUpstream">,
   continuationState: Pick<AdapterContinuations, "terminalGuardEnabled" | "fetchTerminalGuardContinuation" | "fetchGuardedEmptyCompletionRetry">,
 ): Promise<Response> {
@@ -67,7 +67,7 @@ export async function deliverAdapterResponse(
     fetchTerminalGuardContinuation,
     fetchGuardedEmptyCompletionRetry,
   } = continuationState;
-  const { emptyCompletionGuardEnabled } = completionPolicy;
+  const { emptyCompletionGuardEnabled, emptyCompletionGuardMaxRetries } = completionPolicy;
   const {
     cancelResponseCompletion,
     commitReasoningReplayServingRoute,
@@ -123,6 +123,7 @@ export async function deliverAdapterResponse(
       ? guardEmptyCompletionEventStream({
           firstEvents: eventStream,
           continuation: fetchGuardedEmptyCompletionRetry,
+          maxRetries: emptyCompletionGuardMaxRetries,
         })
       : eventStream;
     // Fork: shadow-scoped phantom tolerance + per-request directive-correction
@@ -252,6 +253,7 @@ export async function deliverAdapterResponse(
         for await (const event of guardEmptyCompletionEventStream({
           firstEvents: (async function* () { yield* guardedEvents; })(),
           continuation: fetchGuardedEmptyCompletionRetry,
+          maxRetries: emptyCompletionGuardMaxRetries,
         })) events.push(event);
       } else {
         events = guardedEvents;

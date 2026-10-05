@@ -147,6 +147,15 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
   // The empty-completion guard is a TOP-LEVEL config field, independent of whether shadow
   // interception is on, so its section renders whether or not the intercept is enabled.
   const emptyCompletionRetryOn = shadowCall?.emptyCompletionRetry === true;
+  // The budget comes from the server's resolved value, so it may already reflect the environment
+  // override rather than config.json. Clamped to the bounds the server reported; an older server
+  // that reports neither bound still gets the historical 1..3 window.
+  const replayMaxMin = shadowCall?.emptyCompletionRetryMaxMin ?? 0;
+  const replayMaxLimit = shadowCall?.emptyCompletionRetryMaxLimit ?? 3;
+  const replayMax = Math.min(
+    replayMaxLimit,
+    Math.max(replayMaxMin, Math.trunc(shadowCall?.emptyCompletionRetryMax ?? 1)),
+  );
 
   return (
     <>
@@ -387,13 +396,40 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
             <span className="models-shadow-label">
               Replay an empty completion{" "}
               <Tooltip
-                content="When the upstream answers 200 and the turn ends with reasoning but no output text and no tool call, the proxy suppresses that silent stop and replays the identical request once. A second empty turn surfaces as a stated failure. Applies to every routed Responses turn, not only shadow-intercepted ones."
+                content="When the upstream answers 200 and the turn ends with reasoning but no output text and no tool call, the proxy suppresses that silent stop and replays the identical request. Every replay re-issues the whole turn and may be billable, so the budget beside the switch is capped. A turn still empty after the budget is spent surfaces as a stated failure. Applies to every routed Responses turn, not only shadow-intercepted ones."
                 side="top"
                 maxWidth={320}
               >
                 <span style={{ cursor: "help" }} aria-label="Empty completion replay help">ⓘ</span>
               </Tooltip>
             </span>
+            <label className="row" style={{ gap: "0.35rem", marginLeft: "auto" }}>
+              Replays
+              <input
+                type="number"
+                className="input text-control"
+                style={{ width: "4.5rem" }}
+                min={replayMaxMin}
+                max={replayMaxLimit}
+                step={1}
+                value={replayMax}
+                disabled={saving}
+                aria-label="Empty completion replays"
+                onChange={e => {
+                  // An emptied field reads as "" and Number("") is 0, which would silently save
+                  // "replay nothing" the moment someone selects-all to retype. Only a non-empty,
+                  // integral, in-range value is a write; anything else leaves the last good number.
+                  const raw = e.target.value.trim();
+                  if (raw === "") return;
+                  const value = Number(raw);
+                  if (!Number.isInteger(value) || value < replayMaxMin || value > replayMaxLimit) return;
+                  // Functional update: this section renders before the settings have loaded, so
+                  // shadowCall may still be null here (unlike the phantom block, which is guarded).
+                  setShadowCall(prev => (prev ? { ...prev, emptyCompletionRetryMax: value } : prev));
+                  void saveShadowCall({ emptyCompletionRetryMax: value });
+                }}
+              />
+            </label>
             <Switch
               on={emptyCompletionRetryOn}
               onClick={() => void saveShadowCall({ emptyCompletionRetry: !emptyCompletionRetryOn })}
@@ -403,12 +439,32 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
           </div>
           <p className="muted text-control">
             A model that answers with only reasoning and no text or tool call used to look like a random stop;
-            the user had to type "please continue". With this on the proxy replays that turn once instead.
+            the user had to type "please continue". With this on the proxy replays that turn
+            {replayMax === 1 ? " once" : ` up to ${replayMax} times`} instead.
           </p>
+          {replayMax === 0 && (
+            <p className="muted text-control">
+              Replays set to 0: the switch stays on but nothing is replayed, so an empty turn passes
+              through as a silent success — the same result as turning the switch off. Set at least 1 to
+              recover those turns.
+            </p>
+          )}
+          {replayMax > 1 && (
+            <p className="muted text-control">
+              Each replay re-issues the whole turn, so up to {replayMax} generations may be billed before
+              the turn is reported as failed.
+            </p>
+          )}
           {shadowCall?.emptyCompletionRetryEnvOverride && (
             <p className="muted text-control">
               Forced off: OCX_EMPTY_COMPLETION_RETRY=0 is set in the service environment, so this switch has no
               effect until the variable is removed.
+            </p>
+          )}
+          {shadowCall?.emptyCompletionRetryMaxEnvOverride && (
+            <p className="muted text-control">
+              Controlled by the service environment: OCX_EMPTY_COMPLETION_RETRY_MAX is set, so it overrides
+              this number until the variable is removed.
             </p>
           )}
         </div>

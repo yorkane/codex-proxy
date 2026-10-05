@@ -1,5 +1,6 @@
 import type { AdapterEvent, OcxConfig, OcxUsage } from "../../types";
 import { sanitizeLogMetadataString } from "../../lib/redact";
+import { DEFAULT_EMPTY_COMPLETION_RETRY_MAX } from "../../lib/empty-completion-budget";
 
 /**
  * Empty-completion guard for Responses turns (port of codex-router's
@@ -21,6 +22,10 @@ import { sanitizeLogMetadataString } from "../../lib/redact";
  * the previous relay behavior without editing the persisted config.
  */
 export const EMPTY_COMPLETION_RETRY_ENV = "OCX_EMPTY_COMPLETION_RETRY";
+// The replay BUDGET beside this switch — its bounds, its environment override and its resolver —
+// lives in `src/lib/empty-completion-budget.ts`, so the config schema and the config diagnostics
+// can name the same ceiling without importing this server module. The guard itself only ever
+// receives a resolved number through `maxRetries`.
 
 /**
  * The observability notice for a turn that ended empty with the retry guard off.
@@ -30,11 +35,18 @@ export const EMPTY_COMPLETION_RETRY_ENV = "OCX_EMPTY_COMPLETION_RETRY";
  * reads this warning, so a caller could forge log records it never produced. Both are reduced
  * to bounded single-line metadata first.
  */
-export function emptyCompletionNotice(providerName: unknown, modelId: unknown): string {
+export function emptyCompletionNotice(
+  providerName: unknown,
+  modelId: unknown,
+  maxRetries: number = DEFAULT_EMPTY_COMPLETION_RETRY_MAX,
+): string {
   const provider = sanitizeLogMetadataString(providerName) ?? "unknown";
   const model = sanitizeLogMetadataString(modelId) ?? "unknown";
+  const budget = maxRetries > 1
+    ? `retry such turns up to ${maxRetries} times`
+    : "retry such turns once";
   return `[opencodex] ${provider}/${model} completed with no output text and no tool call. `
-    + "Set \"emptyCompletionRetry\": true to retry such turns once.";
+    + `Set \"emptyCompletionRetry\": true to ${budget}.`;
 }
 
 /** Retained pre-content events are bounded independently by count and encoded size. */

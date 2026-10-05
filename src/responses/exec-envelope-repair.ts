@@ -85,11 +85,20 @@ const SANDBOX_NAMESPACE = "tools";
  * because a container call is never legitimate on any wire — relaying it only moves the failure
  * to the client, which reports `unsupported call: <ns>` and ends the turn.
  *
- * `tools` is the JS sandbox namespace inside exec bodies (tools.exec_command, ...), which never
- * appears in the declared tool list; any other name counts as a namespace only when a declared
- * tool actually lives under it (`collaboration` for `collaboration__update_plan`).
+ * FALSIFIABLE BY THE CATALOG. A name the request actually declares as a tool is a tool, never a
+ * container - including the literal `tools`. The sandbox special case is deliberately kept
+ * falsifiable. It used to be an unconditional always-a-container, which is a claim nothing can
+ * refute: `tools` is the JS sandbox namespace inside exec bodies (tools.exec_command, ...), so no
+ * declared wire list contains it today, but a provider that ever declared a real `tools` tool
+ * would have had its legitimate calls silently dropped. With the declaration check in front,
+ * `tools` counts as a container exactly when no declared tool answers to that name; any other
+ * name counts only when a declared tool actually lives under it (`collaboration` for
+ * `collaboration__update_plan`).
  */
 export function isNamespaceContainerName(name: string, declaredToolNames: ReadonlySet<string>): boolean {
+  // A declared tool outranks every container heuristic. This line is what turns the sandbox
+  // special case below from an assertion into a claim the request's catalog can refute.
+  if (declaredToolNames.has(name)) return false;
   if (name === SANDBOX_NAMESPACE) return true;
   const prefix = name + "__";
   for (const declared of declaredToolNames) {

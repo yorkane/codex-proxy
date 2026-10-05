@@ -14,7 +14,9 @@ import {
   isCyberPolicyCode,
   type OcxErrorPayload,
 } from "../lib/errors";
-import { redactSecretString } from "../lib/redact";
+import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
+import type { AttemptDeliveryRecorder } from "../usage/attempt-delivery";
+import type { DroppedEmitDecision } from "../usage/telemetry-contract";
 import { formatRetryAfterAdvice } from "../lib/retry-delay";
 import { usageDisplayTotalTokens } from "../usage/totals";
 
@@ -204,3 +206,29 @@ export interface StringChunks {
 }
 export const emptyChunks = (): StringChunks => ({ chunks: [], bytes: 0 });
 export const joinChunks = (sc: StringChunks): string => sc.chunks.join("");
+
+/**
+ * Record one call the guard deleted, with both names reduced to log-safe metadata.
+ *
+ * The two names were CHOSEN BY THE MODEL, so they are caller-controlled text and get the same
+ * treatment every other model-sourced string receives before it reaches the durable row:
+ * `sanitizeLogMetadataString` strips the control and line-separator code points a log viewer
+ * could render as a record boundary and runs the credential redactor over the rest. Doing it here
+ * rather than at the four bridge drop sites is the point — a site that forgot would put
+ * model-authored text, possibly a leaked secret shaped like a token, straight into usage.jsonl.
+ *
+ * A name that sanitises to nothing is still worth recording (the drop happened), so it falls back
+ * to a fixed marker rather than an empty string, which the durable normalizer would reject and
+ * take the whole list with it.
+ */
+export function noteDroppedEmitSafely(
+  recorder: AttemptDeliveryRecorder | undefined,
+  info: { emitted: string; effective: string; decision: DroppedEmitDecision },
+): void {
+  if (!recorder) return;
+  recorder.noteDroppedEmit({
+    emitted: sanitizeLogMetadataString(info.emitted) ?? "unnamed",
+    effective: sanitizeLogMetadataString(info.effective) ?? "unnamed",
+    decision: info.decision,
+  });
+}

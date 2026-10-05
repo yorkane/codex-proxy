@@ -9,10 +9,24 @@
  * Nothing here reads a payload's content. `semanticBytes` is a length; the event classification
  * reads only a frame's type name and an item's type name, both of which are protocol constants.
  */
-import type { AttemptDeliverySummary } from "./telemetry-contract";
+import type {
+  AttemptDeliverySummary,
+  AttemptDroppedEmit,
+  DroppedEmitDecision,
+} from "./telemetry-contract";
+import { DROPPED_EMIT_DECISION_ROSTER } from "./telemetry-contract";
+
+/** Repeats of one (name, decision) pair fold into a single row, bounded so a runaway model cannot grow the row. */
+const MAX_DROPPED_EMIT_ROWS = 16;
 
 export interface AttemptDeliveryTarget {
   deliverySummary?: AttemptDeliverySummary;
+  /**
+   * Client tool calls this attempt had REMOVED from the relay by the emitted-call guard,
+   * as opposed to calls the model never made. Absent on ordinary attempts, so pre-instrumentation
+   * rows keep their exact shape.
+   */
+  droppedEmits?: AttemptDroppedEmit[];
 }
 
 export interface RelayedEventObservation {
@@ -25,6 +39,14 @@ export interface AttemptDeliveryRecorder {
   noteAdapterEvent(): void;
   noteRelayedEvent(observation?: RelayedEventObservation): void;
   noteBufferedDelivery(body: Record<string, unknown>): void;
+  /**
+   * Record that a call the model emitted was deleted instead of relayed.
+   *
+   * Called from the bridge's drop sites rather than from the guard, because only the bridge knows
+   * which disposition actually fired: a guard verdict of "drop" becomes a 502 on an enforcing wire
+   * and a silent removal on a deferred one, and the two must not be reported as the same event.
+   */
+  noteDroppedEmit(info: { emitted: string; effective: string; decision: DroppedEmitDecision }): void;
 }
 
 export function createAttemptDeliverySummary(): AttemptDeliverySummary {
@@ -131,10 +153,13 @@ const recordersByScope = new WeakMap<object, AttemptDeliveryRecorder>();
  * them silently defaulting would leave a transport uncounted -- the failure mode that made
  * `locallyAnswered` travel on the attempt instead of as an argument.
  */
+const DROPPED_EMIT_DECISIONS: ReadonlySet<DroppedEmitDecision> = new Set(DROPPED_EMIT_DECISION_ROSTER);
+
 export function bindAttemptDeliveryRecorder(
   scope: object,
   currentAttempt: () => AttemptDeliveryTarget | undefined,
 ): AttemptDeliveryRecorder {
+  const attemptFor = (): AttemptDeliveryTarget | undefined => currentAttempt();
   const summaryFor = (): AttemptDeliverySummary | undefined => {
     const attempt = currentAttempt();
     if (!attempt) return undefined;
@@ -144,6 +169,26 @@ export function bindAttemptDeliveryRecorder(
     noteAdapterEvent(): void {
       const summary = summaryFor();
       if (summary) summary.adapterEvents = bump(summary.adapterEvents, 1);
+    },
+    noteDroppedEmit(info): void {
+      // Its own target lookup rather than summaryFor(): a dropped call is a fact about the
+      // attempt, and must not conjure an all-zero delivery summary on an attempt whose transport
+      // never relayed a frame. The row's shape is decided by the durable normalizer, which
+      // whitelists the decision and caps the name; nothing unvalidated is ever persisted.
+      const attempt = attemptFor();
+      if (!attempt || !DROPPED_EMIT_DECISIONS.has(info.decision)) return;
+      const rows = attempt.droppedEmits ??= [];
+      const existing = rows.find(row => row.name === info.emitted
+        && row.effective === info.effective
+        && row.decision === info.decision);
+      if (existing) {
+        existing.count = bump(existing.count, 1);
+        return;
+      }
+      // Bounded: a model in a loop can emit thousands of distinct bad names, and the row would
+      // otherwise grow with them. The first MAX_DROPPED_EMIT_ROWS are the diagnostic sample.
+      if (rows.length >= MAX_DROPPED_EMIT_ROWS) return;
+      rows.push({ name: info.emitted, effective: info.effective, decision: info.decision, count: 1 });
     },
     noteRelayedEvent(observation): void {
       const summary = summaryFor();
@@ -195,4 +240,39 @@ export function cloneAttemptDeliverySummary(
   summary: AttemptDeliverySummary | undefined,
 ): AttemptDeliverySummary | undefined {
   return summary ? { ...summary } : undefined;
+}
+
+/** Longest persisted dropped-call name; longer ones are refused rather than truncated. */
+const DROPPED_EMIT_NAME_MAX = 96;
+
+/**
+ * A persisted dropped-call list is trusted only when EVERY row is well formed.
+ *
+ * The whole list is dropped rather than repaired, exactly like the delivery counters beside it:
+ * a partially trusted list is a claim about what the proxy removed, and an operator reading a
+ * truncated one cannot tell "the model emitted two bad calls" from "half the record was corrupt".
+ *
+ * Names arrive already sanitised and credential-redacted from the bridge. The length ceiling here
+ * is defence against a hand-edited or newer-format row, not a substitute for that pass.
+ */
+export function normalizeAttemptDroppedEmits(value: unknown): AttemptDroppedEmit[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const rows: AttemptDroppedEmit[] = [];
+  for (const entry of value.slice(0, MAX_DROPPED_EMIT_ROWS)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.name !== "string" || !row.name || row.name.length > DROPPED_EMIT_NAME_MAX) return undefined;
+    if (typeof row.effective !== "string" || !row.effective
+      || row.effective.length > DROPPED_EMIT_NAME_MAX) return undefined;
+    if (typeof row.decision !== "string"
+      || !DROPPED_EMIT_DECISIONS.has(row.decision as DroppedEmitDecision)) return undefined;
+    if (typeof row.count !== "number" || !Number.isSafeInteger(row.count) || row.count < 1) return undefined;
+    rows.push({
+      name: row.name,
+      effective: row.effective,
+      decision: row.decision as DroppedEmitDecision,
+      count: row.count,
+    });
+  }
+  return rows.length > 0 ? rows : undefined;
 }

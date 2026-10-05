@@ -70,6 +70,21 @@ function section(container: HTMLElement): HTMLElement {
 
 const replaySwitch = (container: HTMLElement) =>
   section(container).querySelector<HTMLButtonElement>('button.switch[aria-label="Enable"]')!;
+const replayCountInput = (container: HTMLElement) =>
+  section(container).querySelector<HTMLInputElement>('input[type="number"][aria-label="Empty completion replays"]')!;
+
+async function setCount(container: HTMLElement, value: string): Promise<void> {
+  const input = replayCountInput(container);
+  await act(async () => {
+    // React tracks the value on the native setter, so assigning .value directly would make the
+    // change handler see no delta (same reason the pool tests use the prototype setter).
+    const setter = Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")!.set!;
+    setter.call(input, value);
+    input.dispatchEvent(new testWindow.Event("input", { bubbles: true }) as unknown as Event);
+    input.dispatchEvent(new testWindow.Event("change", { bubbles: true }) as unknown as Event);
+    await flush();
+  });
+}
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map(k => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -143,3 +158,88 @@ test("the env override is announced next to the switch", async () => {
   }
 });
 
+// ---- the replay budget input beside the switch ----
+
+test("the count input reflects the budget the server resolved", async () => {
+  settings = { enabled: false, model: "", emptyCompletionRetry: true, emptyCompletionRetryMax: 2 };
+  const { container, root } = await mountShadow();
+  try {
+    expect(replayCountInput(container).value).toBe("2");
+    // The copy follows the number rather than always claiming "once".
+    expect(section(container).textContent).toContain("up to 2 times");
+    expect(section(container).textContent).not.toContain("up to 1 times");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("changing the count PUTs only the budget field", async () => {
+  const { container, root } = await mountShadow();
+  try {
+    await setCount(container, "3");
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.body).toEqual({ emptyCompletionRetryMax: 3 });
+    expect(replayCountInput(container).value).toBe("3");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a value outside the accepted bounds is refused locally and never PUT", async () => {
+  const { container, root } = await mountShadow();
+  try {
+    // Each rejection must produce NO request at all — the point is that the browser never sends a
+    // value the server would answer with 400, so the number the operator sees is a number that sticks.
+    for (const bad of ["9", "-1", "1.5", "abc"]) {
+      await setCount(container, bad);
+      expect(puts.length).toBe(0);
+    }
+    // A value back inside the range still works after the refusals.
+    await setCount(container, "2");
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.body).toEqual({ emptyCompletionRetryMax: 2 });
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a zero budget explains that it means the same as the switch being off", async () => {
+  settings = { enabled: false, model: "", emptyCompletionRetry: true, emptyCompletionRetryMax: 0 };
+  const { container, root } = await mountShadow();
+  try {
+    expect(replayCountInput(container).value).toBe("0");
+    expect(section(container).textContent).toContain("nothing is replayed");
+    // The switch is still on, so the section must say the two settings disagree.
+    expect(replaySwitch(container).getAttribute("aria-pressed")).toBe("true");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("an environment-controlled budget is announced", async () => {
+  settings = {
+    enabled: false, model: "", emptyCompletionRetry: true,
+    emptyCompletionRetryMax: 3, emptyCompletionRetryMaxEnvOverride: true,
+  };
+  const { container, root } = await mountShadow();
+  try {
+    expect(section(container).textContent).toContain("OCX_EMPTY_COMPLETION_RETRY_MAX");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a rejected budget write surfaces the server's reason", async () => {
+  putStatus = 400;
+  putError = "emptyCompletionRetryMax must be an integer 0-3";
+  const { container, root } = await mountShadow();
+  try {
+    await setCount(container, "2");
+    expect(puts).toHaveLength(1); // the write really went out before being refused
+    const toast = document.body.querySelector(".toast-notice");
+    expect(toast === null).toBe(false);
+    expect(String(toast?.textContent)).toContain(putError);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

@@ -11,6 +11,7 @@ import { parseAnthropicModelRoutes } from "../oauth/anthropic-model-routes";
 import { configReasoningPinsConfigError } from "./provider-validation";
 import { loopbackCompanionAllowed } from "../codex/loopback-target";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "../codex/upstream-host-health";
+import { EMPTY_COMPLETION_RETRY_MAX_LIMIT } from "../lib/empty-completion-budget";
 import { MAX_APP_OWNED_MEMORY_BUDGET_MB, MIN_APP_OWNED_MEMORY_BUDGET_MB } from "../lib/app-owned-memory";
 import { isMissingPathError } from "./atomic-write";
 import { getConfigPath } from "./paths";
@@ -458,6 +459,26 @@ function emptyCompletionRetryError(value: unknown): string | null {
   return "schema_invalid: emptyCompletionRetry: must be a boolean or omitted";
 }
 
+/**
+ * The replay budget beside that switch, validated as an integer in the accepted range.
+ *
+ * A hand edit with the wrong shape (a "2" string, a 1.5, a 9) must not load as a config the
+ * pipeline quietly ignores: the operator believes they widened the replay and they did not. It is
+ * rejected on write and dropped with a warning on load, exactly like the other bounded numeric
+ * top-level fields, so the field either means what it says or says nothing at all.
+ */
+function emptyCompletionRetryMaxError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "emptyCompletionRetryMax")) return null;
+  const max = raw.emptyCompletionRetryMax;
+  if (max === undefined) return null;
+  if (typeof max !== "number" || !Number.isInteger(max)
+    || max < 0 || max > EMPTY_COMPLETION_RETRY_MAX_LIMIT) {
+    return `schema_invalid: emptyCompletionRetryMax: must be an integer from 0 to ${EMPTY_COMPLETION_RETRY_MAX_LIMIT}`;
+  }
+  return null;
+}
+
 function dropCodexSafetyBufferingError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw || !Object.hasOwn(raw, "dropCodexSafetyBuffering")) return null;
@@ -688,6 +709,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? codexQuotaAutoRefreshError(value)
     ?? codexAccountPickerEnabledError(value)
     ?? emptyCompletionRetryError(value)
+    ?? emptyCompletionRetryMaxError(value)
     ?? dropCodexSafetyBufferingError(value)
     ?? oauthOpenBrowserError(value)
     ?? showCodexCreditsError(value)

@@ -57,6 +57,12 @@ export interface RunTurnWebSearchDeps {
   /** Preserve the request's opt-in empty-completion retry before the search cap. */
   emptyCompletionRetry?: boolean;
   /**
+   * How many replays the pre-cap guard may spend. Absent means 1 — one wrap per search iteration,
+   * the historical shape. A larger budget makes the guard itself replay N times inside a single
+   * iteration before the loop's own per-iteration wrap is spent (see the guard's own counter).
+   */
+  emptyCompletionRetryMax?: number;
+  /**
    * Optional request translator budget. When present the loop charges what it
    * retains — each iteration's buffered event batch and the replay history it
    * appends to messages — with its own local byte counters, and releases
@@ -415,6 +421,7 @@ export async function* runTurnWebSearchLoop(
         && ordinaryEmptyRetries === 0) {
         source = guardEmptyCompletionEventStream({
           firstEvents: source,
+          maxRetries: deps.emptyCompletionRetryMax,
           continuation: () => {
             ordinaryEmptyRetries++;
             return deps.dispatch(currentParsed);

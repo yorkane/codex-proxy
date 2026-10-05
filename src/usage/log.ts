@@ -11,7 +11,10 @@ import {
   normalizePersistedJevDecision,
   type PersistedJevDecisionV1,
 } from "./jev-stats";
-import { normalizeAttemptDeliverySummary } from "./attempt-delivery";
+import {
+  normalizeAttemptDeliverySummary,
+  normalizeAttemptDroppedEmits,
+} from "./attempt-delivery";
 import {
   isRequestCloseReason,
   isRequestTerminalStatus,
@@ -30,6 +33,9 @@ import {
   REQUEST_FAILURE_CAUSES,
   REQUEST_FAILURE_STAGES,
   REQUEST_TRANSPORT_PHASES,
+  DROPPED_EMIT_DECISION_ROSTER,
+  type AttemptDroppedEmit,
+  type DroppedEmitDecision,
   type AttemptRecoveryKind,
   type AttemptRecoveryWithheld,
   type AttemptDeliverySummary,
@@ -196,6 +202,15 @@ export interface PersistedUsageAttempt {
    * transport does not pass through the Responses bridge and on pre-instrumentation rows.
    */
   deliverySummary?: AttemptDeliverySummary;
+  /**
+   * Client tool calls this attempt had REMOVED from the relay by the emitted-call guard, folded
+   * by (emitted name, resolved name, decision). Absent on ordinary attempts, so rows written
+   * before the instrumentation keep their exact shape.
+   *
+   * This is the field that answers "did the proxy drop a call, or did the model never make one?"
+   * when a session stops without an error the client can render.
+   */
+  droppedEmits?: AttemptDroppedEmit[];
   /**
    * How far this attempt's exchange got and why it failed, in the shared vocabulary (#2366).
    *
@@ -726,6 +741,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
   const deliverySummary = "deliverySummary" in attempt
     ? normalizeAttemptDeliverySummary(attempt.deliverySummary)
     : undefined;
+  const droppedEmits = "droppedEmits" in attempt
+    ? normalizeAttemptDroppedEmits(attempt.droppedEmits)
+    : undefined;
   const recoveryKinds = Array.isArray(attempt.recoveryKinds)
     ? [...new Set(attempt.recoveryKinds.filter(
       (value): value is AttemptRecoveryKind => typeof value === "string"
@@ -757,6 +775,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     ...(isNonNegativeFiniteNumber(attempt.firstOutputMs)
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
+    ...(droppedEmits ? { droppedEmits } : {}),
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     ...(recoveryWithheld.length ? { recoveryWithheld } : {}),

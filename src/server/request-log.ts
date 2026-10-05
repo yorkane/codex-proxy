@@ -1494,6 +1494,9 @@ export function addFinalRequestLog(
     // stream is still draining, and a shared reference would let a finalized row change after
     // it was written.
     ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
+    ...(attempt.droppedEmits?.length
+      ? { droppedEmits: attempt.droppedEmits.map(row => ({ ...row })) }
+      : {}),
   }));
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
   const aggregate = isCombo ? aggregateAttemptUsage(attempts ?? []) : null;
@@ -1785,6 +1788,9 @@ export function noteProviderAttemptSend(
     const completed = { ...attempt, recoveryKinds: [...attempt.recoveryKinds],
       ...(attempt.usage ? { usage: { ...attempt.usage } } : {}),
       ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
+      ...(attempt.droppedEmits?.length
+        ? { droppedEmits: attempt.droppedEmits.map(row => ({ ...row })) }
+        : {}),
       ...(attempt.tierOutcome ? { tierOutcome: { ...attempt.tierOutcome } } : {}) };
     const attempts = logCtx.attempts ??= [attempt];
     const index = attempts.indexOf(attempt);

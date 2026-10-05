@@ -62,6 +62,41 @@ export const ATTEMPT_RECOVERY_WITHHELD_ROSTER = Object.freeze([
 export type AttemptRecoveryWithheld = typeof ATTEMPT_RECOVERY_WITHHELD_ROSTER[number];
 
 /**
+ * A client tool call the proxy REMOVED from the relay instead of forwarding it.
+ *
+ * Recorded per attempt beside the delivery counters because it answers the same class of question -
+ * what happened between the adapter's bytes and the client's view - and because its ABSENCE was
+ * the bug. A routed model that emits a tool NAMESPACE container (`tools`, `collaboration`)
+ * or a known hallucination gets that call deleted so the client's tool router never sees an
+ * `unsupported call` that ends the turn. That was a silent improvement: the request log could
+ * not distinguish "the proxy removed a call" from "the model never made one", which is exactly the
+ * distinction needed when a session stops for no visible reason.
+ *
+ * The name is caller-produced (the model chose it), so this is not a closed roster and therefore
+ * not a metric label, unlike the recovery kinds above. It only reaches the durable row, where it
+ * passes the same sanitiser as every other wire-sourced string.
+ */
+export const DROPPED_EMIT_DECISION_ROSTER = Object.freeze([
+  /** The emitted name was a tool namespace container (tools, collaboration, ...). */
+  "namespace-container",
+  /** The emitted name matched the shadow-scoped phantom allowlist. */
+  "phantom",
+] as const);
+
+export type DroppedEmitDecision = typeof DROPPED_EMIT_DECISION_ROSTER[number];
+
+/** One dropped emitted call: what the model asked for, what it resolved to, and how often. */
+export interface AttemptDroppedEmit {
+  /** The name the model emitted, sanitised and capped. */
+  name: string;
+  /** The name the guard resolved it to before dropping. Equal to `name` when unrepairable. */
+  effective: string;
+  decision: DroppedEmitDecision;
+  /** Repeats of the same (name, decision) pair fold into one row. */
+  count: number;
+}
+
+/**
  * How far a failed exchange got, ordered by how much the DOWNSTREAM CLIENT observed.
  *
  * The order is by client observation rather than by upstream progress, because the question it

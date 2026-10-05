@@ -146,6 +146,16 @@ export interface ShadowCallData {
   emptyCompletionRetry?: boolean;
   /** True while OCX_EMPTY_COMPLETION_RETRY=0 forces the guard off regardless of the switch. */
   emptyCompletionRetryEnvOverride?: boolean;
+  /**
+   * How many times the guard replays, as the SERVER resolved it — so an environment override is
+   * visible instead of leaving the input editing a number that has no effect.
+   */
+  emptyCompletionRetryMax?: number;
+  /** Accepted range; the server rejects anything outside it with 400. */
+  emptyCompletionRetryMaxMin?: number;
+  emptyCompletionRetryMaxLimit?: number;
+  /** True while OCX_EMPTY_COMPLETION_RETRY_MAX overrides the persisted budget. */
+  emptyCompletionRetryMaxEnvOverride?: boolean;
 }
 export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: { requests: number; totalTokens: number; coverageRatio: number } };
 export type UpdateChannel = "latest" | "preview";

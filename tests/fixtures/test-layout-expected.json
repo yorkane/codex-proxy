@@ -1138,6 +1138,7 @@
   "injection-routing-healer.test.ts": "codex-integration", "injection-routing-heal-apply.test.ts": "codex-integration",
   "cli-start-routing-heal-wiring.test.ts": "cli", "cli-status-codex-routing-drift.test.ts": "cli",
   "emitted-call-guard.test.ts": "responses",
+  "dropped-emit-observation.test.ts": "responses",
   "emitted-call-shape-repair.test.ts": "responses",
   "code-mode-helper-prefix-repair.test.ts": "responses",
   "exec-envelope-repair.test.ts": "responses",

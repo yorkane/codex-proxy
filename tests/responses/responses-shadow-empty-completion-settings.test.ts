@@ -13,6 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { emptyCompletionRetryEnabled, EMPTY_COMPLETION_RETRY_ENV } from "../../src/server/responses/empty-completion-guard";
+import {
+  EMPTY_COMPLETION_RETRY_MAX_ENV,
+  EMPTY_COMPLETION_RETRY_MAX_LIMIT,
+  emptyCompletionRetryMax,
+} from "../../src/lib/empty-completion-budget";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -22,12 +27,14 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 // developer's own config.json (the incident the ManagementApiDeps save seam exists for).
 const previousHome = process.env.OPENCODEX_HOME;
 const previousEnv = process.env[EMPTY_COMPLETION_RETRY_ENV];
+const previousMaxEnv = process.env[EMPTY_COMPLETION_RETRY_MAX_ENV];
 let home = "";
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ocx-shadow-ecr-"));
   process.env.OPENCODEX_HOME = home;
   delete process.env[EMPTY_COMPLETION_RETRY_ENV];
+  delete process.env[EMPTY_COMPLETION_RETRY_MAX_ENV];
 });
 
 afterEach(() => {
@@ -35,6 +42,8 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   if (previousEnv === undefined) delete process.env[EMPTY_COMPLETION_RETRY_ENV];
   else process.env[EMPTY_COMPLETION_RETRY_ENV] = previousEnv;
+  if (previousMaxEnv === undefined) delete process.env[EMPTY_COMPLETION_RETRY_MAX_ENV];
+  else process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] = previousMaxEnv;
   if (home) removeTreeWithRetry(home);
   home = "";
 });
@@ -140,5 +149,68 @@ describe("shadow-call settings API emptyCompletionRetry", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ enabled: false, emptyCompletionRetry: true });
   });
-});
 
+  // ---- replay budget (emptyCompletionRetryMax): the number beside the switch ----
+
+  test("GET reports the resolved budget and the accepted bounds", async () => {
+    const config = fixtureConfig();
+    expect(await settingsBody(config)).toMatchObject({
+      emptyCompletionRetryMax: 1,
+      emptyCompletionRetryMaxMin: 0,
+      emptyCompletionRetryMaxLimit: EMPTY_COMPLETION_RETRY_MAX_LIMIT,
+      emptyCompletionRetryMaxEnvOverride: false,
+    });
+  });
+
+  test("PUT mutates the live config and persists the budget in one call", async () => {
+    const config = fixtureConfig();
+    // The guard reads the live config object, so assigning it is what takes effect without restart.
+    expect(emptyCompletionRetryMax(config)).toBe(1);
+    const put = await shadowApi(config, "PUT", { emptyCompletionRetryMax: 2 });
+    expect(put.status).toBe(200);
+    expect((await put.json()).emptyCompletionRetryMax).toBe(2);
+    expect(config.emptyCompletionRetryMax).toBe(2);
+    expect(emptyCompletionRetryMax(config)).toBe(2);
+    expect(persistedConfig().emptyCompletionRetryMax).toBe(2);
+
+    const zero = await shadowApi(config, "PUT", { emptyCompletionRetryMax: 0 });
+    expect((await zero.json()).emptyCompletionRetryMax).toBe(0);
+    expect(emptyCompletionRetryMax(config)).toBe(0);
+    expect(persistedConfig().emptyCompletionRetryMax).toBe(0);
+  });
+
+  test("PUT rejects a non-integer, a fraction, a string, or an out-of-range value with 400", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { emptyCompletionRetryMax: 2 });
+    for (const bad of ["2", 1.5, -1, EMPTY_COMPLETION_RETRY_MAX_LIMIT + 1, null, {}, [], NaN]) {
+      const res = await shadowApi(config, "PUT", { emptyCompletionRetryMax: bad });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain("emptyCompletionRetryMax must be an integer");
+    }
+    // A rejected write never touches the live value nor the persisted file — the schema's
+    // catch(undefined) must never see a coerced value, which is exactly why PUT is strict.
+    expect(config.emptyCompletionRetryMax).toBe(2);
+    expect(persistedConfig().emptyCompletionRetryMax).toBe(2);
+  });
+
+  test("an absent budget field leaves the stored budget alone", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { emptyCompletionRetryMax: 3 });
+    const res = await shadowApi(config, "PUT", { emptyCompletionRetry: false });
+    expect(res.status).toBe(200);
+    expect((await res.json()).emptyCompletionRetryMax).toBe(3);
+    expect(persistedConfig().emptyCompletionRetryMax).toBe(3);
+  });
+
+  test("GET reports the environment override and the resolved value reflects it", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { emptyCompletionRetryMax: 1 });
+    process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] = "3";
+    // The config still says 1; the resolver and the override flag both report the env value.
+    expect(await settingsBody(config)).toMatchObject({
+      emptyCompletionRetryMax: 3,
+      emptyCompletionRetryMaxEnvOverride: true,
+    });
+    expect(config.emptyCompletionRetryMax).toBe(1);
+  });
+});

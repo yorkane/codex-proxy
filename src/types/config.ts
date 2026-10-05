@@ -516,6 +516,17 @@ export interface OcxConfig {
   metricsExport?: { enabled?: boolean };
   /** Opt in to one identical-turn retry when a Responses completion has no text or tool call. */
   emptyCompletionRetry?: boolean;
+  /**
+   * How many times an empty Responses completion is replayed when `emptyCompletionRetry` is on.
+   *
+   * Absent means 1 — the single identical-turn retry the guard shipped with. Each replay re-issues
+   * the whole turn, so every extra attempt is another billable generation; the accepted ceiling is
+   * `EMPTY_COMPLETION_RETRY_MAX_LIMIT`. `0* means "replay nothing", which — like `emptyCompletionRetry:
+   * false* — leaves an empty turn as the silent success the guard exists to catch. Unlike the boolean
+   * switch this one is an AMOUNT, so `OCX_EMPTY_COMPLETION_RETRY_MAX` may raise it as well as lower it
+   * (see `emptyCompletionRetryMax*).
+   */
+  emptyCompletionRetryMax?: number;
   /** Suppress allowlisted client-facing Codex transport hints; provider enforcement is unchanged. */
   dropCodexSafetyBuffering?: boolean;
   /**

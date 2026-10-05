@@ -19,6 +19,7 @@ import {
 import { mayBecomePatchEnvelope, repairFreeformToolInput } from "../responses/apply-patch-envelope";
 import { EXEC_REPAIR_TOOL_NAME, repairExecEnvelopeLeak } from "../responses/exec-envelope-repair";
 import {
+  droppedEmitDisposition,
   isDroppedNamespaceContainer,
   resolveEmittedCall,
   shouldEnforceDeclaredToolNames,
@@ -51,7 +52,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
+import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
 
@@ -131,6 +132,9 @@ function buildResponseJSONWithBudget(
   const replayCacheScope = options?.replayCacheScope;
   const output: OutputItem[] = [];
   const budget = options?.translatorBudget;
+  // Resolved from the CALLER's budget only, matching the streaming twin: a bridge that owns its
+  // budget is not serving a logged request, so there is no attempt to record a drop against.
+  const delivery = attemptDeliveryRecorder(budget);
   const encoder = new TextEncoder();
   const bytesOf = (value: string): number => Buffer.byteLength(value);
   const appendBatchString = (
@@ -509,6 +513,11 @@ function buildResponseJSONWithBudget(
           if (options?.undeclaredToolPhantomNames
             && (options.undeclaredToolPhantomNames.has(verdict.name)
               || options.undeclaredToolPhantomNames.has(e.name))) {
+            noteDroppedEmitSafely(delivery, {
+              emitted: e.name,
+              effective: verdict.name,
+              decision: droppedEmitDisposition(verdict.name, e.name, options?.declaredToolNames),
+            });
             break;
           }
           if (enforceDeclared) {
@@ -525,6 +534,11 @@ function buildResponseJSONWithBudget(
           // the turn with `unsupported call: <ns>`.
           if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
             || isDroppedNamespaceContainer(e.name, options?.declaredToolNames)) {
+            noteDroppedEmitSafely(delivery, {
+              emitted: e.name,
+              effective: verdict.name,
+              decision: "namespace-container",
+            });
             break;
           }
         }

@@ -123,7 +123,7 @@ export async function executeResponsesRunTurn(
     | "reserveCredentialHop"
     | "pendingHopPermit"
   >,
-  completionPolicy: Pick<ResponsesCompletionPolicy, "emptyCompletionGuardEnabled">,
+  completionPolicy: Pick<ResponsesCompletionPolicy, "emptyCompletionGuardEnabled" | "emptyCompletionGuardMaxRetries">,
 ): Promise<Response> {
   const { options, logCtx, config } = requestContext;
   const {
@@ -149,7 +149,7 @@ export async function executeResponsesRunTurn(
     noteAdapterRecoveryWithheld,
     reserveCredentialHop,
   } = sendBudgetState;
-  const { emptyCompletionGuardEnabled } = completionPolicy;
+  const { emptyCompletionGuardEnabled, emptyCompletionGuardMaxRetries } = completionPolicy;
   const {
     cancelResponseCompletion,
     commitReasoningReplayServingRoute,
@@ -733,6 +733,7 @@ export async function executeResponsesRunTurn(
           plan: wsPlan,
           translatorBudget,
           emptyCompletionRetry: emptyCompletionGuardEnabled,
+          emptyCompletionRetryMax: emptyCompletionGuardMaxRetries,
           forwardProvider: wsPlan.forwardSidecar?.provider,
           forwardHeaders: wsPlan.forwardSidecar?.headers ?? requestState.selectedForwardHeaders,
           ...(wsPlan.exaConfigured ? { exaApiKey: config.webSearchSidecar?.exaApiKey } : {}),
@@ -751,13 +752,14 @@ export async function executeResponsesRunTurn(
             // Identical-turn retry: same parsed request, same headers, same
             // signal — run the adapter transport again against a fresh queue.
             continuation: runTurnRetrySource,
+            maxRetries: emptyCompletionGuardMaxRetries,
           })
         // Guard off (the default): leave the stream alone, but record that the turn ended
         // empty so the user has something to correlate instead of an unexplained blank
         // result (#2472). Retrying by default would re-send a turn that may already have had
         // billable side effects, so the honest default is observability, not recovery.
         : observeEmptyCompletion(eventSource, () => {
-          console.warn(emptyCompletionNotice(route.providerName, route.modelId));
+          console.warn(emptyCompletionNotice(route.providerName, route.modelId, emptyCompletionGuardMaxRetries));
         });
       const sseStream = bridgeToResponsesSSE(
         guardedSource, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
@@ -856,6 +858,7 @@ export async function executeResponsesRunTurn(
       for await (const event of guardEmptyCompletionEventStream({
         firstEvents: (async function* () { yield* runTurnEvents; })(),
         continuation: runTurnRetrySource,
+        maxRetries: emptyCompletionGuardMaxRetries,
       })) events.push(event);
     } else {
       events = runTurnEvents;
@@ -876,6 +879,7 @@ export async function executeResponsesRunTurn(
             plan: wsPlan,
             translatorBudget,
             emptyCompletionRetry: emptyCompletionGuardEnabled,
+            emptyCompletionRetryMax: emptyCompletionGuardMaxRetries,
             forwardProvider: wsPlan.forwardSidecar?.provider,
             forwardHeaders: wsPlan.forwardSidecar?.headers ?? requestState.selectedForwardHeaders,
             ...(wsPlan.exaConfigured ? { exaApiKey: config.webSearchSidecar?.exaApiKey } : {}),
