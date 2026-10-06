@@ -30,7 +30,7 @@
  * drops per model and see a regression coming instead of meeting it by hand.
  */
 
-import { normalizeDeclaredToolName, repairEmittedToolName } from "../types/tools";
+import { isSandboxNamespacePrefixedName, normalizeDeclaredToolName, repairEmittedToolName } from "../types/tools";
 import type { DroppedEmitDecision } from "../usage/telemetry-contract";
 import {
   buildNamespaceLeakFeedback,
@@ -165,6 +165,14 @@ export function resolveEmittedCall(
     // the one exported entry point rather than the raw predicate, so this branch and the caller's
     // fail-closed branch cannot give one emission two different answers.
     if (isDroppedNamespaceContainer(emitted, declared)) {
+      options.onDecision?.({ emitted, effective: emitted, decision: "namespace-leak" });
+      return { kind: "drop", name: emitted };
+    }
+    // Same argument, wider net: a sandbox-namespace-qualified name (`tools.apply_patch`) is
+    // every bit as uncallable as the container itself, because `tools` is the exec sandbox
+    // namespace and no declared wire tool is ever spelled that way. Without a catalog we cannot
+    // resolve it to a declared name, so fail it closed instead of relaying the mangled form.
+    if (isSandboxNamespacePrefixedName(emitted)) {
       options.onDecision?.({ emitted, effective: emitted, decision: "namespace-leak" });
       return { kind: "drop", name: emitted };
     }

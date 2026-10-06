@@ -191,6 +191,18 @@ describe("existing allowlist behaviour is unchanged", () => {
     expect(resolveEmittedCall("anything")).toEqual({ kind: "allow", name: "anything", repaired: false });
   });
 
+  // The four leaked forms observed in production after the prefix repair shipped: each starts
+  // with the exec sandbox namespace, so even with no catalog the form itself is unresolvable and
+  // must fail closed instead of relaying into the client's `unsupported call` that ends the turn.
+  test("no catalog still drops a sandbox-namespace-qualified name", () => {
+    for (const name of ["tools.apply_patch", "tools__apply_patch", "tools/apply_patch", "tools=apply_patch", "tools__view_image", "tools.exec_command"]) {
+      expect(resolveEmittedCall(name)).toEqual({ kind: "drop", name });
+    }
+    // The tolerance for provider echoes (#4735) is untouched: a bare or wire name still relays.
+    expect(resolveEmittedCall("web_search")).toEqual({ kind: "allow", name: "web_search", repaired: false });
+    expect(resolveEmittedCall("apply_patch")).toEqual({ kind: "allow", name: "apply_patch", repaired: false });
+  });
+
   test("an undeclared name with a catalog and no budget still fails closed", () => {
     expect(resolveEmittedCall("totally_made_up", {
       declaredToolNames: DECLARED, enforceDeclaredToolNames: true,

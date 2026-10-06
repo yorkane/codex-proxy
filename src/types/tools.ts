@@ -108,6 +108,17 @@ export const CODE_MODE_EXEC_TOOL_NAME = "exec";
 const SANDBOX_NAMESPACE_PREFIXES = ["tools__", "tools.", "tools=", "tools/"] as const;
 
 /**
+ * Whether an emitted name is a sandbox-namespace-qualified reference
+ * (`tools.apply_patch`, `tools=apply_patch`, ...). Such a name is never a valid declared wire
+ * name on the current Responses wire: `tools` is the exec sandbox namespace and these are all
+ * renderings of the same member access, so even without a catalog the guard can treat the form
+ * itself as undeclared rather than relay it into a client-side `unsupported call`.
+ */
+export function isSandboxNamespacePrefixedName(name: string): boolean {
+  return SANDBOX_NAMESPACE_PREFIXES.some((p) => name.startsWith(p));
+}
+
+/**
  * Collaboration/sub-agent call-shape repair.
  *
  * Routed models (Q38-class) frequently emit a Codex tool in a different naming
