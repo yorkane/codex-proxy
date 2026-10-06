@@ -54,6 +54,69 @@ beforeEach(() => {
 });
 
 describe("workflow count caps", () => {
+  // The reap is the fallback for the lifecycle quiescence watchdog (see
+  // tests/server/turn-lease-stream-lifetime.test.ts): a lease whose release path never
+  // ran ages out of the concurrency count on the next read. Shared expectation:
+  //   - a live turn keeps its slot until it releases;
+  //   - an unreleased slot becomes recoverable and is reclaimed exactly once;
+  //   - a release racing the reap (late or double) never drives the count negative;
+  //   - the real ceiling (16) still refuses above itself and admits again once room exists.
+  test("an unreleased lease is reaped exactly once and a late release is a no-op", () => {
+    const previous = process.env.OCX_WORKFLOW_LEASE_MAX_AGE_MS;
+    process.env.OCX_WORKFLOW_LEASE_MAX_AGE_MS = "1000";
+    try {
+      const t0 = 1_700_000_000_000;
+      const policy: WorkflowBudgetPolicy = { ...DEFAULT_WORKFLOW_BUDGET_POLICY, maxConcurrentChildren: 1, interactiveReserve: 0 };
+      const first = admitWorkflowTurn("reap-1", "worker", policy, undefined, t0);
+      expect(first?.admitted).toBe(true);
+      // Ceiling holds while the lease is young.
+      expect(admitWorkflowTurn("reap-1", "worker", policy, undefined, t0 + 10)?.admitted).toBe(false);
+
+      // Past the age bound the slot is reaped on the next read, and the freed room
+      // admits a replacement.
+      const second = admitWorkflowTurn("reap-1", "worker", policy, undefined, t0 + 2000);
+      expect(second?.admitted).toBe(true);
+      const reapedEvents = listWorkflowBudgetEvents(10).filter(
+        event => event.rootId === "reap-1" && event.kind === "reaped",
+      );
+      expect(reapedEvents.length).toBe(1);
+      expect(reapedEvents[0]?.reaped).toBe(1);
+
+      // The zombie's own release, arriving late, must not double-release: the count
+      // must still show the LIVE second lease, not zero.
+      if (first?.admitted) first.lease.release();
+      expect(workflowBudgetSnapshot("reap-1", policy, t0 + 2100)?.active).toBe(1);
+      if (first?.admitted) first.lease.release();
+      expect(workflowBudgetSnapshot("reap-1", policy, t0 + 2200)?.active).toBe(1);
+
+      // Only after the LIVE lease's own release does the root go idle…
+      if (second?.admitted) second.lease.release();
+      expect(workflowBudgetSnapshot("reap-1", policy, t0 + 2300)?.active).toBe(0);
+      // …and no further reap events were invented.
+      expect(listWorkflowBudgetEvents(10).filter(e => e.rootId === "reap-1" && e.kind === "reaped").length).toBe(1);
+    } finally {
+      if (previous === undefined) delete process.env.OCX_WORKFLOW_LEASE_MAX_AGE_MS;
+      else process.env.OCX_WORKFLOW_LEASE_MAX_AGE_MS = previous;
+    }
+  });
+
+  test("the raised ceiling of 16 refuses at its own boundary and re-admits after release", () => {
+    const t0 = 1_700_000_000_000;
+    expect(DEFAULT_WORKFLOW_BUDGET_POLICY.maxConcurrentChildren).toBe(16);
+    const policy: WorkflowBudgetPolicy = { ...DEFAULT_WORKFLOW_BUDGET_POLICY, interactiveReserve: 0 };
+    const leases: Array<{ release(): void }> = [];
+    for (let index = 0; index < 16; index += 1) {
+      const decision = admitWorkflowTurn("cap-16", "worker", policy, "c" + index, t0);
+      expect(decision?.admitted).toBe(true);
+      if (decision?.admitted) leases.push(decision.lease);
+    }
+    const refused = admitWorkflowTurn("cap-16", "worker", policy, "c16", t0 + 1);
+    expect(refused?.admitted).toBe(false);
+    if (refused && !refused.admitted) expect(refused.reason).toBe("workflow-concurrency-exhausted");
+    leases[0]?.release();
+    expect(admitWorkflowTurn("cap-16", "worker", policy, "c16", t0 + 2)?.admitted).toBe(true);
+  });
+
   test("the physical-send ceiling refuses before dispatch", () => {
     admitWorkflowTurn("r1", "interactive", smallPolicy);
     chargeWorkflowSends("r1", 3);

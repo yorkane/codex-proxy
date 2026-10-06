@@ -137,10 +137,10 @@ async function flushMicrotasks(): Promise<void> {
   });
 }
 
-async function advanceSilentRefresh(ms = 2000): Promise<void> {
-  for (let elapsed = 0; elapsed < ms; elapsed += 2000) {
+async function advanceSilentRefresh(ms = 5000): Promise<void> {
+  for (let elapsed = 0; elapsed < ms; elapsed += 5000) {
     await act(async () => {
-      jest.advanceTimersByTime(Math.min(2000, ms - elapsed));
+      jest.advanceTimersByTime(Math.min(5000, ms - elapsed));
     });
     await flushMicrotasks();
     await act(async () => {
@@ -211,7 +211,7 @@ test("Logs: initial failure shows error; silent failure keeps it; retry then rec
   const initialCalls = calls.filter(u => u.includes("/api/logs")).length;
   expect(initialCalls).toBeGreaterThanOrEqual(1);
 
-  await advanceSilentRefresh(6000);
+  await advanceSilentRefresh(15000);
   expect(container.textContent).toContain("Could not load request logs.");
   expect(container.textContent).not.toContain("No requests yet.");
   expect(calls.filter(u => u.includes("/api/logs")).length).toBeGreaterThan(initialCalls);
@@ -248,7 +248,7 @@ test("Logs: silent failure after successful load keeps the table and does not to
 
   mode = "fail";
   await act(async () => {
-    jest.advanceTimersByTime(2000);
+    jest.advanceTimersByTime(5000);
   });
   const midFlightLoading = /\bLoading\b/.test(container.textContent ?? "");
   await flushMicrotasks();
@@ -258,7 +258,7 @@ test("Logs: silent failure after successful load keeps the table and does not to
   expect(/\bLoading\b/.test(container.textContent ?? "")).toBe(false);
 
   mode = "updated";
-  await advanceSilentRefresh(6000);
+  await advanceSilentRefresh(15000);
   expectTableLoaded(container, "gpt-updated");
 
   await act(async () => { root.unmount(); });
@@ -279,7 +279,7 @@ test("Logs: silent success clears a previous error; later silent failure keeps t
   expect(container.textContent).toContain("Could not load request logs.");
 
   mode = "ok";
-  await advanceSilentRefresh(6000);
+  await advanceSilentRefresh(15000);
   expectTableLoaded(container, "gpt-test");
 
   mode = "fail-again";
@@ -315,11 +315,11 @@ test("Logs: a sustained poll outage says the rows are stale, and a recovery clea
   const afterFirstFailure = calls.filter(u => u.includes("/api/logs")).length;
   await advanceSilentRefresh();
   expect(calls.filter(u => u.includes("/api/logs"))).toHaveLength(afterFirstFailure);
-  await advanceSilentRefresh(4000);
+  await advanceSilentRefresh(10000);
   expect(container.textContent).not.toContain("Could not load request logs.");
 
   // Third consecutive failure: the outage is not transient, so say so while keeping the rows.
-  await advanceSilentRefresh(10000);
+  await advanceSilentRefresh(25000);
   expect(container.textContent).toContain("Could not load request logs.");
   expect(container.querySelector(".logs-table")).not.toBeNull();
   expect(container.textContent).toContain("gpt-test");
@@ -327,7 +327,7 @@ test("Logs: a sustained poll outage says the rows are stale, and a recovery clea
 
   // A recovered poll must retract the notice rather than leaving a permanent scar.
   mode = "ok";
-  await advanceSilentRefresh(20000);
+  await advanceSilentRefresh(50000);
   expectTableLoaded(container, "gpt-test");
 
   await act(async () => { root.unmount(); });
@@ -363,7 +363,7 @@ test("Logs: disabling auto-refresh stops scheduled requests", async () => {
   expect(afterDisable).toBeLessThanOrEqual(afterInitial + 1);
 
   await act(async () => {
-    jest.advanceTimersByTime(6000);
+    jest.advanceTimersByTime(15000);
   });
   await flushMicrotasks();
 
@@ -403,7 +403,7 @@ test("Logs: switching to the Debug tab stops scheduled log requests", async () =
   expect(container.querySelector("#logs-tab-debug")?.getAttribute("aria-selected")).toBe("true");
 
   await act(async () => {
-    jest.advanceTimersByTime(6000);
+    jest.advanceTimersByTime(15000);
   });
   await flushMicrotasks();
 
@@ -1051,7 +1051,7 @@ test("Logs: malformed polls preserve cursor/cache, back off, and explicit retry 
     const count = urls.length;
     await advanceSilentRefresh();
     expect(urls).toHaveLength(count);
-    await advanceSilentRefresh(14000);
+    await advanceSilentRefresh(35000);
     expect(container.textContent).toContain("Could not load request logs.");
     expect(visibleRequestIds(container)).toEqual(["req-1"]);
     expect(urls.slice(1).every(url => url.includes("cursor=good"))).toBe(true);

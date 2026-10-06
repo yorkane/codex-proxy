@@ -68,7 +68,12 @@ import {
 import type { OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../../types";
 import { drainAndShutdown } from "../lifecycle";
 import { getRequestLogEntries, queryRequestLogs, type RequestLogEntry } from "../request-log";
-import { decodeRequestLogCursor, selectRequestLogPoll } from "../request-log-cursor";
+import {
+  decodeRequestLogCursor,
+  requestLogProcessEpoch,
+  requestLogWindowSeqs,
+  selectRequestLogPoll,
+} from "../request-log-cursor";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import { userCostOverlayVersion } from "../../usage/user-cost-overlays";
 import type { PersistedUsageAttempt } from "../../usage/log";
@@ -125,8 +130,12 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     // Not point-free: requestLogDto takes an options object second, and Array.map would pass the
     // element INDEX into it. An explicit arrow keeps the default (decode rate included) and is
     // what /api/logs wants; /api/request-history opts out at its own call sites.
+    // Ring positions come from the QUERY rows (stable ring objects, stamped at ingress), not
+    // from the per-poll DTO projections: the projection is rebuilt every tick and a WeakMap
+    // over it could never stay stable. Null for foreign windows keeps the fallback honest.
+    const windowSeqs = requestLogWindowSeqs(queried.logs) ?? undefined;
     const logs = queried.logs.map(entry => requestLogDto(entry));
-    const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
+    const poll = selectRequestLogPoll(logs, url.searchParams, cursor, requestLogProcessEpoch(), windowSeqs);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       generatedAt: Date.now(),

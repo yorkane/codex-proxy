@@ -299,7 +299,11 @@ function formatTokPerSecond(result: TokPerSecondResult | undefined, localeTag?: 
   return `${result.estimated ? "~" : ""}${value}`;
 }
 
-const LOGS_POLL_INTERVAL_MS = 2000;
+// 5s, not 2s: the ring window is up to 2000 rows and the DTO is ~3KB/row, so every
+// full reset costs ~6MB and a ~200ms main-thread parse. The server cursor now absorbs
+// appends as deltas, but the poll rate still sets the worst-case cost of any reset;
+// 5s halves the storm budget for no visible staleness (autoRefresh stays user-toggleable).
+const LOGS_POLL_INTERVAL_MS = 5000;
 // Relative time filters must advance even when the polled snapshot is unchanged. Keep the
 // refresh independent from the network poll so an active 15m/1h/24h window expires rows while
 // the proxy is idle.
@@ -645,7 +649,15 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       if (sample) clock.anchor = sample;
       setFilterClockNow(logsClockNow(clock.anchor, receivedAt, Date.now()));
       logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
-      writeSessionListCache(resourceKey, next);
+      // The full ~6MB stringify write is only worth its GC churn when the accepted snapshot
+      // actually moved. Three shapes, in order of frequency: an idle tick merges to the
+      // identical array reference (mergeLogDelta returns previous for an empty delta); a
+      // reset whose cursor did not advance and whose row count held is the jitter shape --
+      // the server re-sent the same window, so the previous write is already exact; only a
+      // cursor-advancing delta or a genuinely replacement-shaped reset writes.
+      const cursorAdvanced = parsed.cursor !== cursor;
+      const jitterReset = parsed.reset && !cursorAdvanced && incoming.length === poll.rows.length;
+      if (next !== poll.rows && !jitterReset) writeSessionListCache(resourceKey, next);
       return next;
     } catch (error) {
       if (!isCurrent()) throw error;

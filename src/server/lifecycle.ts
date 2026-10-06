@@ -433,25 +433,101 @@ export function trackStreamLifetime(
   ac: AbortController,
   onDone?: () => void,
   lease?: AdmissionLease,
+  idleGraceMs?: number,
 ): ReadableStream<Uint8Array> {
   registerTurn(ac, lease);
   const reader = body.getReader();
   let closed = false;
+  // ---------------------------------------------------------------------------
+  // Quiescence watchdog (#subagent-slot-leak, 2026-10-06)
+  //
+  // The pump below only makes progress while BOTH sides are interested: Bun
+  // calls pull() when it wants more bytes to write, and the producer resolves
+  // reader.read() when the upstream has more events. A client that vanishes
+  // mid-stream without closing the socket (an app-host orphan, a frozen tab
+  // holding the window shut) stops driving pull() forever; a producer whose
+  // final event was already delivered stops resolving read() forever. When
+  // neither is pending, nothing in this process will ever call finish(), and
+  // the AdmissionLease it carries — including the workflow concurrency slot
+  // attached by runAdmittedHttpTurn — is never released. Eight such zombies
+  // and every later child under the same root is refused with a synthetic
+  // 429 workflow_concurrency_exhausted that reads exactly like provider
+  // throttling. That is the 2026-10-05 subagent death (root 01a10c88 held
+  // active=3 for hours after its turns were finished).
+  //
+  // Detection is deliberately quiescence-only, not "no chunks for N seconds":
+  // a pending pull() means Bun still wants data, and a pending read() means
+  // the upstream fetch is still alive. Long upstream thinking with the
+  // consumer hungry, or a slow consumer with a live producer, stay untouched;
+  // the stall watchdog inside the bridge owns upstream silence. The timer
+  // arms only when neither operation is outstanding, so it fires exactly for
+  // the dead-on-arrival state the leak needs.
+  // ---------------------------------------------------------------------------
+  const graceMs = streamLifetimeIdleGraceMs(idleGraceMs);
+  let pendingPull = false;
+  let pendingRead = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
   const finish = () => {
     if (closed) return;
     closed = true;
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
     unregisterTurn(ac);
     onDone?.();
   };
+  if (graceMs > 0) {
+    // An external abort (client_cancel, WS teardown) must settle the turn even
+    // when no one is left to cancel the tracked stream: without this listener
+    // the release still depended on Bun driving pull()/cancel() to completion.
+    ac.signal.addEventListener("abort", () => {
+      if (closed) return;
+      finish();
+      reader.cancel(ac.signal.reason).catch(() => {});
+    }, { once: true });
+  }
+  const evaluateQuiescence = () => {
+    if (closed || graceMs <= 0) return;
+    const quiescent = !pendingPull && !pendingRead;
+    if (quiescent && idleTimer === undefined) {
+      idleTimer = setTimeout(() => {
+        idleTimer = undefined;
+        if (closed || pendingPull || pendingRead) return;
+        finish();
+        try { streamController?.close(); } catch { /* already closed */ }
+        ac.abort(new Error("stream idle: the client stopped consuming the response"));
+        reader.cancel("stream idle").catch(() => {});
+      }, graceMs);
+    } else if (!quiescent && idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
+      streamController = controller;
+      pendingPull = true;
+      evaluateQuiescence();
       try {
+        pendingRead = true;
+        evaluateQuiescence();
         const { done, value } = await reader.read();
+        if (closed) {
+          if (!done) void reader.cancel("settled").catch(() => {});
+          return;
+        }
+        pendingRead = false;
         if (done) { finish(); controller.close(); return; }
         controller.enqueue(value);
+        pendingPull = false;
+        evaluateQuiescence();
+        return;
       } catch (err) {
         finish();
         try { controller.error(err); } catch { /* already closed */ }
+        return;
       }
     },
     cancel(reason) {
@@ -460,6 +536,26 @@ export function trackStreamLifetime(
       reader.cancel(reason).catch(() => {});
     },
   });
+}
+
+/**
+ * Default grace for the quiescence watchdog: five minutes with neither side
+ * wanting anything. Comfortably longer than any real inter-chunk gap that
+ * still has a pending pull/read (those are excluded by construction), and far
+ * shorter than the "hours" a leaked slot was held in the 2026-10-05 incident.
+ * Override with OCX_STREAM_LIFETIME_IDLE_GRACE_MS (milliseconds; 0 disables
+ * the watchdog and restores the pre-fix behaviour byte-for-byte).
+ */
+export const STREAM_LIFETIME_DEFAULT_IDLE_GRACE_MS = 300_000;
+
+function streamLifetimeIdleGraceMs(explicit: number | undefined): number {
+  if (explicit !== undefined && Number.isFinite(explicit) && explicit >= 0) return explicit;
+  const raw = process.env.OCX_STREAM_LIFETIME_IDLE_GRACE_MS;
+  if (raw !== undefined && raw.trim() !== "") {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return STREAM_LIFETIME_DEFAULT_IDLE_GRACE_MS;
 }
 
 export async function drainAndShutdown(

@@ -105,8 +105,40 @@ export interface WorkflowBudgetPolicy {
  */
 export const WORKFLOW_DEFAULT_WINDOW_MS = 10 * 60_000;
 
+/**
+ * How long an unreleased concurrency lease may keep its slot before the next read reaps it.
+ *
+ * The count the concurrency ceiling compares used to be a bare integer, and an integer cannot
+ * be reaped: it only ever went down when the turn that took it called release(). Every honest
+ * release path was already idempotent, but honest only covers the paths that RUN. A turn whose
+ * lease is bound to an abort controller that is never aborted and whose response body is never
+ * fully consumed (client vanished mid-relay, a tee()'d branch parked forever, an adapter
+ * returning without attaching its controller) leaves its slot counted forever -- clear
+ * deliberately refuses to touch the count precisely so a live turn's slot cannot be laundered,
+ * which also made the leaked slot unfixable without restarting the proxy. This age bound is the
+ * missing finally, placed on the read side so no caller can forget it: a lease older than this
+ * is reaped the next time anything asks about the root.
+ *
+ * Thirty minutes sits far above every legitimate turn measured on the production box that hit
+ * this (99% of turns complete inside 180s, worst observed 192s, and nothing over ten minutes in
+ * 3200+ rows for the affected root) and far below the hours a leaked slot would otherwise squat
+ * for. Reaping a slot whose turn is genuinely still alive lets exactly one extra concurrent turn
+ * in for the remainder of that turn's life -- the guard loses a single slot of precision, which
+ * is what makes the generous bound safe to hold.
+ */
+export const WORKFLOW_MAX_LEASE_AGE_MS = 30 * 60_000;
+
 export const DEFAULT_WORKFLOW_BUDGET_POLICY: WorkflowBudgetPolicy = {
-  maxConcurrentChildren: 8,
+  // 8 was written against the #4546 seven-hundred-children burst, long before this fleet ran
+  // real fan-outs. Measured over a two-hour window on the box that died here: the busiest root
+  // family held p50 6 / p90 10 / p99 14 simultaneous completed model turns, peak 16, every one
+  // of them an ordinary 200. A root at that steady pressure was refusing subagents with
+  // workflow-concurrency-exhausted and one of them died at the client retry limit after 56
+  // minutes of real work. 16 sits at the measured peak, so the ceiling fires on a burst above
+  // the concurrency this machine's work actually reaches at once; the runaway shape it was
+  // written against is bounded harder by the send and child-count caps. interactiveReserve
+  // still fences the fan-out off its own conversation.
+  maxConcurrentChildren: 16,
   maxPhysicalSends: 256,
   maxDistinctChildren: 64,
   interactiveReserve: 1,
@@ -180,6 +212,41 @@ function windowedChildren(state: WorkflowState, now: number): number {
     if (lastSeenMs <= cutoff) state.children.delete(childId);
   }
   return state.children.size;
+}
+
+/**
+ * Forget leases whose holder has not surfaced inside the age bound, and report how many went.
+ *
+ * Sits on the read side exactly like the children map's prune: no timer thread, and every
+ * admission, snapshot and eviction pass pays for the reaping it can see. Deleting rather than
+ * decrementing is the point -- a release that arrives after the reap is a no-op, so the count
+ * cannot go negative and a reaped slot cannot be double-freed.
+ */
+function reapLeasesForRoot(state: WorkflowState, rootId: string, now: number): number {
+  const reaped = reapLeases(state, now);
+  if (reaped > 0) {
+    recordBudgetEvent({
+      at: now,
+      kind: "reaped",
+      rootId,
+      reaped,
+      sends: windowedSends(state, now),
+      children: windowedChildren(state, now),
+    });
+  }
+  return reaped;
+}
+
+function reapLeases(state: WorkflowState, now: number): number {
+  const maxAge = workflowMaxLeaseAgeMs();
+  let reaped = 0;
+  for (const [token, acquiredAt] of state.leases) {
+    if (now - acquiredAt > maxAge) {
+      state.leases.delete(token);
+      reaped += 1;
+    }
+  }
+  return reaped;
 }
 
 export type WorkflowDenial =
@@ -285,14 +352,16 @@ export function workflowDenialSummary(
  */
 export const WORKFLOW_LOCAL_REFUSAL_HEADER = "x-opencodex-local-refusal";
 
-export type WorkflowBudgetEventKind = "refused" | "cleared";
+export type WorkflowBudgetEventKind = "refused" | "cleared" | "reaped";
 
 export interface WorkflowBudgetEvent {
   readonly at: number;
   readonly kind: WorkflowBudgetEventKind;
   readonly rootId: string;
-  /** The ceiling that fired. Present for `refused`, absent for `cleared`. */
+  /** The ceiling that fired. Present for `refused`, absent for `cleared` and `reaped`. */
   readonly reason?: WorkflowDenial;
+  /** How many stale concurrency leases the reap took back. Present for `reaped` only. */
+  readonly reaped?: number;
   /** Which token scope refused, on a spend denial. Absent on every count denial. */
   readonly spendScope?: SpendScope;
   /** That scope's ceiling, so the event is readable without the config open beside it. */
@@ -405,7 +474,13 @@ export interface WorkflowSpendRequest {
 }
 
 interface WorkflowState {
-  active: number;
+  /**
+   * Concurrency leases: token -> admission clock. The ceiling compares the map size AFTER
+   * reapLeases has run, so a lease whose holder never called release ages out of the count
+   * the next time anything reads the root. A bare integer could not do that: it only ever
+   * went down in-band, and a lost release was permanent.
+   */
+  leases: Map<number, number>;
   /** Lifetime total, kept for diagnostics only. The ceiling reads the window instead. */
   sends: number;
   /** Ring of per-slot send counts; sendSlotAt[i] names the slot that bucket holds. */
@@ -420,7 +495,7 @@ interface WorkflowState {
 
 function newWorkflowState(now: number, policy: WorkflowBudgetPolicy): WorkflowState {
   return {
-    active: 0,
+    leases: new Map<number, number>(),
     sends: 0,
     sendSlotCount: new Array<number>(WORKFLOW_WINDOW_SLOTS).fill(0),
     sendSlotAt: new Array<number>(WORKFLOW_WINDOW_SLOTS).fill(Number.NEGATIVE_INFINITY),
@@ -431,6 +506,25 @@ function newWorkflowState(now: number, policy: WorkflowBudgetPolicy): WorkflowSt
 }
 
 const roots = new Map<string, WorkflowState>();
+
+/** Lease token counter; uniqueness is all the value carries. */
+let leaseSeq = 0;
+
+/**
+ * The lease-age bound actually in force right now.
+ *
+ * The env override lets a test (or an operator staring at a wedged root) shorten the reaper's
+ * leash instead of waiting thirty minutes for the reap that runs on the next read. An
+ * unparseable or non-positive value falls back to the default rather than disabling the reaper:
+ * this is the leak guard, and its knob's failure mode has to be "reaps as designed", never
+ * "leaks forever because a variable was set wrong".
+ */
+function workflowMaxLeaseAgeMs(): number {
+  const raw = process.env.OCX_WORKFLOW_LEASE_MAX_AGE_MS;
+  if (raw === undefined || raw.trim() === "") return WORKFLOW_MAX_LEASE_AGE_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : WORKFLOW_MAX_LEASE_AGE_MS;
+}
 
 /**
  * Evict the oldest root that is safe to forget, and report whether one was found.
@@ -451,7 +545,8 @@ function evictOneRoot(
     // which is the exact laundering this ledger exists to prevent. The same holds for an
     // EXHAUSTED-but-idle root -- count-exhausted or spend-exhausted -- because recreating it
     // fresh under the same id resets the very ceiling that already fired.
-    if (state.active > 0) continue;
+    reapLeases(state, now);
+    if (state.leases.size > 0) continue;
     if (windowedSends(state, now) >= policy.maxPhysicalSends) continue;
     if (spendLedger?.exhausted("root", key) === true) continue;
     if (state.lastSeenMs < oldestAt) { oldestAt = state.lastSeenMs; oldestKey = key; }
@@ -540,10 +635,13 @@ export function admitWorkflowTurn(
     && windowedChildren(state, now) >= policy.maxDistinctChildren) {
     return refuse("workflow-children-exhausted");
   }
+  // Reap before the ceiling reads the ledger -- see reapLeasesForRoot for why this sits on
+  // the read side and what one reaped-live-slot costs.
+  reapLeasesForRoot(state, rootId, now);
   const ceiling = lane === "worker"
     ? Math.max(0, policy.maxConcurrentChildren - policy.interactiveReserve)
     : policy.maxConcurrentChildren;
-  if (state.active >= ceiling) {
+  if (state.leases.size >= ceiling) {
     return refuse("workflow-concurrency-exhausted");
   }
 
@@ -596,7 +694,8 @@ export function admitWorkflowTurn(
     }
   }
 
-  state.active += 1;
+  const leaseToken = (leaseSeq += 1);
+  state.leases.set(leaseToken, now);
   if (childId !== undefined) state.children.set(childId, now);
   let released = false;
   return {
@@ -611,7 +710,10 @@ export function admitWorkflowTurn(
         released = true;
         const current = roots.get(rootId);
         if (current) {
-          current.active = Math.max(0, current.active - 1);
+          // Deleting this lease's own token rather than decrementing a shared integer is what
+          // makes a late release harmless: if the reaper already reclaimed the slot, the
+          // delete is a no-op, and two releases can never drive the count negative.
+          current.leases.delete(leaseToken);
           // Eviction ordering only; no ceiling reads lastSeenMs, so the wall clock is the
           // right source here and a caller does not need to inject one.
           current.lastSeenMs = Date.now();
@@ -757,8 +859,11 @@ export function workflowBudgetSnapshot(
 ): WorkflowBudgetSnapshot | undefined {
   const state = roots.get(rootId);
   if (!state) return undefined;
+  // The operator view reaps too: an operator staring at a 429 is reading the same number the
+  // ceiling just compared, stale leases included.
+  reapLeasesForRoot(state, rootId, now);
   return {
-    active: state.active,
+    active: state.leases.size,
     sends: windowedSends(state, now),
     children: windowedChildren(state, now),
     lifetimeSends: state.sends,

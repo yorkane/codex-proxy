@@ -1981,7 +1981,7 @@ describe("request log snapshot cursor", () => {
     const payload = JSON.parse(Buffer.from(poll.cursor, "base64url").toString());
     expect(decodeRequestLogCursor(poll.cursor)).toEqual(payload);
     for (const raw of ["", "!", "a".repeat(513), `${poll.cursor}=`, ` ${poll.cursor}`,
-      encode(null), encode([]), encode({ ...payload, v: 3 }), encode({ ...payload, n: -1 }),
+      encode(null), encode([]), encode({ ...payload, v: 4 }), encode({ ...payload, n: -1 }),
       encode({ ...payload, n: 2001 }), encode({ ...payload, n: 0.5 }), encode({ ...payload, n: "0" }),
       encode({ ...payload, h: "x".repeat(64) }), encode({ ...payload, q: null }),
       encode({ ...payload, e: "short" }), encode({ ...payload, extra: true }),
@@ -2049,17 +2049,33 @@ describe("request log snapshot cursor", () => {
       .toBe(true);
   });
 
-  test("a full-window rollover resets; a stale fingerprint cannot suppress current rows", () => {
-    const rows = Array.from({ length: 2000 }, (_, index) => log({ requestId: `row-${index}`, timestamp: 2000 - index }));
+  test("a full-ring rollover at capacity ships the append; a stale fold cannot suppress current rows", () => {
+    // The ring steady state (client holds the full 2000-row window, one append plus one
+    // eviction per poll) is exactly the /api/logs hot path. v2 hashed window-slice contents
+    // and reset on every shift; v3 folds occurrences by append key and ships only the delta,
+    // which client-side caps trim identically. Clients below capacity keep the reset contract
+    // (they cannot express removals) -- see the sub-capacity case below.
+    const rows = Array.from({ length: 2000 }, (_, index) => log({ requestId: "row-" + index, timestamp: 2000 - index }));
     const initial = selectRequestLogPoll(rows, query, null, epoch);
     const cursor = decodeRequestLogCursor(initial.cursor);
-    expect(cursor).toMatchObject({ v: 2, n: 2000 });
+    expect(cursor).toMatchObject({ v: 3, n: 2000 });
+    const newcomer = log({ requestId: "new", timestamp: 0 });
     rows.shift();
-    rows.push(log({ requestId: "new", timestamp: 0 }));
-    expect(selectRequestLogPoll(rows, query, cursor, epoch)).toMatchObject({ logs: rows, reset: true });
+    rows.push(newcomer);
+    expect(selectRequestLogPoll(rows, query, cursor, epoch)).toMatchObject({ logs: [newcomer], reset: false });
     const payload = JSON.parse(Buffer.from(initial.cursor, "base64url").toString());
-    const stale = decodeRequestLogCursor(encode({ ...payload, h: "0".repeat(64) }));
+    const stale = decodeRequestLogCursor(encode({ ...payload, ta: "0".repeat(16) }));
     expect(stale).not.toBeNull();
     expect(selectRequestLogPoll(rows, query, stale, epoch)).toMatchObject({ logs: rows, reset: true });
+  });
+
+  test("a sub-capacity eviction resets: clients below the ring cap cannot express removals", () => {
+    const rows = Array.from({ length: 9 }, (_, index) => log({ requestId: "sub-" + index }));
+    const first = selectRequestLogPoll(rows, query, null, epoch);
+    expect(first.logs).toHaveLength(9);
+    rows.shift();
+    rows.push(log({ requestId: "sub-new" }));
+    expect(selectRequestLogPoll(rows, query, decodeRequestLogCursor(first.cursor), epoch))
+      .toMatchObject({ logs: rows, reset: true });
   });
 });

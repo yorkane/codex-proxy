@@ -3,6 +3,7 @@
  * (which sits at its file-size threshold) so query clauses can grow here.
  */
 import type { RequestLogEntry } from "./request-log";
+import { assignRequestLogSeq } from "./request-log-cursor";
 import { matchesLogConversationId } from "./request-log-conversation";
 import { isDeliveryMode } from "../protocols/contract";
 
@@ -42,6 +43,11 @@ export function queryRequestLogs(
   const protocolMode = params.get("protocolMode")?.trim().toLowerCase();
   const status = params.get("status")?.trim().toLowerCase();
 
+  // Stamp EVERY ring row (not just the window) with its append-order position, so first-sight
+  // order equals ring order and the /api/logs cursor can fold held ranges across ring shifts.
+  // The DTO is rebuilt per poll, so a WeakMap over projection objects could never stabilize;
+  // stamped ring rows carry the position through the requestLogDto spread instead.
+  for (const entry of logs) assignRequestLogSeq(entry);
   const hasFilters = Boolean(provider || conversationId || model || account || protocolMode || status);
   let filtered: RequestLogEntry[];
   if (!hasFilters) {
