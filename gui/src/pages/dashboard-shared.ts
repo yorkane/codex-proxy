@@ -52,8 +52,8 @@ export interface SettingsData {
   codexClientCompaction?: boolean;
   catalogRefreshPending?: boolean;
   /** Whether a login may open a browser on the machine running the proxy. */
- oauthOpenBrowser?: boolean;
- port: number;
+  oauthOpenBrowser?: boolean;
+  port: number;
   hostname: string;
   /** IANA zone of the machine running the proxy, used to render log timestamps (#725). */
   timeZone?: string;
@@ -133,53 +133,7 @@ export interface SidecarPatch {
     timeoutMs?: number;
   };
 }
-export interface ShadowCallData {
-  enabled: boolean;
-  model: string;
-  modelMap?: Record<string, string>;
-  sourceModels?: string[];
-  phantomToolAllowlistEnabled?: boolean;
-  phantomToolAllowlist?: string[];
-  phantomToolDefaults?: string[];
-  phantomToolFeedbackMax?: number;
-  /** Top-level config: replay an empty (reasoning-only) completion once. */
-  emptyCompletionRetry?: boolean;
-  /** True while OCX_EMPTY_COMPLETION_RETRY=0 forces the guard off regardless of the switch. */
-  emptyCompletionRetryEnvOverride?: boolean;
-  /**
-   * How many times the guard replays, as the SERVER resolved it — so an environment override is
-   * visible instead of leaving the input editing a number that has no effect.
-   */
-  emptyCompletionRetryMax?: number;
-  /** Accepted range; the server rejects anything outside it with 400. */
-  emptyCompletionRetryMaxMin?: number;
-  emptyCompletionRetryMaxLimit?: number;
-  /** True while OCX_EMPTY_COMPLETION_RETRY_MAX overrides the persisted budget. */
-  emptyCompletionRetryMaxEnvOverride?: boolean;
-}
-/**
- * Recent tool-call dispositions and empty-completion replays, projected from the in-memory
- * request log by GET /api/shadow-diagnostics. `kinds` is the server's list so the filter cannot
- * offer a category the feed never produces.
- */
-export interface ShadowDiagnosticEvent {
-  ts: number;
-  kind: string;
-  requestId: string;
-  model: string;
-  provider: string;
-  status: number;
-  detail: string;
-  names: string[];
-  count: number;
-}
-export interface ShadowDiagnosticsData {
-  generatedAt: number;
-  timeZone: string;
-  kinds: string[];
-  total: number;
-  events: ShadowDiagnosticEvent[];
-}
+export interface ShadowCallData { enabled: boolean; model: string; sourceModels?: string[] }
 export type UsageSummary30d = import("../usage-summary-resource").UsageReadMetadata & { summary: { requests: number; totalTokens: number; coverageRatio: number } };
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "bun" | "mise" | "npm" | "pnpm" | "source";

@@ -30,7 +30,7 @@
  * drops per model and see a regression coming instead of meeting it by hand.
  */
 
-import { normalizeDeclaredToolName, repairEmittedToolName } from "../types";
+import { normalizeDeclaredToolName, repairEmittedToolName } from "../types/tools";
 import type { DroppedEmitDecision } from "../usage/telemetry-contract";
 import {
   buildNamespaceLeakFeedback,

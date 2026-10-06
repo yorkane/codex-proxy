@@ -170,6 +170,8 @@ export function isAllowedManagementOrigin(req: Request, config: OcxConfig): bool
   const requestOrigin = managementRequestOrigin(req, config);
   if (!requestOrigin) return false;
   const origin = req.headers.get("Origin");
+  // Exact match against the process-derived origin, or an operator-listed corsAllowOrigins
+  // entry (covers TLS-terminator https://… when the process observes http://…).
   return !origin || origin === requestOrigin || isExtraAllowedOrigin(origin, config);
 }
 

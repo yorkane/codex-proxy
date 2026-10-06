@@ -1,6 +1,7 @@
 /* Shadow Call Intercept — standalone page (fork-owned, #shadow).
-   The control rows themselves reuse the .models-shadow-* classes from
-   styles-models-workspace.css; this file only owns the page shell. */
+   Base rows reuse the upstream .models-shadow-row / -label / -warning classes
+   from styles-models-workspace.css; the fork-only control classes and the page
+   shell live here so the upstream sheet stays at zero diff. */
 
 .shadow-page {
   display: flex;
@@ -29,4 +30,49 @@
    here, so the row just stays a normal flex row. */
 .shadow-page .models-shadow-row-full {
   width: 100%;
+}
+
+/* ------------------------------------------------------------------
+   Shadow-page-owned control classes (fork-owned).
+   These used to live in styles-models-workspace.css, which is an upstream file;
+   nothing outside this page consumes them, so they live here to keep the
+   upstream stylesheet at zero diff. styles.css imports this file after the
+   models sheet, so the cascade order is unchanged.
+   ------------------------------------------------------------------ */
+
+/* The controls parent is a two-column grid. When the default mapping rows leave
+   an odd trailing cell, auto-placement pushes the custom-source rows into it and
+   the two rows visually overlap (grid align-items center). These rows span both
+   tracks so every custom source mapping owns its own full-width line. */
+.models-shadow-row-full {
+  grid-column: 1 / -1;
+}
+
+.models-shadow-source-label {
+  white-space: nowrap;
+  min-width: 7rem;
+  font-weight: 600;
+}
+
+.models-shadow-source-name {
+  color: var(--text);
+}
+
+.models-shadow-fallback-label {
+  font-style: italic;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
+.models-phantom-section {
+  /* The parent is the two-column controls grid; span both tracks so the
+     phantom-tools block owns its own full-width row instead of sharing a
+     grid cell with the shadow mapping rows. */
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-soft);
 }

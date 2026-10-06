@@ -207,4 +207,4 @@ export {
 export { UPSTREAM_JSON_BODY_READ_OPTIONS, linkAbortSignal } from "./core-lifetime";
 export { poolCredentialRefreshIncompleteResponse } from "./core-auth";
 export { applyServiceTierGate } from "./core-normalize";
-export { DEFAULT_SHADOW_SOURCE_MODELS, isShadowSourceModel, shadowCallReplacementFor, shadowSourceModels } from "../../lib/shadow-call";
+export { DEFAULT_SHADOW_SOURCE_MODELS, isShadowSourceModel, shadowSourceModels } from "../../lib/shadow-call";

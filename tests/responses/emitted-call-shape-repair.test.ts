@@ -5,7 +5,7 @@
  * Ambiguous or unmatched names stay fail-closed.
  */
 import { describe, expect, test } from 'bun:test';
-import { repairEmittedToolName } from '../../src/types';
+import { repairEmittedToolName } from '../../src/types/tools';
 import { bridgeToResponsesSSE, buildResponseJSON } from '../../src/bridge';
 import type { AdapterEvent } from '../../src/types';
 

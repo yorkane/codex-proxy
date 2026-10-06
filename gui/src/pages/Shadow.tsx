@@ -15,9 +15,8 @@ import { Switch, Select, Tooltip, ToastNotice } from "../ui";
 import {
   shadowCallModelOptions,
   type ModelInfo,
-  type ShadowCallData,
-  type ShadowDiagnosticsData,
 } from "./dashboard-shared";
+import { type ShadowCallSettings, type ShadowDiagnosticsData } from "./shadow-types";
 import {
   DEFAULT_SOURCE_MODELS,
   shadowSourceModelLabel,
@@ -28,7 +27,7 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
   const [models, setModels] = useState<ModelRow[]>([]);
   const [selectedModels, setSelectedModels] = useState<ProviderModelMap>({});
   const [modelsLoading, setModelsLoading] = useState(true);
-  const [shadowCall, setShadowCall] = useState<ShadowCallData | null>(null);
+  const [shadowCall, setShadowCall] = useState<ShadowCallSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ ok: boolean; message: string } | null>(null);
   const [customSourceDraft, setCustomSourceDraft] = useState("");
@@ -84,7 +83,7 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
     const bounded = createBoundedFetch(15_000);
     try {
       const r = await fetch(`${apiBase}/api/shadow-call-settings`, { signal: bounded.signal });
-      const data = await readJsonIfOk<ShadowCallData>(r);
+      const data = await readJsonIfOk<ShadowCallSettings>(r);
       if (data) setShadowCall(data);
     } catch { /* old server / network: keep the section disabled */ }
     finally { bounded.clear(); }
@@ -95,7 +94,7 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
     void loadShadowCall();
   }, [loadModels, loadShadowCall]);
 
-  const saveShadowCall = async (patch: Partial<ShadowCallData>) => {
+  const saveShadowCall = async (patch: Partial<ShadowCallSettings>) => {
     if (!shadowCall || saving) return;
     setSaving(true);
     setShadowCall({ ...shadowCall, ...patch });

@@ -8,7 +8,6 @@ export {
   dottedToolName,
   namespacedToolName,
   normalizeDeclaredToolName,
-  repairEmittedToolName,
   isCodeModeMcpDirectName,
   toolChoiceAliases,
   createToolChoiceResolver,

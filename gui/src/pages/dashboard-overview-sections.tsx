@@ -506,11 +506,11 @@ export function DashboardSidecarPanels({ d }: { d: Dash }) {
             disabled={!settings || settingsSaving || syncing}
             aria-label={t("dash.codexAutoStart")}
             aria-pressed={settings?.codexAutoStart ?? true}
-         >
-           <span className="knob" />
-         </button>
-       </div>
-     </div>
+          >
+            <span className="knob" />
+          </button>
+        </div>
+      </div>
 
       <div className="panel">
         <div className="spread">

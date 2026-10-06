@@ -773,9 +773,11 @@ const [maBusy, setMaBusy] = useState(false);
       dispatchSettings({ type: "save-finished" });
     }
   };
+
   const toggleCodexAutoStart = () => toggleCodexSetting("codexAutoStart");
   const toggleCodexDesktopAuthless = () => toggleCodexSetting("codexDesktopAuthless");
   const toggleCodexClientCompaction = () => toggleCodexSetting("codexClientCompaction");
+
   // Clears the sync result/error in this hook. The dashboard toast owns its own dismissal
   // timer but must publish the dismissal here: syncResult/syncError live above the dashboard
   // tabs, so a component-local flag alone would let a stale result remount as a fresh toast
