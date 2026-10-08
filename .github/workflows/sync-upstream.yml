@@ -37,6 +37,15 @@ jobs:
           git remote add upstream https://github.com/lidge-jun/opencodex.git
           git fetch upstream main
 
+      # fork 侧从不含自己的依赖定制（两边 package.json 自 merge-base 起无 diff），
+      # lockfile 应逐字节随 upstream；冲突时直接取上游全文，回避纯衍生产物的合并冲突。
+      # 护栏：下游 Focused regression 的 bun install --frozen-lockfile 会在 fork 哪天
+      # 真的改了 package.json 而 lockfile 被强推成上游版时报错，不会静默漂移。
+      - name: Avoid lockfile merge conflicts
+        run: |
+          git config merge.theirs-locked.driver 'cp %B %A'
+          printf '%s\n' 'bun.lock merge=theirs-locked' 'gui/bun.lock merge=theirs-locked' >> .git/info/attributes
+
       - name: Merge upstream/main
         id: merge
         run: |
@@ -82,8 +91,9 @@ jobs:
         if: steps.merge.outputs.MERGED == 1
         run: |
           bun install --frozen-lockfile
+          cd gui && bun install --frozen-lockfile && cd ..
           bun run typecheck
-          bun test ./tests/undeclared-tool-phantom-allowlist.test.ts ./tests/emitted-call-guard.test.ts ./tests/emitted-call-shape-repair.test.ts ./tests/exec-envelope-repair.test.ts ./tests/shadow-call*.test.ts ./tests/auth-cors*.test.ts ./tests/bridge.test.ts
+          bun test ./tests/responses/undeclared-tool-phantom-allowlist.test.ts ./tests/responses/emitted-call-guard.test.ts ./tests/responses/emitted-call-shape-repair.test.ts ./tests/responses/exec-envelope-repair.test.ts ./tests/responses/namespace-leak-feedback.test.ts ./tests/responses/responses-shadow-intercept.test.ts ./tests/responses/shadow-intercept-target-lifecycle.test.ts ./tests/adapters/bridge.test.ts
 
       - name: Report test failure and stop
         if: failure() && steps.merge.outputs.MERGED == 1
