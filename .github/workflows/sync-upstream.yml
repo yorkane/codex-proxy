@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
   issues: write
+  # upstream 合并会带 .github/workflows/* 的改动（如 ci.yml），没有该权限时
+  # GITHUB_TOKEN 推送会被拒：refusing to allow a GitHub App to create or
+  # update workflow without `workflows` permission。
+  workflows: write
 
 concurrency:
   group: fork-sync-upstream
