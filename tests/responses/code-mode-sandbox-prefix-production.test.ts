@@ -140,6 +140,21 @@ describe("code-mode 沙箱前缀 helper 名不再整轮 502（241.t 现场形态
     expect(verdict.kind).toBe("allow");
     if (verdict.kind === "allow") expect(verdict.name).toBe("exec");
   });
+
+  test("多写的一对下划线也认得（现场 tools=__exec_command）", () => {
+    // 它与 tools=exec_command 的唯一区别是分隔符多打了一遍：剥完前缀是 _exec_command。目标仍然
+    // 唯一落在闭集 helper 上、仍然要求目录声明 exec，所以救回它的授权强度和主犯完全一致。
+    for (const name of ["tools=__exec_command", "tools=tools.exec_command", "tools__tools.apply_patch"]) {
+      const verdict = resolveEmittedCall(name, {
+        declaredToolNames: CODE_MODE_CATALOG,
+        enforceDeclaredToolNames: true,
+        freeformToolNames: new Set(["exec"]),
+        bareCustomToolNames: new Set(["exec"]),
+      });
+      expect(verdict.kind).toBe("allow");
+      if (verdict.kind === "allow") expect(verdict.name).toBe("exec");
+    }
+  });
 });
 
 describe("脏写法保持 fail closed（没有唯一可恢复目标就不救）", () => {
@@ -157,7 +172,6 @@ describe("脏写法保持 fail closed（没有唯一可恢复目标就不救）"
     "tools__exec_4ll9",
     "tools__apply_patch_14",
     "tools__exec_comman",
-    "tools=__exec_command",
     "tools=" + NL + LT + "/function",
     "tools=" + NL + LT + "parameter=cmd",
     "tools=" + NL + "{" ,

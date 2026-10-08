@@ -240,11 +240,29 @@ function repairEmittedToolNameShape(
   // sandbox namespace onto a real tool name. Strip the prefix when the remainder
   // is declared (the intended call is recoverable), otherwise leave it phantom.
   if (candidates.length === 0) {
-    const prefix = SANDBOX_NAMESPACE_PREFIXES.find((p) => name.startsWith(p));
-    if (prefix === undefined) return name;
-    const stripped = sanitizedNameForMatching(name.slice(prefix.length));
+    // 反复剥前缀：正文侧的 stripKnownHelperPrefixes 本来就是循环（现场有 tools=tools.exec_command
+    // 这种把沙箱命名空间写两遍的），名字侧只剥一层会和它得出不同答案——名字判 undeclared 而正文
+    // 已认出 helper。两边同一趟数，才不会出现「一侧认得一侧不认」的第三种漂移。
+    let stripped = name;
+    for (;;) {
+      const prefix = SANDBOX_NAMESPACE_PREFIXES.find((p) => stripped.startsWith(p) && stripped.length > p.length);
+      if (prefix === undefined) break;
+      stripped = stripped.slice(prefix.length);
+    }
+    if (stripped === name) return name;
+    stripped = sanitizedNameForMatching(stripped);
     if (stripped.length === 0) return name;
     consider(stripped);
+    // 分隔符打杂的形态（现场 tools=__exec_command：多写了一对下划线）：剥掉两端多余下划线再试。
+    // 同样只影响查候选，放行仍要求 declared/normalize 逐字命中。
+    const sepTrimmed = stripped.replace(/^_+|_+$/g, "");
+    if (sepTrimmed !== stripped && sepTrimmed.length > 0) {
+      consider(sepTrimmed);
+      if (candidates.length === 0) {
+        const viaTrim = normalizeDeclaredToolName(sepTrimmed, declared, declaredBare, declaredCustom);
+        if (viaTrim !== sepTrimmed && declared.has(viaTrim)) consider(viaTrim);
+      }
+    }
     // The model also tends to collapse the namespace separator itself
     // (tools__web_run -> web_run for declared web__run), so fall back to a
     // separator-insensitive exact match when the plain strip misses.
