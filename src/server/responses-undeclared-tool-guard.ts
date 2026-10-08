@@ -11,6 +11,10 @@ import {
   normalizeDeclaredToolName,
 } from "../types";
 import { replaceSseDataPayload, sseDataPayload, type SseBlockRewrite } from "./sse-payload-rewrite";
+// 改名器与桥接侧唯一决策点(src/responses/emitted-call-guard.ts)引用的是同一份实现。
+// 它不在 src/types.ts 那层 barrel 上，所以从定义处具名导入；在本文件里另抄一份改名规则
+// 才是那条注释警告的漂移来路。
+import { repairEmittedToolName } from "../types/tools";
 
 /** Item types the client executes through a request-declared wire name. */
 export const CLIENT_EXECUTED_CALL_TYPES: ReadonlySet<string> = new Set([
@@ -82,6 +86,55 @@ export const UNDECLARED_TOOL_CALL_ERROR_CODE = "undeclared_tool_call";
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * 本 guard 的裸名解析链：先 normalizeDeclaredToolName，再 repairEmittedToolName。
+ *
+ * 授权（undeclaredNameInItem）与发射（normalizeDefaultNamespaceInItem）必须读这一个函数。
+ * 过去授权侧只 normalize，而桥接侧 resolveEmittedCall 是 normalize + repair，于是同一个畸形名
+ * （exec 沙箱命名空间的四种拼法，以及 collaboration / functions 前缀形状）在两条路径上得到
+ * 两个答案：桥接改名放行，passthrough 按 1700 fail closed 并回一个 response.failed。这正是
+ * 本文件里 normalizeDefaultNamespaceInItem 那段长注释警告的「授权与发射读两套解析器」，
+ * 也是 5095 的成因。
+ *
+ * repair 自身的 fail-closed 性质原样保留：候选数不等于 1 时它返回输入本身，所以未知剩余、
+ * 空剩余、裸容器名、相似而不同的前缀、随机后缀与被截断的名字，全部仍然算 undeclared。
+ */
+function resolveGuardedEmittedName(
+  name: string,
+  declared: ReadonlySet<string>,
+  declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
+): string {
+  const normalized = normalizeDeclaredToolName(name, declared, declaredBare, declaredCustom);
+  const repaired = repairEmittedToolName(normalized, declared);
+  if (repaired === normalized) return normalized;
+  // 只放行「客户端真能用」的改名结果。repair 可以命中一个点号形式的别名（web.run 这种
+  // 展平拼法，见 addWireToolName 与 #3402），而 Responses 的 name 正则只接受 [A-Za-z0-9_-]：
+  // 收下它等于把一个上游会在 input[N].name 上拒绝、且会被 Codex 写进会话历史永久污染的形状
+  // 中继出去（#5095）。改名结果不合规矩就退回改名前，让它照旧 fail closed。
+  if (!isSchemaValidResponsesToolName(repaired)) return normalized;
+  // repair 的「裸名命中唯一 ns__name 后缀」那条规则，会凭一个只在命名空间里声明过的工具，
+  // 凭空接受它的裸拼法。裸拼法对本 guard 从来不是兼容性的边缘情况，而是授权决策：声明集正是
+  // normalizeDeclaredToolName 读的那份，裸 exec 会给一个从未声明外壳的目录打开 nested-helper
+  // 归一化，裸 exec_command / shell_command 会反过来给声明过的目录关掉它，其余裸名则把只在
+  // 命名空间下授权过的调用当作已声明收下。收集侧（addWireToolName）已经用
+  // NAMESPACED_BARE_ALIAS_EXCLUDED_NAMES 拒绝为这些拼法制造裸别名，repair 不能从后门口把
+  // 同一批名字再放进来——那条既有意图（只在 mcp 命名空间声明 exec 时绝不授权裸 helper 名）
+  // 由测试 a namespaced-only exec declaration does not authorize the nested helper names 锁住。
+  //
+  // 判据看 provenance 而不看名称猜测：只有 caller 确实裸声明过（collectDeclaredBareWireToolNames
+  // 收录的、不带命名空间来源的声明）的裸拼法才配当别名。省略 declaredBare 的调用方没有这份
+  // 来源信息，一律按未授权处理——fail closed 一侧不需要额外证据。
+  // collaboration__spawn_agent 这类不在名单里的名字不受影响，两条路径的改名对称照旧成立。
+  if (
+    NAMESPACED_BARE_ALIAS_EXCLUDED_NAMES.has(normalized)
+    && !normalized.includes("__")
+    && !normalized.includes(".")
+    && declaredBare?.has(normalized) !== true
+  ) return normalized;
+  return repaired;
 }
 
 function addWireToolName(
@@ -430,7 +483,9 @@ function undeclaredNameInItem(
     const wireName = namespacedToolName(item.namespace, name);
     return { name, droppable: droppableFor(wireName, name, allowlist) };
   }
-  const effectiveName = normalizeDeclaredToolName(name, declared, declaredBare, declaredCustom);
+  // C1：与桥接侧读同一个解析器。normalize 之后再过一遍 repairEmittedToolName，沙箱前缀形状
+  // 与 collaboration / functions 前缀形状才能在两条路径上得到同一个答案。
+  const effectiveName = resolveGuardedEmittedName(name, declared, declaredBare, declaredCustom);
   if (declared.has(effectiveName)) return undefined;
   return { name, droppable: droppableFor(effectiveName, name, allowlist) };
 }
@@ -533,7 +588,9 @@ export function stripDroppableToolCallsInResponse(
       }
       return true;
     }
-    const effectiveName = normalizeDeclaredToolName(name, declared, declaredBare);
+    // 与授权侧共用同一条解析链：终态快照的剥离判定必须和逐条 verdict 同答案，否则同一个
+    // 条目可能在增量事件里被放行、在 completed 快照里被当成 phantom 剥掉（或反之）。
+    const effectiveName = resolveGuardedEmittedName(name, declared, declaredBare);
     if (declared.has(effectiveName)) return true;
     if (allowlist.has(name) || allowlist.has(effectiveName)) {
       removed.push(name);
@@ -688,18 +745,25 @@ export function normalizeDefaultNamespaceInItem(
     // Emit the name the guard authorized rather than a second, weaker opinion about it. The two
     // must agree: a name good enough to admit is the name the client has to receive.
     //
-    // Gated on the name actually being unusable, so this branch cannot touch a name the upstream
-    // accepts whatever the resolver would have said about it. The routed-custom-tool and
-    // namespace restores run earlier in the same chain and already rewrite the shapes they own,
-    // which leaves this as the boundary check for the names no restore claimed.
-    if (!isSchemaValidResponsesToolName(name)) {
-      const authorized = normalizeDeclaredToolName(name, declared, declaredBare);
-      if (
-        authorized !== name
-        && declared.has(authorized)
-        && isSchemaValidResponsesToolName(authorized)
-      ) return { value: { ...item, name: authorized }, changed: true };
-    }
+    // 改写只可能发生在「解析器把名字换成了另一个已声明且客户端可用的名字」时，所以这个分支
+    // 不会碰一个本来就合法的名字：目录真的声明了它，authorized 就等于 name。The routed-custom-tool
+    // and namespace restores run earlier in the same chain and already rewrite the shapes they
+    // own, which leaves this as the boundary check for the names no restore claimed.
+    // C2 扩展：授权查询换成 resolveGuardedEmittedName（normalize + repair），与
+    // undeclaredNameInItem 完全同一条链。一个够格被放行的名字，客户端就必须以那个被授权的
+    // 声明名收到它；把畸形拼法原样中继回去，等于让同一个改名在桥接侧生效、在 passthrough
+    // 侧只生效一半（放行的是 exec，送出去的是 tools__exec —— 客户端对不上号，又是一条
+    // unsupported call / #5095 式污染会话历史）。
+    // 两道保险维持原语义：合法声明的名字永远 authorized === name，不会走到改写；repair
+    // 失手（候选数不是 1）时 authorized 仍等于畸形输入，同样不会改写，也照样不会把名字
+    // 改成第二个猜测。改写结果还必须是 schema-valid 的名字，宁可放行也不发送一个会被上游
+    // 按 input[N].name 拒绝的形状。
+    const authorized = resolveGuardedEmittedName(name, declared, declaredBare);
+    if (
+      authorized !== name
+      && declared.has(authorized)
+      && isSchemaValidResponsesToolName(authorized)
+    ) return { value: { ...item, name: authorized }, changed: true };
   }
   return { value: item, changed: false };
 }
