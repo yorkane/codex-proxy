@@ -1095,6 +1095,24 @@ export function bridgeToResponsesSSE(
                   });
                   break;
                 }
+                // 命名空间容器名（tools / collaboration）在强制模式下也不该整轮 502。
+                //
+                // 原来这段判定被放在 enforceDeclared 之后，只有 #4735「延迟强制」的入站线才走得到，
+                // 于是 responses 入站（现网主力）拿到的是 response.failed：模型只是把命名空间当工具
+                // 调了一下（现场 429 条里 86 条是裸容器名 tools，占 20%），整轮就没了，客户端表现为
+                // stream disconnected before completion。容器在任何线上都不可调用，中继给客户端也只会
+                // 变成 unsupported call 结束回合 —— 所以它的正确处置是「丢弃并继续」，与允许列表里的
+                // phantom 同一档，而不是把回合打死。真实幻觉名（既非声明、也非容器）行为不变，照旧
+                // 走下面的 fail-closed。
+                if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
+                  || isDroppedNamespaceContainer(event.name, options?.declaredToolNames)) {
+                  noteDroppedEmitSafely(delivery, {
+                    emitted: event.name,
+                    effective: verdict.name,
+                    decision: "namespace-container",
+                  });
+                  break;
+                }
                 if (enforceDeclared) {
                   const failure = responseError(
                     502,
@@ -1112,18 +1130,8 @@ export function bridgeToResponsesSSE(
                   terminalEvent = true;
                   break;
                 }
-                // Enforcement deferred (#4735): an undeclared provider echo is relayed best-effort,
-                // but a tool NAMESPACE container is never callable on any wire, so it stays dropped.
-                // Relaying it produced the client-side `unsupported call: <ns>` that ends the turn.
-                if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
-                  || isDroppedNamespaceContainer(event.name, options?.declaredToolNames)) {
-                  noteDroppedEmitSafely(delivery, {
-                    emitted: event.name,
-                    effective: verdict.name,
-                    decision: "namespace-container",
-                  });
-                  break;
-                }
+                // Enforcement deferred (#4735): an undeclared provider echo is relayed best-effort.
+                // (The namespace-container case already returned above, for both enforcement modes.)
               }
               if (verdict.kind === "feedback") {
                 // Namespace leak or undeclared correction: emit a synthetic exec call

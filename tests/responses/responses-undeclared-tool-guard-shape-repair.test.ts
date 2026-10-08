@@ -167,12 +167,29 @@ describe("passthrough guard 与桥接读同一个解析器：exec 沙箱前缀�
     }
   });
 
-  test("code-mode 目录下 helper 的沙箱拼法仍按未声明拒绝，与桥接同答案", () => {
-    // normalize 在 repair 之前跑，看不见前缀后面的 helper 词表；桥接侧 resolveEmittedCall
-    // 对这些名字同样 drop。锁的是两条路径一致，而不是把它们放宽。
+  test("code-mode 目录下 helper 的沙箱拼法归一到已声明的 exec，两条路径同答案", async () => {
+    // 现场主犯（241.t 429 条里 exec_command 137 / apply_patch 91 / write_stdin 24）全是这一族：
+    // code-mode 目录只声明 exec，从不声明这些 nested helper，所以「剥完前缀要求逐字命中声明」
+    // 对它们永远落空，而裸写同名却能被 normalizeDeclaredToolName 归到 exec。同一个已声明 exec
+    // 通道的错误拼法不该有两种命运，改名器因此在剥前缀之后补走一遍 helper 词表。
+    //
+    // 本用例锁的是「两条路径同答案」这个不变量本身；过去它把「都 drop」当成不变量，于是把 bug
+    // 钉成了契约。真正的授权门仍在 normalizeDeclaredToolName 里：目录没声明 exec 时一个都救不回
+    // （见下一条用例）。
     const views = catalogViews(CODE_MODE_BODY);
-    for (const name of ["tools.apply_patch", "tools.exec_command", "tools.view_image", "tools.write_stdin", "tools.create_goal"]) {
-      expect(verdictForTest(callPayloads(name)[0], views)?.name).toBe(name);
+    const names = [
+      "tools.apply_patch", "tools.exec_command", "tools.view_image", "tools.write_stdin",
+      "tools.create_goal", "tools=exec_command", "tools__exec_command", "tools/exec_command",
+      "tools:exec_command", "tools::exec_command",
+    ];
+    for (const name of names) {
+      for (const payload of callPayloads(name)) {
+        expect(verdictForTest(payload, views)).toBeUndefined();
+      }
+      const { out, names: seen } = await relayCall(name, views);
+      expect(out).not.toContain("response.failed");
+      expect(seen).toContain("exec");
+      expect(out).not.toContain(JSON.stringify(name));
     }
   });
 });

@@ -105,7 +105,17 @@ export const CODE_MODE_EXEC_TOOL_NAME = "exec";
  * single tool, so the prefix is recoverable; an empty or unknown remainder stays
  * phantom and goes to the undeclared guard.
  */
-const SANDBOX_NAMESPACE_PREFIXES = ["tools__", "tools.", "tools=", "tools/"] as const;
+// 现场取证（241.t，429 条）里除了上面四种拼法，模型还会用赋值语句的冒号形态
+// `tools:exec_command` 与 `tools::exec_command`。顺序是硬约束：`find` 取第一个命中的前缀，
+// 双冒号必须排在单冒号之前，否则 `tools::x` 会被单冒号吃掉半个分隔符，剩下 `:x` 谁也不认识。
+export const SANDBOX_NAMESPACE_PREFIXES = [
+  "tools__",
+  "tools.",
+  "tools=",
+  "tools/",
+  "tools::",
+  "tools:",
+] as const;
 
 /**
  * Whether an emitted name is a sandbox-namespace-qualified reference
@@ -129,11 +139,83 @@ export function isSandboxNamespacePrefixedName(name: string): boolean {
  * to that declared name so the turn survives; ambiguous or unmatched names fall
  * through to the undeclared phantom guard unchanged.
  */
-export function repairEmittedToolName(name: string, declared: ReadonlySet<string> | undefined): string {
+/**
+ * 只对「参与匹配判定」开放的有界清洗。
+ *
+ * 现场有模型把零宽字符与控制字符夹进工具名（`tools=\u200b="exec_command"`），也有把调用
+ * envelope 的残尾（`</function`、引号、尖括号）粘在名字尾巴上的。清洗结果只用来查候选，
+ * 绝不会被当作对外发出的名字：名字本身是否合法由调用方的 schema 校验决定，这里放宽的只是
+ * 「同一个意图的另一种脏写法」，不是「多接受一个名字」。清洗后为空或不命中，照旧 fail closed。
+ */
+function sanitizedNameForMatching(name: string): string {
+  let out = name;
+  // 成对残尾与赋值残渣一律用码位写，避免在源码里嵌引号转义：
+  // 双引号 34、单引号 39、反引号 96、尖括号 60/62、等号 61、冒号 58。
+  const PAIRED = [[34, 34], [39, 39], [96, 96], [60, 62]] as const;
+  const STRIP_EDGE = [61, 58] as const;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    out = out.replace(/[\u200b-\u200f\u2060\ufeff]/g, "").replace(/[\u0000-\u001f\u007f]/g, "");
+    const trimmed = out.trim();
+    if (trimmed !== out) { out = trimmed; changed = true; }
+    for (const [open, close] of PAIRED) {
+      const o = String.fromCharCode(open);
+      const c = String.fromCharCode(close);
+      while (out.length >= 2 && out.startsWith(o) && out.endsWith(c)) {
+        out = out.slice(1, -1).trim();
+        changed = true;
+      }
+    }
+    // 赋值形态的残渣（`tools=\u200b="exec_command"` 剥完前缀剩 `="exec_command"`）只在两端各剥
+    // 一个等号/冒号。这里放宽的仍然只是「同一个名字的脏外壳」：最终是否放行由 push() 要求
+    // declared 逐字命中决定，而合法 wire 名不可能以等号或冒号开头，所以不存在因此被多接受的
+    // 真实工具名；脏串如果底下不是已声明的名字，照旧一个都救不回来。
+    for (const code of STRIP_EDGE) {
+      const ch = String.fromCharCode(code);
+      while (out.startsWith(ch) || out.endsWith(ch)) {
+        out = (out.startsWith(ch) ? out.slice(1) : out.slice(0, -1)).trim();
+        changed = true;
+      }
+    }
+  }
+  return out;
+}
+
+export function repairEmittedToolName(
+  name: string,
+  declared: ReadonlySet<string> | undefined,
+  declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
+): string {
+  const repaired = repairEmittedToolNameShape(name, declared, declaredBare, declaredCustom);
+  if (repaired !== name) return repaired;
+  // 脏字符可能落在前缀与名字之间（`tools=\u200b="exec_command"`），那种位置在「剥完前缀再清洗」
+  // 之后仍然把 `=` 后面的残块留在串首，认不出来。所以整名清洗一次再走同一套规则：清洗只影响
+  // 匹配，命中后回传的仍然是声明表里的名字，不会把脏串发出去。原始名优先，保证已声明的名字
+  // 永远先按原样命中。
+  const cleaned = sanitizedNameForMatching(name);
+  if (cleaned === name || cleaned.length === 0) return name;
+  const repairedCleaned = repairEmittedToolNameShape(cleaned, declared, declaredBare, declaredCustom);
+  return repairedCleaned === cleaned ? name : repairedCleaned;
+}
+
+function repairEmittedToolNameShape(
+  name: string,
+  declared: ReadonlySet<string> | undefined,
+  declaredBare?: ReadonlySet<string>,
+  declaredCustom?: ReadonlySet<string>,
+): string {
   if (!declared || declared.size === 0 || declared.has(name)) return name;
   const candidates: string[] = [];
   const push = (n: string) => {
     if (declared.has(n) && !candidates.includes(n)) candidates.push(n);
+  };
+  // 脏写法（零宽/控制字符/成对残尾）只在查候选时归一，不改变 candidates 里真正回传的名字。
+  const consider = (n: string): void => {
+    push(n);
+    const clean = sanitizedNameForMatching(n);
+    if (clean !== n && clean.length > 0) push(clean);
   };
   // functions__exec / functions.exec are the historical ChatGPT prefix for the
   // built-in surface; the current catalog declares the bare name.
@@ -160,15 +242,36 @@ export function repairEmittedToolName(name: string, declared: ReadonlySet<string
   if (candidates.length === 0) {
     const prefix = SANDBOX_NAMESPACE_PREFIXES.find((p) => name.startsWith(p));
     if (prefix === undefined) return name;
-    const stripped = name.slice(prefix.length);
+    const stripped = sanitizedNameForMatching(name.slice(prefix.length));
     if (stripped.length === 0) return name;
-    push(stripped);
+    consider(stripped);
     // The model also tends to collapse the namespace separator itself
     // (tools__web_run -> web_run for declared web__run), so fall back to a
     // separator-insensitive exact match when the plain strip misses.
     const squashed = stripped.replaceAll("__", "_");
     for (const d of declared) {
       if (d.replaceAll("__", "_") === squashed) push(d);
+    }
+    // 剥完前缀仍未命中声明时，再走一遍 nested-helper 词表。
+    //
+    // 这是本函数与 normalizeDeclaredToolName 的组合缺口：code-mode 目录只声明 exec，从不声明
+    // exec_command / apply_patch / write_stdin 这些 helper，所以「剥前缀后要求逐字命中声明」
+    // 对现场主犯（tools=exec_command 137 次、tools=apply_patch 91 次、tools=write_stdin 24 次）
+    // 永远落空 —— 裸写 exec_command 能被 normalize 归到已声明的 exec，加上 tools 前缀就两头
+    // 不靠，整轮 502。同一个已声明 exec 通道的错误拼写不该是两种命运。
+    //
+    // 分隔符折叠后的形态同样要再走一遍词表：现场有 `tools__exec__command`（1 次），剥完前缀是
+    // `exec__command`，逐字不在 helper 闭集里，折叠成 `exec_command` 才是。
+    if (candidates.length === 0 && squashed !== stripped) {
+      const viaSquash = normalizeDeclaredToolName(squashed, declared, declaredBare, declaredCustom);
+      if (viaSquash !== squashed && declared.has(viaSquash)) push(viaSquash);
+    }
+    // 授权边界不放宽：helper->exec 仍然要求目录声明了 CODE_MODE_EXEC_TOOL_NAME 且没有声明任何
+    // LEGACY_SHELL_BRIDGE_TOOL_NAMES，这两个门都在 normalizeDeclaredToolName 里面。目录里没有
+    // exec 时这里拿不到候选，照旧 fail closed。
+    if (candidates.length === 0) {
+      const viaHelper = normalizeDeclaredToolName(stripped, declared, declaredBare, declaredCustom);
+      if (viaHelper !== stripped && declared.has(viaHelper)) consider(viaHelper);
     }
   }
   return candidates.length === 1 ? candidates[0] : name;

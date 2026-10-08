@@ -8,6 +8,8 @@ export {
   dottedToolName,
   namespacedToolName,
   normalizeDeclaredToolName,
+  repairEmittedToolName,
+  SANDBOX_NAMESPACE_PREFIXES,
   isCodeModeMcpDirectName,
   toolChoiceAliases,
   createToolChoiceResolver,

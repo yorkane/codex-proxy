@@ -7,6 +7,7 @@ import {
   CODE_MODE_HELPER_WIRE_NAMES,
   declaresCodeModeExec,
   isCodeModeMcpDirectName,
+  SANDBOX_NAMESPACE_PREFIXES,
 } from "../types/tools";
 import { parseCodeModeShellInput } from "./code-mode-shell-input";
 
@@ -115,11 +116,15 @@ export function compileCodeModeHelperInput(
   return `const result = await tools.exec_command(${JSON.stringify(args)});\ntext(result);`;
 }
 
+// exec 沙箱前缀表必须与 src/types/tools.ts 的 SANDBOX_NAMESPACE_PREFIXES 同源。
+//
+// 名字侧（repairEmittedToolName）与正文侧（这里，经 normalizeCodeModeHelperName）是两次独立解析：
+// 桥接在 tool_call_start 上先用改名器把畸形名认成已声明的 exec，再用**原始发射名**推 helper 名
+// 决定要不要编译成 await tools.<helper>(...)。两张表各自持字面量时必然漂移——冒号形态先前只
+// 加在名字侧，结果名字修好了、helper 解析返回 undefined，shell/patch 正文就以裸 exec JavaScript
+// 的形式送给客户端，静默丢掉 wrapper 语义（正是 normalizeCodeModeHelperName 注释警告的失效）。
 const HELPER_NAMESPACE_PREFIXES = [
-  "tools__",
-  "tools.",
-  "tools=",
-  "tools/",
+  ...SANDBOX_NAMESPACE_PREFIXES,
   "functions__",
   "functions.",
   "default.",

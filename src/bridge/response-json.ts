@@ -525,18 +525,10 @@ function buildResponseJSONWithBudget(
             });
             break;
           }
-          if (enforceDeclared) {
-            errorEvent = {
-              type: "error",
-              message: `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
-              status: 502,
-              errorType: "upstream_error",
-            };
-            break;
-          }
-          // Enforcement deferred (#4735): match the streaming twin - a tool NAMESPACE container is
-          // never callable, so it stays dropped instead of reaching a client whose tool router ends
-          // the turn with `unsupported call: <ns>`.
+          // 与流式孪生同规则：命名空间容器名在强制模式下也是「丢弃并继续」，不整批 502。
+          // 这段判定原本在 enforceDeclared 之后，只有延迟强制的入站线才走得到，于是 responses
+          // 入站的裸容器名（现场 86/429 条 tools）被 responseError 打死。容器不可调用，中继给
+          // 客户端只会变成 unsupported call 结束回合；真实幻觉名行为不变，照旧 fail closed。
           if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
             || isDroppedNamespaceContainer(e.name, options?.declaredToolNames)) {
             noteDroppedEmitSafely(delivery, {
@@ -544,6 +536,15 @@ function buildResponseJSONWithBudget(
               effective: verdict.name,
               decision: "namespace-container",
             });
+            break;
+          }
+          if (enforceDeclared) {
+            errorEvent = {
+              type: "error",
+              message: `routed provider emitted undeclared client tool "${verdict.name}"; only request-declared tools may be called`,
+              status: 502,
+              errorType: "upstream_error",
+            };
             break;
           }
         }

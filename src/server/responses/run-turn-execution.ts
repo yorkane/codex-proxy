@@ -18,7 +18,7 @@ import type { AdapterEventQueue } from "../../adapters/run-turn-queue";
 import type { AttemptRecoveryKind } from "../../usage/log";
 import { providerFetch } from "./fetch-helpers";
 import { normalizeLogConversationId } from "../request-log-conversation";
-import { normalizeDeclaredToolName, type AdapterEvent, type OcxProviderContinuationState } from "../../types";
+import { normalizeDeclaredToolName, repairEmittedToolName, type AdapterEvent, type OcxProviderContinuationState } from "../../types";
 import { adapterFailureFromMessage, SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
 import { SendBudgetExhaustedError, markResponseNonReplayable } from "../../lib/upstream-retry";
 import {
@@ -648,7 +648,15 @@ export async function executeResponsesRunTurn(
       if (!enforceDeclaredToolNames || event.type !== "tool_call_start") return undefined;
       // This tool is declared to the adapter by the private search loop.
       if (wsPlan && event.name === WEB_SEARCH_TOOL_NAME) return undefined;
-      const effectiveName = normalizeDeclaredToolName(event.name, declaredToolNames, undefined, bareCustomToolNames);
+      // 这条预检是全仓库第三个「这个发射名算不算未声明」判定器，原本只 normalize 不 repair，
+      // 于是在 combo 尝试里抢在桥接改名之前把同一个畸形名 502 掉，把修复整个绕过。三套解析器
+      // 对同一输入必须同答案：这里补上改名器这一层（保持原有 502 结构与文案不变）。
+      const effectiveName = repairEmittedToolName(
+        normalizeDeclaredToolName(event.name, declaredToolNames, undefined, bareCustomToolNames),
+        declaredToolNames,
+        undefined,
+        bareCustomToolNames,
+      );
       if (declaredToolNames.has(effectiveName)) return undefined;
       return {
         type: "error",

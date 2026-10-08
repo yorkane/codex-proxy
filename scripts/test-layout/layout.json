@@ -1995,6 +1995,7 @@
     "undeclared-tool-phantom-allowlist.test.ts": "responses",
     "namespace-leak-feedback.test.ts": "responses",
     "openai-chat-output-ceiling.test.ts": "adapters/openai",
-    "code-mode-helper-prefix-repair.test.ts": "responses"
+    "code-mode-helper-prefix-repair.test.ts": "responses",
+    "code-mode-sandbox-prefix-production.test.ts": "responses"
   }
 }

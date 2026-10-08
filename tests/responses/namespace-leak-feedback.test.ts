@@ -102,11 +102,26 @@ describe("namespace container never reaches the client", () => {
     expect(sse).toContain("response.completed");
   });
 
-  test("direct route keeps failing closed and the name still never reaches the client", async () => {
+  test("direct route drops the container and keeps the turn alive", async () => {
+    // 现场取证：241.t 的 429 条 undeclared 502 里 86 条（20%）的名字就是裸容器名 tools，全部
+    // 走 responses 入站的强制模式。容器在任一条线上都不可调用，中继给客户端也只是变成
+    // unsupported call 结束回合，所以它和允许列表里的 phantom 属于同一档：丢弃 + 记遥测，
+    // 而不是把整轮打死。原本这段容器判定被放在 enforceDeclared 之后，只有 #4735 延迟强制的
+    // 入站线才走得到，等于现网主力路径完全拿不到这个豁免。
+    //
+    // 真正的幻觉名不受影响：见下面 "an undeclared name with a catalog and no budget still
+    // fails closed"，那条继续锁 fail-closed。
     const sse = await streamWith("tools", { phantom: new Set<string>() });
-    expect(sse).toContain("undeclared client tool");
-    expect(sse).toContain("response.failed");
     expect(clientSeesCallNamed(sse, "tools")).toBe(false);
+    expect(sse).not.toContain("undeclared client tool");
+    expect(sse).not.toContain("response.failed");
+    expect(sse).toContain("finished the task");
+    expect(sse).toContain("response.completed");
+
+    const json = await jsonWith("tools", { phantom: new Set<string>() });
+    expect(clientSeesCallNamed(json, "tools")).toBe(false);
+    expect(json).not.toContain("undeclared client tool");
+    expect(json).toContain("finished the task");
   });
 
   test("deferred enforcement (chat / anthropic wire) drops the container instead of relaying it", async () => {

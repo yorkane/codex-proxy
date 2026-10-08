@@ -180,7 +180,10 @@ export function resolveEmittedCall(
   }
 
   const normalized = normalizeDeclaredToolName(emitted, declared, undefined, options.bareCustomToolNames);
-  const effective = repairEmittedToolName(normalized, declared);
+  // 把 code-mode 的 freeform 声明一并交给改名器：沙箱前缀剥完之后的那趟 nested-helper 归一
+  // （tools=exec_command -> exec）需要和第一步同样的输入，否则两步又会各自拿到不同的目录视图，
+  // 于是同一个畸形名在「裸写」与「带前缀」两种拼法上得到两个答案——正是本次 502 的成因。
+  const effective = repairEmittedToolName(normalized, declared, undefined, options.bareCustomToolNames);
 
   const report = (decision: EmittedCallDecision): void => {
     options.onDecision?.({ emitted, effective, decision });
