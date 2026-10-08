@@ -10,10 +10,6 @@ on:
 permissions:
   contents: write
   issues: write
-  # upstream 合并会带 .github/workflows/* 的改动（如 ci.yml），没有该权限时
-  # GITHUB_TOKEN 推送会被拒：refusing to allow a GitHub App to create or
-  # update workflow without `workflows` permission。
-  workflows: write
 
 concurrency:
   group: fork-sync-upstream
@@ -116,4 +112,16 @@ jobs:
 
       - name: Push merged branch
         if: steps.merge.outputs.MERGED == 1
-        run: git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+        # upstream 合并常携带 .github/workflows/* 的改动；GITHUB_TOKEN 推送含
+        # workflow 文件的提交会被仓库硬性拒绝（GitHub App 无 workflows OAuth scope）。
+        # 配置仓库 secret FORK_SYNC_TOKEN（fine-grained PAT：该仓库 Contents=RW +
+        # Workflows=RW）后由它推送；未配置时回退 GITHUB_TOKEN（只在不触碰
+        # workflow 文件的合并里可用）。
+        env:
+          SYNC_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          if [ -n "${SYNC_TOKEN:-}" ]; then
+            git push "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$SYNC_BRANCH"
+          else
+            git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+          fi
