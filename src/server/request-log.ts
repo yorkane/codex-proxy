@@ -1497,6 +1497,9 @@ export function addFinalRequestLog(
     ...(attempt.droppedEmits?.length
       ? { droppedEmits: attempt.droppedEmits.map(row => ({ ...row })) }
       : {}),
+    ...(attempt.toolNameRewrites?.length
+      ? { toolNameRewrites: attempt.toolNameRewrites.map(row => ({ ...row })) }
+      : {}),
   }));
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
   const aggregate = isCombo ? aggregateAttemptUsage(attempts ?? []) : null;
@@ -1790,6 +1793,9 @@ export function noteProviderAttemptSend(
       ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
       ...(attempt.droppedEmits?.length
         ? { droppedEmits: attempt.droppedEmits.map(row => ({ ...row })) }
+        : {}),
+      ...(attempt.toolNameRewrites?.length
+        ? { toolNameRewrites: attempt.toolNameRewrites.map(row => ({ ...row })) }
         : {}),
       ...(attempt.tierOutcome ? { tierOutcome: { ...attempt.tierOutcome } } : {}) };
     const attempts = logCtx.attempts ??= [attempt];

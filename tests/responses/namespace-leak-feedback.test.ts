@@ -70,6 +70,9 @@ function bridgeOptions(cfg: Cfg) {
     ...(cfg.feedback === undefined ? {} : { undeclaredToolFeedback: cfg.feedback }),
     ...(cfg.enforce === undefined ? {} : { enforceDeclaredToolNames: cfg.enforce }),
     freeformToolNames: cfg.freeform ?? FREEFORM,
+    // 发射名改写门控：本文件锁的是三方/shadow 流量的救回语义（容器丢弃并继续、前缀名 fail closed
+    // 都是 phase-1 干预），显式开启；官方端点缺省语义由 tool-name-repair-official-gate.test.ts 锁。
+    servingRouteIsThirdParty: true,
   };
 }
 
@@ -211,7 +214,7 @@ describe("existing allowlist behaviour is unchanged", () => {
   // must fail closed instead of relaying into the client's `unsupported call` that ends the turn.
   test("no catalog still drops a sandbox-namespace-qualified name", () => {
     for (const name of ["tools.apply_patch", "tools__apply_patch", "tools/apply_patch", "tools=apply_patch", "tools__view_image", "tools.exec_command"]) {
-      expect(resolveEmittedCall(name)).toEqual({ kind: "drop", name });
+      expect(resolveEmittedCall(name, { servingRouteIsThirdParty: true })).toEqual({ kind: "drop", name });
     }
     // The tolerance for provider echoes (#4735) is untouched: a bare or wire name still relays.
     expect(resolveEmittedCall("web_search")).toEqual({ kind: "allow", name: "web_search", repaired: false });

@@ -24,6 +24,8 @@ describe('resolveEmittedCall layer order', () => {
       declaredToolNames: collab,
       freeformToolNames: freeform,
       phantomNames: new Set(['spawn_agent', 'collaboration__spawn_agent']),
+      // 三方作用域：改名只发生在三方路由（本文件锁的是 repair 层本身）。
+      servingRouteIsThirdParty: true,
     });
     expect(v).toEqual({ kind: 'allow', name: 'collaboration__spawn_agent', repaired: true });
   });
@@ -35,12 +37,13 @@ describe('resolveEmittedCall layer order', () => {
         declaredToolNames: new Set(['exec', 'web__run']),
         freeformToolNames: freeform,
         phantomNames: new Set([helper]),
+        servingRouteIsThirdParty: true,
       })).toEqual({ kind: 'allow', name: 'exec', repaired: true });
     }
   });
 
   test('sandbox-prefixed composition is repaired to the declared tool', () => {
-    const v = resolveEmittedCall('tools__web_run', { declaredToolNames: collab });
+    const v = resolveEmittedCall('tools__web_run', { declaredToolNames: collab, servingRouteIsThirdParty: true });
     expect(v).toEqual({ kind: 'allow', name: 'web__run', repaired: true });
   });
 
@@ -96,6 +99,7 @@ describe('resolveEmittedCall observability', () => {
       freeformToolNames: freeform,
       phantomNames: new Set(['tools', 'web_search']),
       onDecision: (info) => seen.push(info.decision),
+      servingRouteIsThirdParty: true,
       ...opts,
     });
     track('exec');

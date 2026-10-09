@@ -232,3 +232,24 @@ export function noteDroppedEmitSafely(
     decision: info.decision,
   });
 }
+
+/**
+ * Record one emitted call the guard RENAMED before the relay, with both names reduced to
+ * log-safe metadata.
+ *
+ * 与 noteDroppedEmitSafely 完全同规格：两个名字都是模型选的（caller-controlled text），
+ * 落 durable 行之前过一遍 sanitizeLogMetadataString；清洗在这里做而不是在 bridge 的每个
+ * 改写点做，是为了让忘记清洗的站点不会把模型原文（可能是伪装成 token 的密钥）直接写进
+ * usage.jsonl。清洗成空的名字仍以固定标记记录 —— 改写确实发生了，空串会被 durable
+ * normalizer 拒绝并连累整个列表。
+ */
+export function noteToolNameRewriteSafely(
+  recorder: AttemptDeliveryRecorder | undefined,
+  info: { emitted: string; effective: string },
+): void {
+  if (!recorder) return;
+  recorder.noteToolNameRewrite({
+    emitted: sanitizeLogMetadataString(info.emitted) ?? "unnamed",
+    effective: sanitizeLogMetadataString(info.effective) ?? "unnamed",
+  });
+}

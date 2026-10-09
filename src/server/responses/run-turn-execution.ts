@@ -31,7 +31,7 @@ import { OAuthAccountPausedError, publicOAuthAuthenticationErrorMessage, type OA
 import { tryAlternateAfterTerminalRefresh } from "../../oauth/kiro-terminal-failover";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { formatErrorResponse, bridgeToResponsesSSE, buildResponseJSON } from "../../bridge";
-import { shadowPhantomScope } from "./shadow-call-route";
+import { shadowPhantomScope, thirdPartyEmissionRepair } from "./shadow-call-route";
 
 import { redactSecretString } from "../../lib/redact";
 import { adapterFailureFromEvent } from "../../bridge/internal";
@@ -640,6 +640,23 @@ export async function executeResponsesRunTurn(
     // Fork: shadow-scoped phantom tolerance + per-request directive-correction
     // budget (see shadow-call-route.ts); empty scope leaves every path byte-identical.
     const shadowScope = shadowPhantomScope(parsed, config);
+    // Fork: 发射名改写门控 —— 只有三方路由（含 shadow 替换官方名的那一族）才允许 guard 改名；
+    // OpenAI 运营的官方 Responses 端点恢复纯上游语义（见 shadow-call-route.ts 的谓词注释）。
+    // route 是请求级的：oauth 账号轮换只换凭证/adapter，从不改 route.provider，因此这里算一次
+    // 即与每次尝试的真实出口一致。
+    const emissionRepairThirdParty = thirdPartyEmissionRepair(parsed, route);
+    // 进程日志去重：同一请求里同一 (原始名 -> 改后名) 只 warn 一行，模型在循环里能连发几百次。
+    const rewriteLogSeen = new Set<string>();
+    const noteToolNameRewriteLog = (info: { emitted: string; effective: string }): void => {
+      const key = info.emitted + "\u0000" + info.effective;
+      if (rewriteLogSeen.has(key)) return;
+      rewriteLogSeen.add(key);
+      console.warn(
+        "[tool-name-rewrite] provider=" + route.providerName
+        + " model=" + (parsed._responseModelId ?? parsed.modelId)
+        + " emitted=" + info.emitted + " effective=" + info.effective,
+      );
+    };
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames } = toolBridgeMaps;
     const enforceDeclaredToolNames = inboundWire !== "chat" && inboundWire !== "anthropic";
     const classifyUndeclaredFirstTool = (
@@ -651,12 +668,12 @@ export async function executeResponsesRunTurn(
       // 这条预检是全仓库第三个「这个发射名算不算未声明」判定器，原本只 normalize 不 repair，
       // 于是在 combo 尝试里抢在桥接改名之前把同一个畸形名 502 掉，把修复整个绕过。三套解析器
       // 对同一输入必须同答案：这里补上改名器这一层（保持原有 502 结构与文案不变）。
-      const effectiveName = repairEmittedToolName(
-        normalizeDeclaredToolName(event.name, declaredToolNames, undefined, bareCustomToolNames),
-        declaredToolNames,
-        undefined,
-        bareCustomToolNames,
-      );
+      // 发射名改写门控：官方端点（gate=false）不走改名器，只 normalize —— 预检与桥接的裁决
+      // 仍然同答案（两边此时都只是 normalize），该 502 就 502。
+      const normalized = normalizeDeclaredToolName(event.name, declaredToolNames, undefined, bareCustomToolNames);
+      const effectiveName = emissionRepairThirdParty
+        ? repairEmittedToolName(normalized, declaredToolNames, undefined, bareCustomToolNames)
+        : normalized;
       if (declaredToolNames.has(effectiveName)) return undefined;
       return {
         type: "error",
@@ -788,6 +805,9 @@ export async function executeResponsesRunTurn(
           undeclaredToolFeedback: shadowScope.undeclaredToolFeedbackBudget,
           bareCustomToolNames,
           enforceDeclaredToolNames,
+          // Fork: 发射名改写门控 + 改写日志（见上方 emissionRepairThirdParty）。
+          servingRouteIsThirdParty: emissionRepairThirdParty,
+          onToolNameRewrite: noteToolNameRewriteLog,
           toolParameterSchemas,
           ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
           ...(routedCompaction ? { compaction: true } : {}),
@@ -939,6 +959,9 @@ export async function executeResponsesRunTurn(
         declaredToolNames,
         undeclaredToolPhantomNames: shadowScope.undeclaredPhantomNames,
         undeclaredToolFeedback: shadowScope.undeclaredToolFeedbackBudget,
+        // Fork: 发射名改写门控 + 改写日志（流式孪生同一对参数）。
+        servingRouteIsThirdParty: emissionRepairThirdParty,
+        onToolNameRewrite: noteToolNameRewriteLog,
         enforceDeclaredToolNames,
         toolParameterSchemas,
         freeformToolNames,

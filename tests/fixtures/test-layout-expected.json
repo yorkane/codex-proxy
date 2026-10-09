@@ -1142,6 +1142,7 @@
   "emitted-call-shape-repair.test.ts": "responses",
   "code-mode-helper-prefix-repair.test.ts": "responses",
   "code-mode-sandbox-prefix-production.test.ts": "responses",
+  "tool-name-repair-official-gate.test.ts": "responses",
   "exec-envelope-repair.test.ts": "responses",
   "undeclared-tool-phantom-allowlist.test.ts": "responses",
   "namespace-leak-feedback.test.ts": "responses",

@@ -58,7 +58,8 @@ async function* turn(name: string, args: string): AsyncGenerator<AdapterEvent> {
 
 async function viaSse(emitted: string, args: string): Promise<string> {
   return drain(bridgeToResponsesSSE(turn(emitted, args), "llm-248/x", undefined, new Set(["exec"]),
-    undefined, undefined, 50_000, { declaredToolNames: CODE_MODE_CATALOG }));
+    // 发射名改写门控：本文件锁的是三方流量（241.t 现网 llm-248 直连）的救回语义，显式开启。
+    undefined, undefined, 50_000, { declaredToolNames: CODE_MODE_CATALOG, servingRouteIsThirdParty: true }));
 }
 
 async function viaBatch(emitted: string, args: string): Promise<string> {
@@ -66,6 +67,7 @@ async function viaBatch(emitted: string, args: string): Promise<string> {
   for await (const e of turn(emitted, args)) events.push(e);
   return JSON.stringify(buildResponseJSON(events, "llm-248/x", {
     declaredToolNames: CODE_MODE_CATALOG,
+    servingRouteIsThirdParty: true,
     freeformToolNames: new Set(["exec"]),
     bareCustomToolNames: new Set(["exec"]),
   } as never));
@@ -80,6 +82,7 @@ describe("code-mode 沙箱前缀 helper 名不再整轮 502（241.t 现场形态
           enforceDeclaredToolNames: true,
           freeformToolNames: new Set(["exec"]),
           bareCustomToolNames: new Set(["exec"]),
+          servingRouteIsThirdParty: true,
         });
         expect(verdict.kind).toBe("allow");
         if (verdict.kind !== "allow") continue;
@@ -136,6 +139,7 @@ describe("code-mode 沙箱前缀 helper 名不再整轮 502（241.t 现场形态
       enforceDeclaredToolNames: true,
       freeformToolNames: new Set(["exec"]),
       bareCustomToolNames: new Set(["exec"]),
+      servingRouteIsThirdParty: true,
     });
     expect(verdict.kind).toBe("allow");
     if (verdict.kind === "allow") expect(verdict.name).toBe("exec");
@@ -150,6 +154,7 @@ describe("code-mode 沙箱前缀 helper 名不再整轮 502（241.t 现场形态
         enforceDeclaredToolNames: true,
         freeformToolNames: new Set(["exec"]),
         bareCustomToolNames: new Set(["exec"]),
+        servingRouteIsThirdParty: true,
       });
       expect(verdict.kind).toBe("allow");
       if (verdict.kind === "allow") expect(verdict.name).toBe("exec");

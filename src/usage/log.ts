@@ -14,6 +14,7 @@ import {
 import {
   normalizeAttemptDeliverySummary,
   normalizeAttemptDroppedEmits,
+  normalizeAttemptToolNameRewrites,
 } from "./attempt-delivery";
 import {
   isRequestCloseReason,
@@ -35,6 +36,7 @@ import {
   REQUEST_TRANSPORT_PHASES,
   DROPPED_EMIT_DECISION_ROSTER,
   type AttemptDroppedEmit,
+  type AttemptToolNameRewrite,
   type DroppedEmitDecision,
   type AttemptRecoveryKind,
   type AttemptRecoveryWithheld,
@@ -211,6 +213,14 @@ export interface PersistedUsageAttempt {
    * when a session stops without an error the client can render.
    */
   droppedEmits?: AttemptDroppedEmit[];
+  /**
+   * 本尝试在转发前被代理改写出发名的调用（shape repair 后仍以已声明名中继），按
+   * (原始名, 改后名) 折叠计数。普通尝试没有这个字段，旧行形状不变。
+   *
+   * 这个字段回答的是「客户端收到的这个名字是模型写的还是代理改的」——官方端点的流量在
+   * 发射名改写门控下永不改写，行里出现它即为三方（或 shadow）流量。
+   */
+  toolNameRewrites?: AttemptToolNameRewrite[];
   /**
    * How many tool-call argument payloads this attempt repaired before relay - quoted numbers the
    * declared schema wanted as integers, and the exec_command `command` alias. Each of these would
@@ -751,6 +761,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
   const droppedEmits = "droppedEmits" in attempt
     ? normalizeAttemptDroppedEmits(attempt.droppedEmits)
     : undefined;
+  const toolNameRewrites = "toolNameRewrites" in attempt
+    ? normalizeAttemptToolNameRewrites(attempt.toolNameRewrites)
+    : undefined;
   const recoveryKinds = Array.isArray(attempt.recoveryKinds)
     ? [...new Set(attempt.recoveryKinds.filter(
       (value): value is AttemptRecoveryKind => typeof value === "string"
@@ -783,6 +796,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
     ...(droppedEmits ? { droppedEmits } : {}),
+    ...(toolNameRewrites ? { toolNameRewrites } : {}),
     // A count, not a roster: no label, no i18n, and absent unless something was actually repaired.
     ...(isNonNegativeFiniteNumber(attempt.argRepairs) && attempt.argRepairs > 0
       ? { argRepairs: attempt.argRepairs }

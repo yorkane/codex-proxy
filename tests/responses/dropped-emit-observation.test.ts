@@ -88,6 +88,10 @@ function guardOptions(cfg: Cfg, budget: object) {
     ...(cfg.phantom === undefined ? {} : { undeclaredToolPhantomNames: cfg.phantom }),
     ...(cfg.enforce === undefined ? {} : { enforceDeclaredToolNames: cfg.enforce }),
     freeformToolNames: cfg.freeform ?? FREEFORM,
+    // 发射名改写门控：本文件锁的 phantom/改名观测都发生在 shadow（三方）作用域 ——
+    // phantom 允许列表本来就只在 gate=true 时被构造出来，缺省官方语义下这些名字会
+    // 直接 fail closed 而不是改名/丢弃，整组遥测断言就失去被测对象。
+    servingRouteIsThirdParty: true,
     translatorBudget: budget,
   } as never;
 }

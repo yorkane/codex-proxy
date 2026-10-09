@@ -37,7 +37,8 @@ async function* turn(name: string, args: string): AsyncGenerator<AdapterEvent> {
 // Streaming takes the freeform vocabulary positionally; batch takes it in options.
 async function viaSse(emitted: string, args: string, code: Set<string>) {
   const stream = bridgeToResponsesSSE(turn(emitted, args), "llm-248/x", undefined, code,
-    undefined, undefined, 50_000, { declaredToolNames: code });
+    // 发射名改写门控：本文件锁的是三方流量（llm-248 直连）的救回语义，显式开启。
+    undefined, undefined, 50_000, { declaredToolNames: code, servingRouteIsThirdParty: true });
   const raw = await new Response(stream).text();
   const items: Array<Record<string, unknown>> = [];
   for (const block of raw.split("\n\n")) {
@@ -54,7 +55,7 @@ async function viaBatch(emitted: string, args: string, code: Set<string>) {
   const events: AdapterEvent[] = [];
   for await (const e of turn(emitted, args)) events.push(e);
   return buildResponseJSON(events, "llm-248/x",
-    { declaredToolNames: code, freeformToolNames: code });
+    { declaredToolNames: code, freeformToolNames: code, servingRouteIsThirdParty: true });
 }
 
 const CODE_MODE = new Set(["exec"]);
@@ -160,13 +161,12 @@ describe("unaffected paths stay byte-identical", () => {
     const events: AdapterEvent[] = [];
     for await (const e of turn("web_search", args)) events.push(e);
     const batch = buildResponseJSON(events, "llm-248/x",
-      { declaredToolNames: declared, freeformToolNames: freeform });
+      { declaredToolNames: declared, freeformToolNames: freeform, servingRouteIsThirdParty: true });
     expect(batch.output[0]).toMatchObject({ type: "function_call", name: "web_search", arguments: args });
     const stream = bridgeToResponsesSSE(turn("tools=web_search", args), "llm-248/x", undefined,
-      freeform, undefined, undefined, 50_000, { declaredToolNames: declared });
+      freeform, undefined, undefined, 50_000, { declaredToolNames: declared, servingRouteIsThirdParty: true });
     const raw = await new Response(stream).text();
     expect(raw).not.toContain("undeclared client tool");
     expect(raw).toContain('"name":"web_search"');
   });
 });
-

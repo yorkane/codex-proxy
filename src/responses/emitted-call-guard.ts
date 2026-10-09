@@ -136,6 +136,16 @@ export interface EmittedCallGuardOptions {
    * (allowlisted -> silent drop, everything else -> fail closed).
    */
   undeclaredFeedback?: { remaining: number };
+  /**
+   * 发射名改写门控：本次请求的 serving route 是否为三方（见
+   * src/server/responses/shadow-call-route.ts 的 thirdPartyEmissionRepair）。
+   *
+   * 缺省视为 false（官方安全向）：不传这个字段的调用方拿到纯上游语义 —— 有 catalog 时跳过
+   * repairEmittedToolName（只用 normalizeDeclaredToolName 的结果），无 catalog 时跳过
+   * 9ecf76f44 加的 isSandboxNamespacePrefixedName 失败档、照常中继。true（三方 / shadow
+   * 流量）时行为与本文件当前实现逐字节一致。
+   */
+  servingRouteIsThirdParty?: boolean;
   /** Observability hook. Never affects the verdict. */
   onDecision?: (info: { emitted: string; effective: string; decision: EmittedCallDecision }) => void;
 }
@@ -172,7 +182,10 @@ export function resolveEmittedCall(
     // every bit as uncallable as the container itself, because `tools` is the exec sandbox
     // namespace and no declared wire tool is ever spelled that way. Without a catalog we cannot
     // resolve it to a declared name, so fail it closed instead of relaying the mangled form.
-    if (isSandboxNamespacePrefixedName(emitted)) {
+    //
+    // 这一档（9ecf76f44）是本会话 phase-1 的干预点：gate=false（官方端点、未被 shadow 替换）时
+    // 跳过，恢复它之前的上游行为 —— 前缀名照常中继。容器名那一档是上游就有的，不接 gate。
+    if (options.servingRouteIsThirdParty === true && isSandboxNamespacePrefixedName(emitted)) {
       options.onDecision?.({ emitted, effective: emitted, decision: "namespace-leak" });
       return { kind: "drop", name: emitted };
     }
@@ -183,7 +196,13 @@ export function resolveEmittedCall(
   // 把 code-mode 的 freeform 声明一并交给改名器：沙箱前缀剥完之后的那趟 nested-helper 归一
   // （tools=exec_command -> exec）需要和第一步同样的输入，否则两步又会各自拿到不同的目录视图，
   // 于是同一个畸形名在「裸写」与「带前缀」两种拼法上得到两个答案——正是本次 502 的成因。
-  const effective = repairEmittedToolName(normalized, declared, undefined, options.bareCustomToolNames);
+  //
+  // 发射名改写门控：gate=false（官方端点、未被 shadow 替换）时整趟改名器都不走，只用
+  // normalizeDeclaredToolName 的结果 —— 那是官方流量的上游语义（该 502 就 502、该中继就中继）。
+  // 三方 / shadow 流量（gate=true）与现在完全一致。
+  const effective = options.servingRouteIsThirdParty === true
+    ? repairEmittedToolName(normalized, declared, undefined, options.bareCustomToolNames)
+    : normalized;
 
   const report = (decision: EmittedCallDecision): void => {
     options.onDecision?.({ emitted, effective, decision });

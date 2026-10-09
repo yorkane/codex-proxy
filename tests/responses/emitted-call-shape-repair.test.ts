@@ -72,7 +72,8 @@ describe('sandbox-namespace composition repair', () => {
 
 describe('bridge call-shape repair', () => {
   test('a bare sub-agent call reaches the client under its declared name', async () => {
-    const sse = await drain(bridgeToResponsesSSE(callTurn('spawn_agent'), 'llm-248/x', undefined, undefined, undefined, undefined, 50_000, { declaredToolNames: collabDeclared }));
+    // 发射名改写门控：这三条锁的是三方路由的改名中继（llm-248 直连），显式开启。
+    const sse = await drain(bridgeToResponsesSSE(callTurn('spawn_agent'), 'llm-248/x', undefined, undefined, undefined, undefined, 50_000, { declaredToolNames: collabDeclared, servingRouteIsThirdParty: true }));
     expect(sse).not.toContain('undeclared client tool');
     expect(sse).toContain('response.completed');
     expect(sse).toContain('spawn_agent');
@@ -84,7 +85,7 @@ describe('bridge call-shape repair', () => {
   test('batch path repairs the same shape', async () => {
     const events: AdapterEvent[] = [];
     for await (const e of callTurn('collaboration.spawn_agent')) events.push(e);
-    const built = buildResponseJSON(events, 'llm-248/x', { declaredToolNames: collabDeclared });
+    const built = buildResponseJSON(events, 'llm-248/x', { declaredToolNames: collabDeclared, servingRouteIsThirdParty: true });
     expect(JSON.stringify(built)).toContain('spawn_agent');
     expect(JSON.stringify(built)).not.toContain('undeclared client tool');
   });

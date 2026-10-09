@@ -11,7 +11,7 @@ export interface NativeResponseControl {
   relayActive: boolean;
   normalizeContinuation?: (frame: Record<string, unknown>) => Record<string, unknown>;
   replayFactory?: () => NativeSteeringReplayObserver;
-  configureToolAuthorization?: (active: boolean, names: ReadonlySet<string>, bareNames: ReadonlySet<string>, namelessCallTypes: ReadonlySet<string>, providerExecuted: ReadonlySet<ProviderExecutedCallType>) => void;
+  configureToolAuthorization?: (active: boolean, names: ReadonlySet<string>, bareNames: ReadonlySet<string>, namelessCallTypes: ReadonlySet<string>, providerExecuted: ReadonlySet<ProviderExecutedCallType>, allowEmissionRepair?: boolean) => void;
   readonly attached: boolean;
   readonly ended: boolean;
   attach(send: (frame: Record<string, unknown>) => void, fail: (error: Error) => void): () => void;

@@ -29,7 +29,7 @@ import {
   undeclaredToolCallNameInResponse,
   normalizeDefaultNamespaceInResponse,
 } from "../responses-undeclared-tool-guard";
-import { shadowPhantomScope } from "./shadow-call-route";
+import { shadowPhantomScope, thirdPartyEmissionRepair } from "./shadow-call-route";
 import { collectSelfNamedNamespaceScrubAuthorization } from "../responses-self-named-namespace-scrub";
 import type { ProviderExecutedCallType } from "../responses-undeclared-tool-guard";
 import {
@@ -243,6 +243,9 @@ export async function preparePassthroughExchange(
   // replacement-model replay is recorded as seen instead of latching the guard.
   // (The passthrough guard cannot inject feedback; budget stays bridge-only.)
   const shadowScope = shadowPhantomScope(parsed, config);
+  // Fork: 发射名改写门控 —— 与 deliverPassthroughResponse 里的同名判定同源（同一 route、
+  // 同一谓词），inspection 与 relay 必须对同一个发射名给同一个答案（见 shadow-call-route.ts）。
+  const emissionRepairThirdParty = thirdPartyEmissionRepair(parsed, route);
   const {
     passiveQuotaWriterGeneration,
     oauthDispatch,
@@ -526,6 +529,9 @@ export async function preparePassthroughExchange(
         declaredBareWireToolNames,
         declaredNamelessClientCallTypes,
         providerExecutedCallTypes,
+        // native 注入通道是官方 Codex 的 native 路径：把同一个门控带进它的授权检查，
+        // shadow 替换过的请求（gate=true）才会走改名器，官方请求只 normalize。
+        emissionRepairThirdParty,
       );
     };
     refreshUndeclaredToolGuard(request);
@@ -591,6 +597,7 @@ export async function preparePassthroughExchange(
         declaredBareWireToolNames,
         recoverableBareCustomWireToolNames,
         shadowScope.undeclaredPhantomNames,
+        emissionRepairThirdParty,
       ) !== undefined) {
         inspectionSawUndeclaredTool = true;
       }
@@ -638,6 +645,7 @@ export async function preparePassthroughExchange(
           declaredBareWireToolNames,
           recoverableBareCustomWireToolNames,
           shadowScope.undeclaredPhantomNames,
+          emissionRepairThirdParty,
         ) !== undefined
       ) {
         return;
@@ -647,6 +655,7 @@ export async function preparePassthroughExchange(
             replayResponse,
             declaredWireToolNames,
             declaredBareWireToolNames,
+            emissionRepairThirdParty,
           ).value
         : replayResponse) as typeof replayResponse;
       rememberPassthroughResponse?.(normalizedReplayResponse);

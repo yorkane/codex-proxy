@@ -109,7 +109,7 @@ import {
   normalizeDefaultNamespaceInJson,
   stripDroppableToolCallsInJsonString,
 } from "../responses-undeclared-tool-guard";
-import { shadowPhantomScope } from "./shadow-call-route";
+import { shadowPhantomScope, thirdPartyEmissionRepair } from "./shadow-call-route";
 import { isWin32EagerRewrite, selectEagerPath } from "../../lib/bun-stream-caps";
 
 /**
@@ -432,6 +432,10 @@ export async function deliverPassthroughResponse(
   const { parsed, route, subagentQuotaFailureModel, clientRequestedStream, translatorBudget } = requestState;
   // Fork: shadow-scoped phantom tolerance for the passthrough relay (see shadow-call-route.ts).
   const shadowScope = shadowPhantomScope(parsed, config);
+  // Fork: 发射名改写门控 —— 授权/发射/快照三处共用同一个判定（见 shadow-call-route.ts）。
+  // phantom 只在 shadow 作用域出现、此时 gate 恒 true；官方端点缺省 false 时整条 guard
+  // 退回纯 normalize 语义（95f462434 之前），与桥接侧的官方门控同答案。
+  const emissionRepairThirdParty = thirdPartyEmissionRepair(parsed, route);
   const { openAiSidecar } = sidecarState;
   const { requestBindings } = transportState;
 
@@ -837,6 +841,7 @@ export async function deliverPassthroughResponse(
             declaredBareWireToolNames,
             recoverableBareCustomWireToolNames,
             shadowScope.undeclaredPhantomNames,
+            emissionRepairThirdParty,
           )
           : undefined,
         grokUpstreamEchoEnabled
@@ -1293,6 +1298,7 @@ export async function deliverPassthroughResponse(
           declaredWireToolNames,
           shadowScope.undeclaredPhantomNames,
           declaredBareWireToolNames,
+          emissionRepairThirdParty,
         );
       })();
       if (plaintextV2RestoreFailed) {
@@ -1316,6 +1322,7 @@ export async function deliverPassthroughResponse(
               declaredBareWireToolNames,
               recoverableBareCustomWireToolNames,
               shadowScope.undeclaredPhantomNames,
+              emissionRepairThirdParty,
             );
           } catch {
             return undefined;
@@ -1328,6 +1335,7 @@ export async function deliverPassthroughResponse(
           clientJson,
           declaredWireToolNames,
           declaredBareWireToolNames,
+          emissionRepairThirdParty,
         );
       }
       commitReasoningReplayServingRoute(nativeExchange.request.headers);

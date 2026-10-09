@@ -56,6 +56,9 @@ export class NativeInjectionChannel implements NativeResponseControl {
   private declaredBareToolNames: ReadonlySet<string> = new Set();
   private declaredNamelessCallTypes: ReadonlySet<string> = new Set();
   private providerExecutedCallTypes: ReadonlySet<ProviderExecutedCallType> = new Set();
+  // 发射名改写门控：由 dispatch 按 thirdPartyEmissionRepair(parsed, route) 传入。
+  // 缺省 false —— 官方 native 路径的授权检查只 normalize，不改名。
+  private allowEmissionRepair = false;
   private readonly lane: unknown;
 
   /** Pin the original settings and lane; construction never opens a connection. */
@@ -78,11 +81,12 @@ export class NativeInjectionChannel implements NativeResponseControl {
   get ended(): boolean { return this.finished; }
 
   /** Mirror the ordinary response guard for native events that bypass its SSE rewrite. */
-  configureToolAuthorization(active: boolean, names: ReadonlySet<string>, bareNames: ReadonlySet<string>, namelessCallTypes: ReadonlySet<string>, providerExecuted: ReadonlySet<ProviderExecutedCallType>): void {
+  configureToolAuthorization(active: boolean, names: ReadonlySet<string>, bareNames: ReadonlySet<string>, namelessCallTypes: ReadonlySet<string>, providerExecuted: ReadonlySet<ProviderExecutedCallType>, allowEmissionRepair?: boolean): void {
     this.declaredToolNames = active ? new Set(names) : undefined;
     this.declaredBareToolNames = active ? new Set(bareNames) : new Set();
     this.declaredNamelessCallTypes = active ? new Set(namelessCallTypes) : new Set();
     this.providerExecutedCallTypes = active ? new Set(providerExecuted) : new Set();
+    this.allowEmissionRepair = active && allowEmissionRepair === true;
   }
 
   /** Attach once, after routing/auth/admission, retaining no global response-ID lookup. */
@@ -117,7 +121,7 @@ export class NativeInjectionChannel implements NativeResponseControl {
     if (!this.declaredToolNames) return;
     const undeclared = undeclaredToolCallNameInResponse(
       { output: [item] }, this.declaredToolNames, this.declaredNamelessCallTypes,
-      this.providerExecutedCallTypes, this.declaredBareToolNames,
+      this.providerExecutedCallTypes, this.declaredBareToolNames, undefined, undefined, this.allowEmissionRepair,
     );
     if (undeclared !== undefined) {
       injectionError(UNDECLARED_TOOL_CALL_ERROR_CODE, undeclaredToolCallMessage(undeclared));

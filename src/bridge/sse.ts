@@ -59,7 +59,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
+import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, noteToolNameRewriteSafely, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 
 function sseEvent(name: string, data: Record<string, unknown>): string {
@@ -147,6 +147,19 @@ export function bridgeToResponsesSSE(
     undeclaredToolFeedback?: { remaining: number };
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
+    /**
+     * 发射名改写门控：本次请求由三方路由（含 shadow 替换官方名的那一族）服务时为 true，
+     * 由 run-turn-execution / passthrough 按 thirdPartyEmissionRepair(parsed, route) 计算后传入。
+     * 缺省 false（官方安全向）：bridge 走纯上游语义 —— 不改写发射名，容器名在强制模式下也 502。
+     * 判定实现见 src/server/responses/shadow-call-route.ts。
+     */
+    servingRouteIsThirdParty?: boolean;
+    /**
+     * 改写日志回调：guard 把发射名改成另一个已声明名并中继时调用一次。与 usage.jsonl 的
+     * toolNameRewrites 行同一决策点，由持有 provider/model 的调用方决定如何打进程日志。
+     * 只可能在三方流量上触发（gate=false 时 guard 根本不改名，verdict.repaired 恒 false）。
+     */
+    onToolNameRewrite?: (info: { emitted: string; effective: string }) => void;
     /**
      * Wire keep-alive shape. Codex-rs parses at the EVENT level (timeout(idle_timeout,
      * stream.next()) over an eventsource_stream), so an SSE comment line dispatches no event
@@ -1078,6 +1091,8 @@ export function bridgeToResponsesSSE(
                 phantomNames: options?.undeclaredToolPhantomNames,
                 undeclaredFeedback: options?.undeclaredToolFeedback,
                 bareCustomToolNames: options?.bareCustomToolNames,
+                // 门控透传：false/缺省时 guard 内部跳过整趟改名器（与官方端点的上游语义一致）。
+                servingRouteIsThirdParty: options?.servingRouteIsThirdParty === true,
               });
               if (verdict.kind === "drop") {
                 // A known phantom is dropped whole - no item is ever opened, so its
@@ -1104,8 +1119,14 @@ export function bridgeToResponsesSSE(
                 // 变成 unsupported call 结束回合 —— 所以它的正确处置是「丢弃并继续」，与允许列表里的
                 // phantom 同一档，而不是把回合打死。真实幻觉名（既非声明、也非容器）行为不变，照旧
                 // 走下面的 fail-closed。
-                if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
-                  || isDroppedNamespaceContainer(event.name, options?.declaredToolNames)) {
+                // 发射名改写门控：这段「容器名丢弃并继续」被 84377bdeb 从 enforce 分支之后上提到
+                // 之前，于是强制模式（responses 入站主力）也不再整轮 502 —— 那是 phase-1 干预，
+                // 只放行三方流量。官方端点（gate=false/缺省）精确恢复 phase-1 之前的位置语义：
+                // 强制模式下容器名落回下面的 fail-closed 502；#4735 延迟强制的线（enforce 关）
+                // 照旧丢弃并继续 —— 那一档是上游本来就有的。
+                if ((isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
+                  || isDroppedNamespaceContainer(event.name, options?.declaredToolNames))
+                  && (!enforceDeclared || options?.servingRouteIsThirdParty === true)) {
                   noteDroppedEmitSafely(delivery, {
                     emitted: event.name,
                     effective: verdict.name,
@@ -1160,6 +1181,11 @@ export function bridgeToResponsesSSE(
                 break;
               }
               const effectiveName = verdict.name;
+              if (verdict.kind === "allow" && verdict.repaired) {
+                // 三方流量且 guard 真的改了名：durable 行 + 进程日志各记一笔（调用方去重）。
+                noteToolNameRewriteSafely(delivery, { emitted: event.name, effective: verdict.name });
+                options?.onToolNameRewrite?.({ emitted: event.name, effective: verdict.name });
+              }
               const codeModeHelperName = effectiveName === "exec" && event.name !== effectiveName
                 ? normalizeCodeModeHelperName(event.name)
                 : undefined;

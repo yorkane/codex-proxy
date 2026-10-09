@@ -106,8 +106,13 @@ function resolveGuardedEmittedName(
   declared: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
+  // 发射名改写门控（thirdPartyEmissionRepair）：缺省 false = 官方端点语义 —— 整趟改名器不走，
+  // 只 normalize，恢复到 95f462434 之前；true（三方 / shadow 流量）与现实现逐字节一致。
+  // 授权侧与发射侧共用本函数，所以门控只在这里落地一次，所有上层入口透传同一个布尔。
+  allowEmissionRepair?: boolean,
 ): string {
   const normalized = normalizeDeclaredToolName(name, declared, declaredBare, declaredCustom);
+  if (allowEmissionRepair !== true) return normalized;
   const repaired = repairEmittedToolName(normalized, declared);
   if (repaired === normalized) return normalized;
   // 只放行「客户端真能用」的改名结果。repair 可以命中一个点号形式的别名（web.run 这种
@@ -442,6 +447,7 @@ function undeclaredNameInItem(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
   allowlist?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(item)) return undefined;
   if (typeof item.type !== "string") return undefined;
@@ -485,7 +491,8 @@ function undeclaredNameInItem(
   }
   // C1：与桥接侧读同一个解析器。normalize 之后再过一遍 repairEmittedToolName，沙箱前缀形状
   // 与 collaboration / functions 前缀形状才能在两条路径上得到同一个答案。
-  const effectiveName = resolveGuardedEmittedName(name, declared, declaredBare, declaredCustom);
+  // 发射名改写门控：缺省 false（官方端点）只 normalize，即 95f462434 之前的上游语义。
+  const effectiveName = resolveGuardedEmittedName(name, declared, declaredBare, declaredCustom, allowEmissionRepair);
   if (declared.has(effectiveName)) return undefined;
   return { name, droppable: droppableFor(effectiveName, name, allowlist) };
 }
@@ -526,18 +533,19 @@ export function undeclaredToolCallVerdict(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
   allowlist?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(payload)) return undefined;
   if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
-    return undeclaredNameInItem(payload.item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
+    return undeclaredNameInItem(payload.item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist, allowEmissionRepair);
   }
   if (payload.type === "response.function_call_arguments.done" && typeof payload.name === "string") {
     const fakeItem = { type: "function_call", name: payload.name, namespace: payload.namespace };
-    return undeclaredNameInItem(fakeItem, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
+    return undeclaredNameInItem(fakeItem, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist, allowEmissionRepair);
   }
   // Sparse gateways skip incremental items and only ever ship the terminal snapshot.
   if (payload.type === "response.completed" || payload.type === "response.incomplete") {
-    return undeclaredToolCallVerdictInResponse(payload.response, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
+    return undeclaredToolCallVerdictInResponse(payload.response, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist, allowEmissionRepair);
   }
   return undefined;
 }
@@ -550,10 +558,11 @@ function undeclaredToolCallVerdictInResponse(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
   allowlist?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): UndeclaredToolVerdict | undefined {
   if (!isPlainObject(response) || !Array.isArray(response.output)) return undefined;
   for (const item of response.output) {
-    const verdict = undeclaredNameInItem(item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist);
+    const verdict = undeclaredNameInItem(item, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, allowlist, allowEmissionRepair);
     if (verdict !== undefined) return verdict;
   }
   return undefined;
@@ -570,6 +579,7 @@ export function stripDroppableToolCallsInResponse(
   declared: ReadonlySet<string>,
   allowlist: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): { response: unknown; removed: string[] } {
   if (!allowlist || allowlist.size === 0) return { response, removed: [] };
   if (!isPlainObject(response) || !Array.isArray(response.output)) return { response, removed: [] };
@@ -590,7 +600,9 @@ export function stripDroppableToolCallsInResponse(
     }
     // 与授权侧共用同一条解析链：终态快照的剥离判定必须和逐条 verdict 同答案，否则同一个
     // 条目可能在增量事件里被放行、在 completed 快照里被当成 phantom 剥掉（或反之）。
-    const effectiveName = resolveGuardedEmittedName(name, declared, declaredBare);
+    // 发射名改写门控：调用方（passthrough）在其 shadow/三方作用域传 true；缺省 false 时
+    // 授权侧同样只 normalize，两侧仍然同答案。
+    const effectiveName = resolveGuardedEmittedName(name, declared, declaredBare, undefined, allowEmissionRepair);
     if (declared.has(effectiveName)) return true;
     if (allowlist.has(name) || allowlist.has(effectiveName)) {
       removed.push(name);
@@ -612,6 +624,7 @@ export function stripDroppableToolCallsInJsonString(
   declared: ReadonlySet<string>,
   allowlist: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): string {
   if (allowlist.size === 0) return json;
   let parsed: unknown;
@@ -620,7 +633,7 @@ export function stripDroppableToolCallsInJsonString(
   } catch {
     return json;
   }
-  const stripped = stripDroppableToolCallsInResponse(parsed, declared, allowlist, declaredBare);
+  const stripped = stripDroppableToolCallsInResponse(parsed, declared, allowlist, declaredBare, allowEmissionRepair);
   if (stripped.removed.length === 0) return json;
   return JSON.stringify(stripped.response);
 }
@@ -633,8 +646,9 @@ export function undeclaredToolCallName(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
   phantomAllowlist?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): string | undefined {
-  const verdict = undeclaredToolCallVerdict(payload, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, phantomAllowlist);
+  const verdict = undeclaredToolCallVerdict(payload, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, phantomAllowlist, allowEmissionRepair);
   return verdict !== undefined && !verdict.droppable ? verdict.name : undefined;
 }
 
@@ -657,6 +671,7 @@ export function undeclaredToolCallNameInResponse(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
   phantomAllowlist?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): string | undefined {
   const verdict = undeclaredToolCallVerdictInResponse(
     response,
@@ -666,6 +681,7 @@ export function undeclaredToolCallNameInResponse(
     declaredBare,
     declaredCustom,
     phantomAllowlist,
+    allowEmissionRepair,
   );
   return verdict !== undefined && !verdict.droppable ? verdict.name : undefined;
 }
@@ -696,6 +712,7 @@ export function normalizeDefaultNamespaceInItem(
   item: unknown,
   declared: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): { value: unknown; changed: boolean } {
   if (!isPlainObject(item)) return { value: item, changed: false };
   if (!CLIENT_EXECUTED_CALL_TYPES.has(item.type as string)) {
@@ -758,7 +775,9 @@ export function normalizeDefaultNamespaceInItem(
     // 失手（候选数不是 1）时 authorized 仍等于畸形输入，同样不会改写，也照样不会把名字
     // 改成第二个猜测。改写结果还必须是 schema-valid 的名字，宁可放行也不发送一个会被上游
     // 按 input[N].name 拒绝的形状。
-    const authorized = resolveGuardedEmittedName(name, declared, declaredBare);
+    // 发射名改写门控：改名只可能发生在三方流量（调用方显式传 true）；官方端点缺省 false 时
+    // authorized === normalize 的结果，合法声明的名字永远 authorized === name，改写分支自然不触发。
+    const authorized = resolveGuardedEmittedName(name, declared, declaredBare, undefined, allowEmissionRepair);
     if (
       authorized !== name
       && declared.has(authorized)
@@ -780,13 +799,14 @@ export function normalizeDefaultNamespaceInResponse(
   response: unknown,
   declared: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): { value: unknown; changed: boolean } {
   if (!isPlainObject(response) || !Array.isArray(response.output)) {
     return { value: response, changed: false };
   }
   let changed = false;
   const newOutput = response.output.map(item => {
-    const res = normalizeDefaultNamespaceInItem(item, declared, declaredBare);
+    const res = normalizeDefaultNamespaceInItem(item, declared, declaredBare, allowEmissionRepair);
     if (res.changed) changed = true;
     return res.value;
   });
@@ -806,16 +826,17 @@ export function normalizeDefaultNamespaceInPayload(
   payload: unknown,
   declared: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): { value: unknown; changed: boolean } {
   if (!isPlainObject(payload)) return { value: payload, changed: false };
   if (payload.type === "response.output_item.added" || payload.type === "response.output_item.done") {
-    const res = normalizeDefaultNamespaceInItem(payload.item, declared, declaredBare);
+    const res = normalizeDefaultNamespaceInItem(payload.item, declared, declaredBare, allowEmissionRepair);
     if (!res.changed) return { value: payload, changed: false };
     return { value: { ...payload, item: res.value }, changed: true };
   }
   if (payload.type === "response.function_call_arguments.done" && typeof payload.name === "string") {
     const fakeItem = { type: "function_call", name: payload.name, namespace: payload.namespace };
-    const res = normalizeDefaultNamespaceInItem(fakeItem, declared, declaredBare);
+    const res = normalizeDefaultNamespaceInItem(fakeItem, declared, declaredBare, allowEmissionRepair);
     if (res.changed) {
       const normalizedItem = res.value as Record<string, unknown>;
       const next: Record<string, unknown> = { ...payload, name: normalizedItem.name };
@@ -826,7 +847,7 @@ export function normalizeDefaultNamespaceInPayload(
     }
   }
   if (payload.type === "response.completed" || payload.type === "response.incomplete") {
-    const res = normalizeDefaultNamespaceInResponse(payload.response, declared, declaredBare);
+    const res = normalizeDefaultNamespaceInResponse(payload.response, declared, declaredBare, allowEmissionRepair);
     if (!res.changed) return { value: payload, changed: false };
     return { value: { ...payload, response: res.value }, changed: true };
   }
@@ -845,10 +866,11 @@ export function normalizeDefaultNamespaceInJson(
   jsonText: string,
   declared: ReadonlySet<string>,
   declaredBare?: ReadonlySet<string>,
+  allowEmissionRepair?: boolean,
 ): string {
   try {
     const parsed = JSON.parse(jsonText);
-    const normalized = normalizeDefaultNamespaceInResponse(parsed, declared, declaredBare);
+    const normalized = normalizeDefaultNamespaceInResponse(parsed, declared, declaredBare, allowEmissionRepair);
     return normalized.changed ? JSON.stringify(normalized.value) : jsonText;
   } catch {
     return jsonText;
@@ -896,6 +918,10 @@ export function createUndeclaredToolCallGuardBlockRewrite(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
   phantomAllowlist?: ReadonlySet<string>,
+  // 发射名改写门控：passthrough 的调用方按 thirdPartyEmissionRepair(parsed, route) 传值。
+  // 缺省 false —— phantom 本来就只在 shadow 作用域出现（此时 gate 恒 true），授权/发射/快照
+  // 三处必须同答案，所以整条 rewrite 共用这一个布尔。
+  allowEmissionRepair?: boolean,
 ): SseBlockRewrite {
   let tripped = false;
   const phantomActive = phantomAllowlist !== undefined && phantomAllowlist.size > 0;
@@ -921,13 +947,13 @@ export function createUndeclaredToolCallGuardBlockRewrite(
         // is the only place the phantom call surfaces. Strip every droppable item first;
         // any undeclared NON-droppable item the snapshot still carries below takes the
         // ordinary fail-closed path.
-        const stripped = stripDroppableToolCallsInResponse(parsed.response, declared, phantomAllowlist, declaredBare);
+        const stripped = stripDroppableToolCallsInResponse(parsed.response, declared, phantomAllowlist, declaredBare, allowEmissionRepair);
         if (stripped.removed.length > 0) {
           parsed = { ...parsed, response: stripped.response };
           block = replaceSseDataPayload(block, JSON.stringify(parsed));
         }
       } else {
-        const verdict = undeclaredToolCallVerdict(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, phantomAllowlist);
+        const verdict = undeclaredToolCallVerdict(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, phantomAllowlist, allowEmissionRepair);
         if (verdict !== undefined && verdict.droppable) {
           if (parsed.type === "response.output_item.added" && isPlainObject(parsed.item) && typeof parsed.item.id === "string") {
             droppedItemIds.add(parsed.item.id);
@@ -936,12 +962,12 @@ export function createUndeclaredToolCallGuardBlockRewrite(
         }
       }
     }
-    const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom);
+    const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, undefined, allowEmissionRepair);
     if (name !== undefined) {
       tripped = true;
       return failedBlocks(name, block.includes("\r\n") ? "\r\n" : "\n");
     }
-    const normalized = normalizeDefaultNamespaceInPayload(parsed, declared, declaredBare);
+    const normalized = normalizeDefaultNamespaceInPayload(parsed, declared, declaredBare, allowEmissionRepair);
     if (normalized.changed) {
       return [replaceSseDataPayload(block, JSON.stringify(normalized.value))];
     }

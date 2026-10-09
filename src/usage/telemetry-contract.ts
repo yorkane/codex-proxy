@@ -94,6 +94,25 @@ export const DROPPED_EMIT_DECISION_ROSTER = Object.freeze([
 
 export type DroppedEmitDecision = typeof DROPPED_EMIT_DECISION_ROSTER[number];
 
+/**
+ * One emitted tool call whose name the proxy REWROTE before relaying it.
+ *
+ * 与 droppedEmits 相对：那一族记录「调用消失了」，这一族记录「调用活着到达客户端，但名字是
+ * 代理改出来的」（shape repair：tools=exec_command -> exec 之类）。发射名改写门控把它严格
+ * 限定在三方流量上 —— 官方端点的请求不改写，也就永远不会有这种行。
+ *
+ * 两个名字都是模型选的，因此和所有模型来源字符串一样先过 sanitizeLogMetadataString 再落盘；
+ * 它不是闭集 roster，只进 durable 行，不当指标标签。
+ */
+export interface AttemptToolNameRewrite {
+  /** The name the model emitted, sanitised and capped. */
+  name: string;
+  /** The declared name the repair resolved it to; the name the client receives. */
+  effective: string;
+  /** Repeats of the same (name, effective) pair fold into one row. */
+  count: number;
+}
+
 /** One dropped emitted call: what the model asked for, what it resolved to, and how often. */
 export interface AttemptDroppedEmit {
   /** The name the model emitted, sanitised and capped. */

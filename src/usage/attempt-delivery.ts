@@ -12,6 +12,7 @@
 import type {
   AttemptDeliverySummary,
   AttemptDroppedEmit,
+  AttemptToolNameRewrite,
   DroppedEmitDecision,
 } from "./telemetry-contract";
 import { DROPPED_EMIT_DECISION_ROSTER } from "./telemetry-contract";
@@ -35,6 +36,11 @@ export interface AttemptDeliveryTarget {
    * rows keep their exact shape.
    */
   droppedEmits?: AttemptDroppedEmit[];
+  /**
+   * 本尝试在转发前被代理改写出发名的调用（shape repair 后仍以已声明名中继）。普通尝试没有
+   * 这个字段，旧行形状不变。只有三方流量（发射名改写门控放行 repair）才会出现改写行。
+   */
+  toolNameRewrites?: AttemptToolNameRewrite[];
 }
 
 export interface RelayedEventObservation {
@@ -55,6 +61,14 @@ export interface AttemptDeliveryRecorder {
    * and a silent removal on a deferred one, and the two must not be reported as the same event.
    */
   noteDroppedEmit(info: { emitted: string; effective: string; decision: DroppedEmitDecision }): void;
+  /**
+   * Record that the emitted-call guard RENAMED a call before relaying it (shape repair).
+   *
+   * 与 noteDroppedEmit 同一规格：折叠 (emitted, effective) 计数、行数有界、名字在调用方侧
+   * 已经 sanitize。由 bridge 的 onDecision("repaired") 回调驱动，而不是 guard 内部——guard
+   * 的 verdict 还要经过 bridge 的 toolNsMap 映射，改名事实属于那次转发决策。
+   */
+  noteToolNameRewrite(info: { emitted: string; effective: string }): void;
   /**
    * Record that schema-bound argument repairs fired on a relayed call (see tool-arg-repair).
    * Like noteDroppedEmit this is an attempt fact, not a delivery-summary fact: it must not
@@ -204,6 +218,20 @@ export function bindAttemptDeliveryRecorder(
       if (rows.length >= MAX_DROPPED_EMIT_ROWS) return;
       rows.push({ name: info.emitted, effective: info.effective, decision: info.decision, count: 1 });
     },
+    noteToolNameRewrite(info): void {
+      // 同 noteDroppedEmit：这是「尝试的事实」而不是 delivery summary 的事实，不能因为记了一
+      // 笔改名就给一个从未转发过帧的尝试凭空造出全零的 deliverySummary。折叠与上限同规格。
+      const attempt = attemptFor();
+      if (!attempt) return;
+      const rows = attempt.toolNameRewrites ??= [];
+      const existing = rows.find(row => row.name === info.emitted && row.effective === info.effective);
+      if (existing) {
+        existing.count = bump(existing.count, 1);
+        return;
+      }
+      if (rows.length >= MAX_DROPPED_EMIT_ROWS) return;
+      rows.push({ name: info.emitted, effective: info.effective, count: 1 });
+    },
     noteArgRepairs(by): void {
       const attempt = attemptFor();
       if (!attempt || !Number.isFinite(by) || by <= 0) return;
@@ -274,6 +302,28 @@ const DROPPED_EMIT_NAME_MAX = 96;
  * Names arrive already sanitised and credential-redacted from the bridge. The length ceiling here
  * is defence against a hand-edited or newer-format row, not a substitute for that pass.
  */
+/**
+ * A persisted rewrite list is trusted only when EVERY row is well formed — the whole list is
+ * dropped rather than repaired, exactly like the dropped-emit rows beside it.
+ *
+ * 名字在 bridge 侧已过 sanitizeLogMetadataString；这里的长度上限是对人手改写/新格式行的
+ * 防御，不是那次清洗的替代品。
+ */
+export function normalizeAttemptToolNameRewrites(value: unknown): AttemptToolNameRewrite[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const rows: AttemptToolNameRewrite[] = [];
+  for (const entry of value.slice(0, MAX_DROPPED_EMIT_ROWS)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+    const row = entry as Record<string, unknown>;
+    if (typeof row.name !== "string" || !row.name || row.name.length > DROPPED_EMIT_NAME_MAX) return undefined;
+    if (typeof row.effective !== "string" || !row.effective
+      || row.effective.length > DROPPED_EMIT_NAME_MAX) return undefined;
+    if (typeof row.count !== "number" || !Number.isSafeInteger(row.count) || row.count < 1) return undefined;
+    rows.push({ name: row.name, effective: row.effective, count: row.count });
+  }
+  return rows.length > 0 ? rows : undefined;
+}
+
 export function normalizeAttemptDroppedEmits(value: unknown): AttemptDroppedEmit[] | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined;
   const rows: AttemptDroppedEmit[] = [];

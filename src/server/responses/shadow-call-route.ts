@@ -6,10 +6,10 @@
  * three-line `resolveShadowRoute` call and reads the phantom scope from
  * `shadowPhantomScope`, both defined here.
  */
-import type { OcxConfig, OcxParsedRequest } from "../../types";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../types";
 import type { RequestLogContext } from "../request-log";
 import { routeConcreteModel, routeCompactionModel, routeModel, type RouteResult } from "../../router";
-import { OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
+import { isOpenAiOperatedResponsesDestination, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { sanitizeLogMetadataString } from "../../lib/redact";
 import {
   isShadowSourceModel,
@@ -96,6 +96,38 @@ export function resolveShadowRoute(args: {
   // provider, and direct (non-intercepted) traffic keeps fail-closed.
   parsed._shadowIntercepted = true;
   return { route: acceptRoute(targetRoute) };
+}
+
+/**
+ * 发射名改写（repair）门控：本次请求是否由三方路由服务。
+ *
+ * 口径来自用户需求：区分官方模型与三方模型。只要流量走的是三方（含 shadow 替换官方名的
+ * 那一族），发射名改写/救回照旧进行；OpenAI 自己运营的官方 Responses 端点、且没有被 shadow
+ * 替换过的请求，本代理一律不改写，恢复到 phase-1 之前的上游语义（该 502 就 502、该中继就
+ * 中继）。判定只有一条，放在 fork 自有文件里，上游对 guard / core.ts 的改动不会与它冲突。
+ *
+ * 三条规则：
+ *  - `parsed._shadowIntercepted === true` -> true：shadow 拦截把官方名换成了运维指定的替换
+ *    模型，行为特征与三方一致（现网那批 tools=exec_command / 裸 tools 畸形发射正是这批流量）；
+ *  - providerName 为 openai 且 destination 是 OpenAI 运营的 Responses 端点（canonical
+ *    chatgpt.com/backend-api/codex 或官方 api.openai.com）-> false；
+ *  - 其余一律 true：任意自定义 provider，以及同名 openai 但 baseUrl 指向内网/自建域的
+ *    provider（destination 不是官方端点）。
+ *
+ * 调用方必须传【当前尝试实际使用的 provider】。run-turn-execution 与 passthrough 两侧的
+ * `route` 都是请求级的：oauth 账号轮换（rotatedProvider）只换凭证与 adapter，从不写回
+ * route.provider，且轮换后的 provider 仍是同一个 openai provider；combo 的每个尝试是独立子
+ * 请求，各自解析自己的 route。因此在 shadowScope 旁算一次即与真实出口一致。
+ */
+export function thirdPartyEmissionRepair(
+  parsed: OcxParsedRequest,
+  route: { providerName: string; provider: OcxProviderConfig },
+): boolean {
+  if (parsed._shadowIntercepted === true) return true;
+  if (route.providerName === OPENAI_CODEX_PROVIDER_ID && isOpenAiOperatedResponsesDestination(route.provider)) {
+    return false;
+  }
+  return true;
 }
 
 /**

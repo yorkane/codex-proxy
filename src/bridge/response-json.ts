@@ -52,7 +52,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
+import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, noteToolNameRewriteSafely, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
 
@@ -107,6 +107,10 @@ function buildResponseJSONWithBudget(
     undeclaredToolPhantomNames?: ReadonlySet<string>;
     /** Per-request directive-correction budget for undeclared calls (see bridgeToResponsesSSE). */
     undeclaredToolFeedback?: { remaining: number };
+    /** 发射名改写门控（与流式孪生同规则，见 bridgeToResponsesSSE / shadow-call-route.ts）：缺省 false = 官方语义。 */
+    servingRouteIsThirdParty?: boolean;
+    /** 改写日志回调（与流式孪生同规则）：guard 改名并中继时调用，调用方负责去重与格式。 */
+    onToolNameRewrite?: (info: { emitted: string; effective: string }) => void;
     /** Declared parameter schema per tool name; repairs integral-float integer args (#1611). */
     toolParameterSchemas?: ReadonlyMap<string, Record<string, unknown>>;
     freeformToolNames?: Set<string>;
@@ -509,6 +513,8 @@ function buildResponseJSONWithBudget(
           phantomNames: options?.undeclaredToolPhantomNames,
           undeclaredFeedback: options?.undeclaredToolFeedback,
           bareCustomToolNames: options?.bareCustomToolNames,
+          // 门控透传：false/缺省时 guard 内部跳过整趟改名器（官方端点的上游语义）。
+          servingRouteIsThirdParty: options?.servingRouteIsThirdParty === true,
         });
         if (verdict.kind === "drop") {
           // Phantom-allowlist drop: the call is never opened - currentToolCallId
@@ -529,8 +535,12 @@ function buildResponseJSONWithBudget(
           // 这段判定原本在 enforceDeclared 之后，只有延迟强制的入站线才走得到，于是 responses
           // 入站的裸容器名（现场 86/429 条 tools）被 responseError 打死。容器不可调用，中继给
           // 客户端只会变成 unsupported call 结束回合；真实幻觉名行为不变，照旧 fail closed。
-          if (isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
-            || isDroppedNamespaceContainer(e.name, options?.declaredToolNames)) {
+          // 发射名改写门控：容器名「丢弃并继续」被 84377bdeb 上提到 enforce 之前 —— 强制模式
+          // 只放行三方流量。官方端点（gate=false/缺省）恢复原位置语义：强制模式整批 502，
+          // 延迟强制的线照旧丢弃并继续（上游本来就有的那一档）。（与流式孪生同规则。）
+          if ((isDroppedNamespaceContainer(verdict.name, options?.declaredToolNames)
+            || isDroppedNamespaceContainer(e.name, options?.declaredToolNames))
+            && (!enforceDeclared || options?.servingRouteIsThirdParty === true)) {
             noteDroppedEmitSafely(delivery, {
               emitted: e.name,
               effective: verdict.name,
@@ -566,6 +576,11 @@ function buildResponseJSONWithBudget(
           break;
         }
         const effectiveName = verdict.name;
+        if (verdict.kind === "allow" && verdict.repaired) {
+          // 三方流量且 guard 真的改了名：durable 行 + 进程日志各记一笔（调用方去重）。
+          noteToolNameRewriteSafely(delivery, { emitted: e.name, effective: verdict.name });
+          options?.onToolNameRewrite?.({ emitted: e.name, effective: verdict.name });
+        }
         currentToolCallId = e.id;
         budget?.openCall(e.id);
         currentToolCallName = effectiveName;

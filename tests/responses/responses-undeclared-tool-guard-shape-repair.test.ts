@@ -68,13 +68,14 @@ function verdictForTest(
   payload: Record<string, unknown>,
   views: { declared: Set<string>; bare: Set<string>; custom: Set<string> },
 ): { name: string; droppable: boolean } | undefined {
-  return undeclaredToolCallVerdict(payload, views.declared, new Set(), new Set(), views.bare, views.custom);
+  // 发射名改写门控：本文件锁的是三方流量的救回语义（95f462434/84377bdeb），显式开启。
+  return undeclaredToolCallVerdict(payload, views.declared, new Set(), new Set(), views.bare, views.custom, undefined, true);
 }
 function undeclaredNameForTest(
   item: Record<string, unknown>,
   views: { declared: Set<string>; bare: Set<string>; custom: Set<string> },
 ): string | undefined {
-  return undeclaredToolCallNameInResponse({ output: [item] }, views.declared, new Set(), new Set(), views.bare, views.custom);
+  return undeclaredToolCallNameInResponse({ output: [item] }, views.declared, new Set(), new Set(), views.bare, views.custom, undefined, true);
 }
 
 /** guard 的三个入口：逐条 item、参数完成事件、终态快照。 */
@@ -100,7 +101,7 @@ async function relayCall(
   try {
     const out = await readAll(relaySseWithBlockRewrite(
       streamFromText(frames),
-      createUndeclaredToolCallGuardBlockRewrite(views.declared, new Set(), new Set(), views.bare, views.custom, phantom),
+      createUndeclaredToolCallGuardBlockRewrite(views.declared, new Set(), new Set(), views.bare, views.custom, phantom, true),
       budget,
     ));
     return { out, names: [...out.matchAll(/"name":"([^"]+)"/g)].map(m => m[1]) };
@@ -202,6 +203,7 @@ describe("发射名与授权名一致（C2）", () => {
         { type: "function_call", id: "itm", name: emitted },
         views.declared,
         views.bare,
+        true,
       );
       expect(changed).toBe(true);
       const name = (value as { name: string }).name;
@@ -217,6 +219,7 @@ describe("发射名与授权名一致（C2）", () => {
         { type: "function_call", id: "itm", name: emitted },
         views.declared,
         views.bare,
+        true,
       );
       expect(changed).toBe(false);
     }
@@ -228,6 +231,7 @@ describe("发射名与授权名一致（C2）", () => {
       { type: "response.function_call_arguments.done", item_id: "itm-1", name: "tools.exec", arguments: "{}" },
       views.declared,
       views.bare,
+      true,
     );
     expect(args.changed).toBe(true);
     expect((args.value as { name: string }).name).toBe("exec");
@@ -235,6 +239,7 @@ describe("发射名与授权名一致（C2）", () => {
       { type: "response.completed", response: { id: "r", status: "completed", output: [{ type: "function_call", id: "itm-1", name: "tools.exec" }] } },
       views.declared,
       views.bare,
+      true,
     );
     expect(done.changed).toBe(true);
     expect(((done.value as { response: { output: Array<{ name: string }> } }).response.output[0]).name).toBe("exec");
@@ -243,6 +248,7 @@ describe("发射名与授权名一致（C2）", () => {
       JSON.stringify({ id: "r", status: "completed", output: [{ type: "function_call", id: "itm-1", name: "tools=exec" }] }),
       views.declared,
       views.bare,
+      true,
     );
     expect((JSON.parse(json) as { output: Array<{ name: string }> }).output[0].name).toBe("exec");
   });
@@ -316,7 +322,7 @@ describe("phantom 允许列表行为不变", () => {
     // 与桥接一致：改名结果已声明时条目保留，允许列表只处理未声明的名字。
     const views = catalogViews(FLAT_HELPER_BODY);
     const response = { id: "r", status: "completed", output: [{ type: "function_call", id: "i", name: "tools.apply_patch" }] };
-    const stripped = stripDroppableToolCallsInResponse(response, views.declared, new Set(["tools.apply_patch"]), views.bare);
+    const stripped = stripDroppableToolCallsInResponse(response, views.declared, new Set(["tools.apply_patch"]), views.bare, true);
     expect(stripped.removed).toEqual([]);
     // 真·phantom 照旧剥掉，说明上面的保留来自「授权名已声明」而不是疏漏。
     const ghost = { id: "r", status: "completed", output: [{ type: "function_call", id: "i", name: "made_up_ghost" }] };
