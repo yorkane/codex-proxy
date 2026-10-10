@@ -301,6 +301,8 @@ CLI コマンドは Anthropic OAuth アカウントを id または一意の別�
 
 ### システムのライフサイクル
 
+`POST /api/system/restart` は、本文を省略した場合や `{}` の場合、既定の 60 秒のドレイン猶予を維持します。管理セッションまたは管理者トークンを使う呼び出し元は、`{"drainGraceMs":2000}` で短い猶予を明示的に選択できます。値は 1～60000 ミリ秒の整数です。不正な本文や値は再起動を開始せずに 400 を返します。対象プロセスに限定されたローカル再起動 capability では、このオプションを設定できません（403）。応答の `drainTimeoutMs` は最初に受け入れた猶予を示し、繰り返しの呼び出しでも期限は変わりません。猶予には応答送信までの遅延を含み、クリーンアップと置換プロセスの準備には別々の 60 秒・70 秒の予算があります。中断された処理が既に実行された可能性があるため、再送前に結果を確認してください。自動再送は追加されません。
+
 |メソッドとパス |目的 |注目すべきエラー |
 | --- | --- | --- |
 | `GET /api/system/memory` |スカラー プロセス、ヒープ、ストリーム、応答状態、ウォッチドッグ、およびアクティブ ターン メトリックを返します。 — |
@@ -320,10 +322,10 @@ CLI コマンドは Anthropic OAuth アカウントを id または一意の別�
 | --- | --- | --- |
 | `GET, POST, DELETE /api/codex-auth/accounts` | Codex アカウントの一覧表示/更新または削除。POST は無効化された互換エンドポイントとしてのみ残り、成功した DELETE は `catalogRefreshPending` を返します。 | POST は常に 403 `manual_import_disabled`。DELETE の入力が無効な場合は 400。 |
 | `PUT /api/codex-auth/accounts/alias` |アカウント エイリアスの設定またはクリア | 400 無効なアカウント/エイリアス |
-| `PUT /api/codex-auth/accounts/pause` | 1 つのアカウントを一時停止または再開する | 400 無効なアカウント/状態。 404 アカウントが見つかりません |
+| `PUT /api/codex-auth/accounts/pause` | アカウントと、同じ ID 情報を持つ既存のメイン／プールのエントリを手動で一時停止または再開する。`affectedAccountIds` を返す | 400 無効なアカウント／状態、404 アカウントが見つからない、503 メインの ID 情報が使用中または読み取り不能 |
 | `PUT /api/codex-auth/accounts/pause-exhausted` |クォータを使い果たしたアカウントを一時停止する |ミューテーションロックの失敗は 503 になります |
 | `POST /api/codex-auth/accounts/clear-cooldown` | 1 つのアカウントまたはすべてのアカウントのランタイム クールダウンをクリアする | 400 無効な ID |
-| `GET, PUT /api/codex-auth/active` |アクティブなアカウントを読み取るか選択します | 400 アカウントが無効または欠落しています。 409 一時停止/レガシー行の競合 |
+| `GET, PUT /api/codex-auth/active` |アクティブなアカウントを読み取るか選択します | 400 アカウントが無効または欠落しています。 409 一時停止/レガシー行の競合、または `account_selection_unavailable` |
 | `PUT /api/codex-auth/auto-switch` | `id` を省略した `{ threshold }` でグローバルしきい値、`{ id, threshold }` でアカウント別の上書き値を設定する。`id: '__main__'` は Codex Desktop アカウントを指定する。`id` を指定した場合、`threshold: null` は上書き値を削除してグローバル値の継承に戻す | 400 無効な ID/しきい値、404 アカウントなし |
 | `PUT, PATCH /api/codex-auth/pool-strategy` | Codex アカウントプールの選択戦略を更新 | 400 無効な戦略/構成 |
 | `PUT /api/codex-auth/failover` |アカウントのフェイルオーバーしきい値を設定する | 400 無効なしきい値 |
@@ -334,6 +336,15 @@ CLI コマンドは Anthropic OAuth アカウントを id または一意の別�
 | `POST /api/codex-auth/login/code` | Codex ログイン フローの手動コードを送信する | 400 無効なフロー/コード |
 | `POST /api/codex-auth/login/cancel` | `{ "flowId": "..." }` で指定した保留中の Codex ログインのみキャンセルする | 400 フロー ID が未指定、不明、または保留中ではない |
 | `GET /api/codex-auth/login-status` |フローまたはアカウントのログイン状態をポーリングする。新規アカウント完了時は回復が必要な場合だけ `catalogRefreshPending: true` を含みます。 |不明なフローは `expired` を報告します。アクティブなフローは `idle` を報告しません |
+
+`PUT /api/codex-auth/active` には `{ "accountId": "<id>" }` が必要です。選択をクリアするには、
+明示的に `{ "accountId": null }` を指定します。別のプロセスが保存済みのアカウントを変更していても、
+現在のアカウントの再選択は明示的な選択として扱われます。サーバーは無関係な保存済み設定を保持し、
+ダッシュボードの読み込み後に削除または一時停止されたアカウントの選択を拒否します。保存済み設定が
+利用できないか無効な場合、実行中の選択とアカウントへのアフィニティは変更されません。
+設定を再読み込みしてから再試行してください。成功レスポンスはコミット済みの選択を示します。
+既存のクォータとフェイルオーバーのルールによりピン留めが解除される場合は引き続きあります。
+`pinDrained` は、現在判明しているピン留め解除の理由を示します。
 
 新規 account の config row は保存されたものの credential setup を完了できない場合、OAuth の
 `login-status` は `status: "error"` と

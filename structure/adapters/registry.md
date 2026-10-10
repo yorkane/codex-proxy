@@ -174,6 +174,13 @@ A provider web search still in flight at that truncated terminal is finalized as
 
 `src/adapters/anthropic.ts` maps a `refusal` or `content_filter` stop reason to an explicit `incomplete` adapter event with `reason: "content_filter"` and `retryable: false` instead of `done` with that stopReason (#4312). Codex otherwise treats a filter incomplete without retryable as a dropped stream and retries a refusal that cannot succeed. Partial output, tool-call integrity, and usage are preserved; `max_tokens` remains a `done` so a legitimate truncation can continue.
 
+The translated Anthropic stream ends at `message_stop` after emitting its existing terminal
+classification and usage. The parser does not inspect later records in that response body;
+pre-terminal named pings, data-only pings and SSE comments remain heartbeats. Iterator closure
+releases decoder reservations, attempts reader cancellation and unlocking on a best-effort basis,
+and closes any remaining tool-call budget entry. A never-settling cancellation can delay direct-parser
+cleanup. `src/web-search/progress-stream.ts` continues to reject post-terminal adapter events.
+
 Chat helper admission in `src/server/responses/core.ts` follows the
 [deferred stored-main contract](../providers/openai-tiers.md): only a needed Direct OpenAI helper
 claims stored main, after terminal vision, routed vision and search exclusions.
@@ -269,3 +276,18 @@ Dashboard Fast-row persistence and client refresh follow the [Fast selector rows
 The registered Devin implementation in `src/adapters/devin.ts` maps data URLs to its native image field. Its textual fallback accepts only bounded HTTPS references and emits a fixed-size omission marker for unsupported or oversized values.
 
 A [compaction routing override](../transports/responses-failover.md#compaction-routing-overrides) selects its target before adapter resolution and uses the existing registry factory.
+
+## Devin consecutive tool results
+
+`mapOcxMessagesToDevin` in `src/adapters/devin.ts` combines only consecutive original-message
+tool results with the same call ID into one history prompt. Chunks retain arrival order, image
+parts and each in-band error marker; any failed chunk sets the combined prompt's error flag.
+Any intervening message, including one omitted by mapping, or a different call ID ends the run,
+so later results keep their chronological slots. The parsed request remains unchanged. Structured
+parts append to mapper-owned arrays; text-only runs join once at their boundary or first
+structured transition. Accumulation does not re-copy its growing prefix. The signed send reuses
+the initially mapped history; signature-withheld retries still build their separate variant.
+This is linear accumulation, not a global request-memory or execution-time bound.
+`tests/providers/devin-chat-wire-fixes.test.ts` covers these boundaries and protobuf fields #7,
+#9 and #10. This normalization addresses duplicate consecutive tool prompts, not every
+upstream `invalid_argument`.

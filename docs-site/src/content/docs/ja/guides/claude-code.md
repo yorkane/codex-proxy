@@ -149,9 +149,19 @@ Picker モードは 1P モードの一部です。macOS で 1P を選ぶとデ�
 `claudeCode.intercept.picker: false` を設定した場合は無効です。1P の Desktop の Code タブにある
 モデルピッカーを書き換え、利用できる opencodex モデルを名前付きで表示します。初回の有効化時は、
 macOS がログインキーチェーン内のローカル証明書認証局を信頼するよう求めることがあります。この認証局の
-制約は `claude.ai` とそのサブドメインに限られます。署名鍵は実行中の OpenCodex プロセス内にだけ存在する
-ため、OpenCodex を再起動するたびに新しい認証局が発行され、macOS が再び信頼を求めます。再起動のたびに
-プロンプトを承認するか、あとから `ocx claude desktop picker trust` を実行してください。
+制約は `claude.ai` とそのサブドメインに限られます。エクスポート可能な署名用 ID は OS の資格情報ストアで
+保護され、通常の再起動でも同じ証明書と鍵を再利用します。OpenCodex の設定ディレクトリには Picker の
+署名鍵を平文で保存しません。制約付き CA の完全な検証と OS の信頼確認は引き続き必要です。
+承認済みの同じ ID と利用可能な資格情報ストアがあれば、再起動で証明書の信頼設定を追加・削除しません。
+起動時の復元は信頼をインストールしません。信頼が未設定、取り消し済み、不明の場合は保留となり、
+`ocx claude desktop picker on` または `ocx claude desktop picker trust` を明示的に実行して信頼を付与します。
+
+旧 ID からの一度限りの移行では、以前の信頼を削除するために同意が必要になる場合があります。
+削除が完了するまでは Picker は利用できず、適用済みプロファイルは復号しない中継を使います。
+キーチェーンのロック解除やアプリの資格情報へのアクセス許可は macOS 独自の動作で、再起動や更新時にも
+表示される場合があります。Windows と Linux は Picker 非対応で、Picker の CA、資格情報ストア、
+プロキシの処理を開始しません。通常の Claude インターセプトは利用でき、ローカル CA ファイルには
+所有者、シンボリックリンク、ファイル権限、Windows ACL の検査が適用されます。
 
 Picker モードが有効な間、Claude Desktop のネットワークは OpenCodex を経由します。OpenCodex が停止
 すると、Picker モードをオフにするか Desktop を完全に再起動するまで Desktop はオフラインになります。
@@ -301,8 +311,9 @@ v2 エイリアスはエスケープを展開します。読みやすい形式�
 
 ### コンテキスト変種 `[1m]` 標識
 
-公式コンテキストウィンドウが 1M のモデルには `…[1m]` ピッカー行がもう一つできます。自動コンテキスト使用時は
-コンテキストが 200k を超え、圧縮しきい値以上のモデルも該当します。この行を選ぶと Claude Code が
+公式コンテキストウィンドウが 1M、またはデフォルトの圧縮しきい値（829,800）以上のモデルには `…[1m]` ピッカー行がもう一つできます。
+この基準は固定で、圧縮値を変えても下がりません。Anthropic 経路の Claude モデルは実際に 1M である必要があります。自動コンテキストをオフにすると
+1M のモデルだけが対象です。実際のウィンドウを超えると `prompt is too long` エラーが返り、Claude Code が自動で圧縮します。この行を選ぶと Claude Code が
 全体 1M コンテキストを計算します。プロキシはエイリアス解決とルーティング前に大文字小文字を区別せず `[1m]`
 接尾辞を削除します。
 
@@ -311,8 +322,9 @@ v2 エイリアスはエスケープを展開します。読みやすい形式�
 Claude Code は未知モデルのコンテキストを 200k トークンとして計算します。デフォルトでオンの**自動
 コンテキスト**がこの問題を解決します。
 
-1. 実際のコンテキストウィンドウが 200k より大きく自動圧縮しきい値以上のモデルのピッカー行と環境スロットに
-   `[1m]` 標識が付きます。
+1. 起動時の環境スロットには、実際のコンテキストウィンドウが 200k より大きく、設定した自動圧縮しきい値以上のとき
+   `[1m]` 標識が付きます。ディスカバリーと Desktop のピッカー行はこのしきい値に従わず、固定の 829,800 トークン下限
+   （Anthropic 経路の Claude モデルは実際の 1M）を使います。
 2. `CLAUDE_CODE_AUTO_COMPACT_WINDOW`(デフォルト `829800`、範囲 `100000`–`1000000`)を注入し、該当
    地点で会話を自動要約します。
 
@@ -325,8 +337,21 @@ Claude Code は未知モデルのコンテキストを 200k トークンとし�
 **接続 → Claude** で圧縮値を調整できます。**警告:** モデルの実際のコンテキストウィンドウより大きく上げると
 要約を開始する前にチャットエラーが発生します。
 
-1M 未満のネイティブ Anthropic モデルには自動で標識を付けません。直接 export した値が常に優先し、プロキシは**ユーザーが指定した**値を基準にどのモデルに安全に標識を付けるか決定します。
+1M 未満のネイティブ Anthropic モデルには自動で標識を付けません。自分で export した圧縮値は起動スロットの標識に優先し、プロキシは**ユーザーが指定した**値を基準にどのモデルに安全に標識を付けるか決定します。ディスカバリー行はその export を無視し、固定の下限を保ちます。
 直接編集した設定値が不正な場合は 829,800 に戻ります。
+
+### コンテキスト計算方式（既定は 1M、200k はオプトイン）
+
+`claudeCode.contextAccounting` は opencodex が既定で選ぶ値を決めます。未設定（`1m`、既定）では、
+長いコンテキストのモデルが起動環境スロット、Desktop ピッカー、Desktop 3P（`prefer1m`）、生成されたサブエージェントで 1M として扱われます。
+`200k` にすると `[1m]` 標識を自動では付けず、`CLAUDE_CODE_AUTO_COMPACT_WINDOW` も注入せず、Desktop 3P は `supports1m` を残して
+`prefer1m` だけを外します。自分で `[1m]` を付けた選択は引き続き使えます（生成されたサブエージェントと強制サブエージェントは、モデルのウィンドウが支えられない標識を引き続き外します）。
+ディスカバリーには実際に 1M のモデルの `· 1M` 行が引き続き表示されます。`200k` は自動コンテキストより優先され、自分で export した圧縮値があっても自動標識は
+再び有効になりません。その export 値自体は opencodex が変更しません。
+
+```bash
+ocx claude config set --context-accounting 200k
+```
 
 ### 実モデル環境
 
@@ -458,7 +483,7 @@ fingerprint 方式をそのまま踏襲しますが、長時間の無人作業�
 
 ## 推論負荷
 
-Claude Code の `/effort` 設定はアダプターでも維持されます。
+Messages → Responses に変換されるリクエストでは、Claude Code の `/effort` 設定を次のようにマッピングします。
 
 | 転送形式 | マッピング |
  --- | --- |
@@ -466,7 +491,9 @@ Claude Code の `/effort` 設定はアダプターでも維持されます。
 | `thinking.type: "enabled"` + `budget_tokens` | ≤4096→`low`、≤16384→`medium`、それより大→`high` |
 | `thinking.type: "disabled"` | `reasoning: { effort: "none" }` を明示し、`summary` は省略します |
 
-解釈された値はリクエストログの **Reasoning effort** 列に表示されます。
+変換されたリクエストでは、マッピングされたレベルがリクエストログの **Reasoning effort** 列に表示されます。
+管理されたネイティブ Messages は、認識可能な `output_config.effort` がない場合、有効な thinking 予算を
+`budget:<tokens>` として記録します。このログ記録は送信本文を変更しません。
 
 ## 入力変換(Messages → Responses)
 
@@ -591,7 +618,7 @@ Anthropic バックエンドを明示すると意図的に失敗後停止しま�
 
 **大型モデルなのにコンテキストが 200k に制限される** — ピッカーで `[1m]` 変種を選ぶか、デフォルトでオンの
 自動コンテキストを使ってください。ピッカーに `[1m]` 行がない場合はモデルの公式コンテキストウィンドウが
-自動圧縮しきい値より小さい可能性があります。
+固定の 829,800 トークン下限より小さい可能性があります。
 
 **スキル呼び出し時のトークン数が多い** — バンドル `claude-api` スキル(約 136k トークン)は Claude モデルに
 言及すると自動で読み込まれます。ネイティブパススルーでは正常で、ルーティングモデルでは opencodex が
@@ -601,7 +628,7 @@ Anthropic バックエンドを明示すると意図的に失敗後停止しま�
 引数ではなく `<!-- ocx-route: ... -->` ディレクティブを使います。ディレクティブが希望ルートと一致するか確認し、
 モデルプレースホルダとして `"haiku"` を渡してください。
 
-`config.json` の `claudeCode.stabilizePromptCache` を `true` にすると、変換ルートのシステム指示末尾にある対応済み Claude 通知を最後のユーザーメッセージへ移します。既定値は `false` です。このロール変更が適切なクライアントでのみ有効にしてください。コードフェンス内の例と一致しない本文は保持され、Anthropic のネイティブ転送は変わりません。メタデータがない場合のキャッシュキーは安定化した指示から計算されます。会話 ID の生成やキャッシュヒットの保証は行いません。
+`config.json` の `claudeCode.stabilizePromptCache` を `true` にすると、変換ルートのシステム指示末尾にある対応済み Claude 通知を切り離します。認識された `<total_tokens>N tokens left</total_tokens>` 形式のトークンフッターは、繰り返されている場合もすべて削除します。TaskCreate のリマインダーは従来どおり末尾のユーザーメッセージへ移します。トークンフッターだけを切り離した場合、入力メッセージは追加しません。既定値は `false` です。このロール変更が適切なクライアントでのみ有効にしてください。コードフェンス内の例と一致しない本文は保持され、Anthropic のネイティブ転送は変わりません。メタデータがない場合のキャッシュキーは安定化した指示から計算されます。会話 ID の生成やキャッシュヒットの保証は行いません。
 
 変換されたすべての Chat ルートで、タイムライン上のリマインダーは保留中のツール結果の後、会話内の元の位置を保ちます。これにより、新しいリマインダーを追加しても先頭のシステムプロンプトが書き換わらず、会話の途中に置かれた指示がそれより前のターンの前に移動することもありません。そのスロットが運ぶロールは別に決まります。プロバイダーが `foldDeveloperRoleToSystem: false` を記録していないかぎり、リマインダーは `system` として送られます。この記録は上流が `developer` ロールを受け付けることを表し、その場合は同じ位置のまま転送します。受け付けない上流は `400 role 'developer' is not allowed` を返してターンが始まらないため、記録のない宛先は畳む側になります。`stabilizePromptCache` の設定にかかわらず適用され、Anthropic のネイティブ転送は変わりません。キャッシュの再利用には、安定したセッション ID と上流キャッシュの利用可能性が引き続き必要です。過去の指示やツールの変更、会話の圧縮もキャッシュヒットに影響します。リマインダーの順序を保つだけで再利用が保証されるわけではありません。
 
@@ -611,10 +638,12 @@ The Subagents page offers **Force all subagents onto one model**, off by default
 
 `ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
 
-This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` when the authoritative window reaches the fixed 829,800-token floor, and only for a genuine 1M window on Anthropic Claude models and bare `claude-*` selectors; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
 
 Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
 
 The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
 
 Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.
+
+出力前の応答に限り、HTTP 401 の authentication_error（error.code なし） が正確に “OAuth access token has been revoked.” を返した場合、送信した OAuth アカウントを再ログインが必要な状態にし、セッションの紐付けを解除します。出力前に限り、既存の送信上限内で同じプールの利用可能なアカウントに切り替えます。候補がなければ元の 401 を返し、再ログインまで選択から除外します。他の 401 の処理は変わりません。

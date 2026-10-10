@@ -31,7 +31,7 @@ import { useAppRouteState } from "./use-app-route-state";
 import { requestProxyStop } from "./stop-proxy";
 import { useCodexRestart } from "./use-codex-restart";
 import { confirmAction } from "./action-dialogs";
-import { hostOs, isDesktopShell, isExternalLink, openDesktopUpdatePage } from "./lib/desktop-shell";
+import { hostOs, isDesktopShell, isExternalLink, openDesktopCliPage, openDesktopUpdatePage } from "./lib/desktop-shell";
 import { zoomManagedOn } from "./lib/desktop-zoom";
 import { useSidebarCollapse } from "./use-sidebar-collapse";
 import { useDesktopZoom } from "./use-desktop-zoom";
@@ -538,6 +538,10 @@ export default function App() {
               setNavOpen(false);
               if (openDesktopUpdatePage()) return;
               navigateToPage("dashboard", "update");
+            }}
+            onOpenTerminalCommand={() => {
+              setNavOpen(false);
+              openDesktopCliPage();
             }}
           />
         </div>

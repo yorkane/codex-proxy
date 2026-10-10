@@ -18,7 +18,7 @@ import { shouldInjectApiAuthHeader } from "../codex/inject";
 import { detachedConfigSnapshot } from "../config/admitted-identity";
 import { copyPlainData } from "../lib/plain-data";
 import type { OcxConfig } from "../types";
-import { defaultIntegrationIO, loadTarget, parseConfig, type IntegrationIO } from "./config-io";
+import { PARSE_FAILED, defaultIntegrationIO, loadTarget, parseConfig, type IntegrationIO } from "./config-io";
 import { inspectKiloCandidates } from "./kilo-candidates";
 import {
   fingerprint,
@@ -727,9 +727,15 @@ export function restoreIntegration(input: IntegrationRestoreInput): WriteOutcome
   // exact bytes when the snapshot was taken. Re-deriving it from the file would
   // mean guessing which entries are ours, and a wrong guess deletes a user's.
   const restoredRecord = entry.priorRecord;
+  let restoredDocument = clientId === "droid" && restoredText !== null ? parseConfig(restoredText, "json") : undefined;
+  if (clientId === "commandcode" && restoredText !== null) {
+    const parsed = parseConfig(restoredText, "json");
+    // Restoring raw snapshot bytes must remain possible even when they are not parseable.
+    restoredDocument = parsed === PARSE_FAILED ? undefined : parsed;
+  }
   const fresh = buildIntegrationContribution(
     { ...input, droidReasoningDefaults: undefined }, rowTarget,
-    clientId === "droid" && restoredText !== null ? parseConfig(restoredText, "json") : undefined,
+    restoredDocument,
     restoredRecord,
   );
   /*
@@ -795,6 +801,11 @@ export interface CoordinatedIntegrationOptions {
    * non-null result refuses without writing anything.
    */
   revalidate?: (frozen: IntegrationWriteInput) => Promise<WriteOutcome | null>;
+  /**
+   * Synchronous last word, evaluated with no await between it and the transaction (after
+   * `revalidate` and any lock acquisition). A non-null result refuses without writing.
+   */
+  guard?: (frozen: IntegrationWriteInput) => WriteOutcome | null;
 }
 
 /** Freeze all mutable resolution seams before the first lock await. */
@@ -936,21 +947,22 @@ async function coordinatedWrite(
   if (!prepared.ok) return prepared.refusal;
   const frozen = prepared.value;
   const spec = INTEGRATION_CLIENTS[frozen.clientId];
+  const guarded = (bound: IntegrationWriteInput) => options?.guard?.(bound) ?? operation(bound);
   if (!spec.writerLock) {
     const refused = await options?.revalidate?.(frozen);
-    return refused ?? operation(frozen);
+    return refused ?? guarded(frozen);
   }
 
   // An absent client home is not created merely to acquire a sibling lock.
   if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") {
     const refused = await options?.revalidate?.(frozen);
     if (refused) return refused;
-    if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") return operation(frozen);
+    if (frozen.io.statKind(frozen.resolvedPaths.detectDir) !== "dir") return guarded(frozen);
   }
   return withClientLocks(
     frozen,
     spec.writerLock.suffix,
-    () => operation(frozen),
+    () => guarded(frozen),
     options,
   );
 }

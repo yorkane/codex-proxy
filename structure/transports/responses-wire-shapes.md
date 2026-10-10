@@ -208,10 +208,10 @@ uses the original routed provider while the generated hash uses the settled adap
 Anthropic hard pin cannot make the canonical Go destination disappear from transport recognition.
 An operator-supplied header wins case-insensitively. Renamed providers are covered only when their
 fixed key-auth destination still matches the registry; custom and lookalike URLs receive nothing.
-OpenCode Go's exact `union-alpha` model id is hard-pinned to the Anthropic wire from every inbound
-surface; sibling models retain their existing Chat or Responses selection. This wire choice and the
-session namespace do not assert upstream availability after the Messages endpoint accepts the
-session header.
+OpenCode Go's exact `claude-haiku-5-5`, `minimax-m2.5`, `minimax-m2.7`, `minimax-m3`, and `union-alpha`
+model ids are hard-pinned to Anthropic from every inbound; Haiku uses Messages in Go's [endpoint table](https://opencode.ai/docs/go/#endpoints).
+Sibling models retain their Chat or Responses selection. This wire choice and the session namespace
+do not assert upstream availability after the Messages endpoint accepts the session header.
 `src/adapters/openai-responses/web-search.ts` also drops the provider-rejected
 `search_content_types` and `indexed_web_access` fields from plain `web_search` tools while
 preserving preview tools. The two OpenCode Zen destinations gate that on a Contributor Muse id
@@ -315,12 +315,12 @@ an empty tool list is making a statement rather than omitting one, which is how 
 guard reads it through `clientExplicitWireToolCatalog` in
 `src/server/responses/passthrough-dispatch.ts`.
 
-The passthrough guard is not wire-scoped. `undeclaredToolGuardActive` gates namespace normalization
-and continuation-state suppression as well as the refusal, and it stands down only for
-`authMode: "forward"` and for a request that declares no catalog at all.
+The passthrough SSE/JSON refusal is wire-scoped too: only `responses` rejects undeclared calls.
+`undeclaredToolGuardActive` still gates namespace normalization and continuation suppression on every wire,
+standing down only for `authMode: "forward"` and requests with no catalog; relayed undeclared calls are not remembered.
 
-`src/server/responses/run-turn-execution.ts` and `src/server/responses/adapter-delivery.ts` set the
-flag from `inboundWire` on the streaming, buffered, and JSON paths alike, so the three cannot drift.
+`src/server/responses/run-turn-execution.ts`, `src/server/responses/adapter-delivery.ts`, and
+`src/server/responses/passthrough-delivery.ts` scope membership refusal from `inboundWire` for SSE and JSON alike.
 
 ## Selection outlives the declaration check
 

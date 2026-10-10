@@ -1,5 +1,6 @@
 /** `ocx account` — list and switch provider credentials (issue #180). */
 import { apiKeyQuotaText } from "./account-key-quota";
+import { redactSecretArgs } from "./secret-args";
 import { emptyAccountNextAction, recoveryAccountLabel } from "./account-next-actions";
 import { loadConfig } from "../config";
 import { explainCodexUseOutcome, reportCodexAccountTargetError, resolveCodexUseTarget } from "./account-target";
@@ -51,7 +52,7 @@ const ACCOUNT_USAGE = `Usage:
   ocx account clear <provider> [--json]
   ocx account refresh <provider> [--json]
   ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]
-  ocx account auto-switch anthropic <on|off|status|inherit|threshold <0-100>> --account <id> [--json]
+  ocx account auto-switch <anthropic|anthropic2> <on|off|status|inherit|threshold <0-100>> --account <id> [--json]
   ocx account alias <provider> <account-or-key-id|alias> <display-name|-> [--json]
   ocx account priority <provider> <account-id|alias|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]
   ocx account pause <provider> <account-id|alias|main> [--json]
@@ -59,7 +60,7 @@ const ACCOUNT_USAGE = `Usage:
   ocx account pause-exhausted <provider> [--json]
   ocx account strategy <provider> [<quota|round-robin|fill-first|least-loaded|reset-first>] [--json]
   ocx account sticky <provider> [<1-100>] [--json]
-  ocx account routes anthropic [--file <json-file>|--clear] [--json]
+  ocx account routes <anthropic|anthropic2> [--file <json-file>|--clear] [--json]
   ocx account remove <provider> <account-or-key-id|alias|main> --yes [--json]
   ocx account clear-cooldown <provider> <account-id|alias|main> [--json]
   ocx account add-key <provider> [--label <label>] [--json]
@@ -69,7 +70,7 @@ const ACCOUNT_USAGE = `Usage:
   ocx account pool <provider> [--enabled on|off] [--threshold N] [--strategy NAME] [--sticky N] [--quota-window W] [--json]
   ocx account credits openai <ID on|off|--all on|off> [--json]
   ocx account quota-activation openai ID --window fiveHour|weekly <on|off> [--json]
-  ocx account anthropic-reset-grants [ID] [--json]
+  ocx account anthropic-reset-grants [ID] [--provider anthropic|anthropic2] [--json]
   ocx account code <provider> [--flow <flow-id>] [--json]   (reads the code from stdin)
   ocx account cancel <provider> [--flow <flow-id>] [--json] (--flow required for codex)
   ocx account reset-credits <account-id|main> [--consume --yes] [--json]
@@ -93,10 +94,12 @@ function consumeFlag(args: string[], flag: string): boolean {
 /** Returns an error message for leftover args, or null when clean. */
 function leftoverArgsError(args: string[]): string | null {
   if (args.length === 0) return null;
-  const unknown = args.filter(a => a.startsWith("-"));
+  const shown = redactSecretArgs(args);
+  // Flags plus redaction markers only: a stray positional may be a credential operand.
+  const unknown = shown.filter(a => a.startsWith("-") || a === "<redacted>");
   return unknown.length > 0
     ? `Unknown flag(s): ${unknown.join(", ")}`
-    : `Unexpected argument(s): ${args.join(", ")}`;
+    : `Unexpected argument(s): ${shown.join(", ")}`;
 }
 
 function candidateNames(config: OcxConfig): string {
@@ -187,7 +190,9 @@ async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
   // stays a cheap local read (#2566). --refresh bypasses the server-side TTL.
   const wantsQuota = consumeFlag(rest, "--quota");
   const refreshQuota = consumeFlag(rest, "--refresh");
-  const name = rest.shift();
+  // An option-shaped token is never the provider: leave it for the leftover check so a
+  // credential option keeps its operand redacted.
+  const name = rest[0]?.startsWith("-") ? undefined : rest.shift();
   const leftover = leftoverArgsError(rest);
   if (leftover) {
     console.error(leftover);
@@ -275,7 +280,9 @@ async function cmdList(rest: string[], deps: AccountDeps): Promise<number> {
 
 async function cmdCurrent(rest: string[], deps: AccountDeps): Promise<number> {
   const wantsJson = consumeFlag(rest, "--json");
-  const name = rest.shift();
+  // An option-shaped token is never the provider: leave it for the leftover check so a
+  // credential option keeps its operand redacted.
+  const name = rest[0]?.startsWith("-") ? undefined : rest.shift();
   const leftover = leftoverArgsError(rest);
   if (!name || leftover) {
     if (leftover) console.error(leftover);
@@ -376,7 +383,9 @@ async function cmdUse(rest: string[], deps: AccountDeps): Promise<number> {
  * named `auto` cannot shadow the verb that returns the pool to automatic selection. */
 async function cmdClear(rest: string[], deps: AccountDeps): Promise<number> {
   const wantsJson = consumeFlag(rest, "--json");
-  const name = rest.shift();
+  // An option-shaped token is never the provider: leave it for the leftover check so a
+  // credential option keeps its operand redacted.
+  const name = rest[0]?.startsWith("-") ? undefined : rest.shift();
   const leftover = leftoverArgsError(rest);
   if (!name || leftover) {
     if (leftover) console.error(leftover);

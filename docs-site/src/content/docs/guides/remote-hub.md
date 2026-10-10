@@ -33,6 +33,10 @@ listener, not the management port. Local clients use the configured loopback com
   service definition, support bundle, screenshot, or command line.
 - The data admission token is delivered through the owner-only `service-api-token` file or
   `OCX_API_TOKEN_FILE`. It is not a management credential.
+- A configured client's `allowedModels` must include both the executor and any separately billed
+  Advisor model used by managed native Anthropic Messages. Bare model IDs and the hub's configured
+  `provider/model` names are accepted. A disallowed or unnamed Advisor destination returns HTTP 403
+  before provider dispatch; provider-only and unrestricted keys retain their existing scope.
 - A raw management admin token can perform ordinary administration, but it cannot mint a browser
   session or authorize consent-bearing actions such as starring the repository. Those actions
   require a server-issued `gui-session`, matching browser origin, and CSRF token.
@@ -553,7 +557,7 @@ input checks.
 opencodex does not publish an official container image. The repository does maintain a source-build
 [`Dockerfile`](https://github.com/lidge-jun/opencodex/blob/main/Dockerfile),
 [`compose.yaml`](https://github.com/lidge-jun/opencodex/blob/main/compose.yaml), and a narrow
-`.dockerignore`. The build pins the multi-platform Bun 1.4.0 image index by digest, runs the proxy as
+`.dockerignore`. The build pins the multi-platform Bun 1.4.2 image index by digest, runs the proxy as
 the non-root `bun` user, keeps the root filesystem read-only, drops Linux capabilities, and publishes
 only the data listener on the host's `127.0.0.1:10100` by default. The foreground process uses
 `OCX_SERVICE=1`, so stopping or recreating the container preserves routed Codex state instead

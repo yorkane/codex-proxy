@@ -81,6 +81,12 @@ Operational contract when enabled:
   access, policy and unrecognized errors stay terminal. Recovery respects model routes and
   send limits; if no replacement is eligible, the original 403 is returned. This also works
   with proactive pooling off. A 403 after assistant output starts never switches accounts.
+- Before output, an exact structured **401** authentication_error with no error code and the message
+  “OAuth access token has been revoked.” marks the sending OAuth account as requiring
+  a new login and clears its session affinities. Before output, an eligible account in
+  the same pool may take over within existing send limits. With no eligible replacement,
+  the original 401 is returned; the refused account remains excluded until login.
+  Other 401 errors retain their existing behavior.
 - Token-refresh credential failures retain the existing `needsReauth` policy. Subscription
   renewal does not require reauthentication, but the account waits for its cooldown to expire.
 - If every eligible account is cooling, the proxy returns **429** (not 401) with `Retry-After`
@@ -94,6 +100,12 @@ Operational contract when enabled:
 See [Configuration](/reference/configuration/providers/#anthropicaccountpool-experimental).
 
 ### Native Messages with account pooling
+
+Managed native Messages show validated caller effort in Logs and `usage.jsonl`, including each
+attempt: an explicit effort such as `xhigh` or `low`, `none` for disabled thinking, or
+`budget:<tokens>` for an enabled thinking budget. An explicit effort takes precedence over the
+thinking fallback. Adaptive thinking without an explicit effort stays blank. These labels describe
+request controls; they do not confirm what effort the upstream applied or change the wire body.
 
 An enabled Anthropic account pool prefers native Messages for eligible direct Anthropic routes
 when neither native rollout flag explicitly disables that path. In Providers → Anthropic →
@@ -275,24 +287,35 @@ Picker mode is part of first-party mode. On macOS it is on by default when first
 unless `claudeCode.intercept.picker: false` is set. It changes the first-party Desktop Code-tab picker
 so it lists available opencodex models by name. The first time it is enabled, macOS may ask you to
 trust a local certificate authority in the login keychain. That authority is constrained to `claude.ai`
-and its subdomains. Its signing key exists only inside the running OpenCodex process, so every
-OpenCodex restart publishes a fresh authority and macOS asks you to trust it again — approve the
-prompt, or later run `ocx claude desktop picker trust`, after each restart.
+and its subdomains. OpenCodex protects its exportable signing identity in the OS credential store
+and reuses the same validated certificate and key across normal restarts. No plaintext picker signing
+key is stored in the OpenCodex config directory. The full constrained CA validation and OS trust
+verification still apply. With the same approved identity and an available credential store, restarting
+OpenCodex does not add or remove Certificate Trust Settings. Startup restore never installs trust:
+if trust is missing, revoked or unknown, the picker stays pending. Run `ocx claude desktop picker on`
+or `ocx claude desktop picker trust` explicitly to grant trust.
 Startup also attempts to remove a legacy on-disk picker signing key before checking whether
 interception is enabled. Cleanup is best-effort and does not enable interception or block startup.
 
-On restart OpenCodex first removes the previous authority from the keychain. If that removal fails
-(for example because you decline the keychain prompt), the picker stays off for this run so two
-authorities are never trusted side by side. Desktop keeps its network connection: the proxy address
-in its profile still answers, but only as a plain relay that does not read claude.ai traffic, and the
-picker lists Anthropic's own models until the removal succeeds. OpenCodex remembers which certificate
-still needs removal and retries on the next restart; `ocx claude desktop picker status` shows the
-picker as unavailable meanwhile.
+One-time migration from an older picker identity may require consent to remove its previous trust.
+If cleanup cannot finish, the picker stays unavailable and the applied profile uses a blind relay
+until cleanup succeeds; `ocx claude desktop picker status` reports that state. macOS may separately
+ask you to unlock the keychain or approve an application's access to stored credentials. These native
+access prompts can still occur on restart or upgrade.
+
+Picker mode remains unsupported on Windows and Linux: OpenCodex starts no picker CA, credential-store
+or proxy work there. The main Claude intercept remains available with ownership, symlink, file-permission
+and Windows ACL checks protecting its local CA files.
 
 Picker mode allows up to 64 KiB of headers on incoming requests and ordinary HTTP
 responses, preserving browser session cookies. Larger upstream response headers return
 502 and log `upstream:headers-too-large`, without cookie values or request paths.
 Upgraded connections continue to relay bytes directly after the request handshake.
+
+Picker mode uses HTTP/2 with Claude Desktop so long-lived chat streams no longer use up
+Desktop's connections to claude.ai. Earlier versions could leave chat stuck on
+"Timed out loading session" while picker mode was on. If chat stops loading with picker mode
+on, turn it off with `ocx claude desktop picker off` and report the problem.
 
 While picker mode is on, Claude Desktop reaches the network through OpenCodex. If OpenCodex stops,
 Desktop is offline until you fully restart it or turn picker mode off. Check the state with
@@ -573,7 +596,8 @@ reapplying the profile, and starting a new conversation. This is a troubleshooti
 guaranteed fix. OpenCodex cannot observe picker state; it routes the model id carried by each
 request. Confirm what the client sends under **Logs → requestedModel**.
 
-Models with an authoritative 1M context window get an extra `…[1m]` picker row: selecting it makes
+Models with a long context window (1M, or at least the 829,800-token default compaction threshold;
+Claude models on an Anthropic route need a genuine 1M) get an extra `…[1m]` picker row: selecting it makes
 Claude Code account a full 1M context for that model (auto-compaction stays on) — the proxy strips
 the marker before routing.
 Selecting one persists it to Claude Code's `settings.json` `model` field; inbound requests resolve
@@ -609,8 +633,10 @@ keep their canonical ids on both surfaces.
 
 ### Context-variant `[1m]` marker
 
-Models with an authoritative context window of 1M (or, under auto-context, above 200k and at
-least the compaction threshold) get an extra `…[1m]` picker row. Selecting it makes Claude Code
+Models with an authoritative context window of 1M, or at least the 829,800-token default
+compaction threshold, get an extra `…[1m]` picker row; the floor is fixed, so a custom compaction
+value does not lower it, and Claude models on an Anthropic route need a genuine 1M. Turning
+auto-context off limits the row to 1M windows. Selecting it makes Claude Code
 account a full 1M context. The proxy strips the case-insensitive `[1m]` suffix before alias
 resolution and routing.
 
@@ -619,8 +645,10 @@ resolution and routing.
 Claude Code accounts 200k tokens for any model it does not recognize. **Auto context** (on by
 default) fixes that:
 
-1. Models whose real window is above 200k **and** at least the auto-compact threshold get the
-   `[1m]` marker on their picker rows and env slots.
+1. Launch env slots get the `[1m]` marker when the model's real window is above 200k **and** at
+   least the configured auto-compact threshold. Discovery and Desktop picker rows do not follow
+   that threshold: they use the fixed 829,800-token floor (a genuine 1M for Claude models on an
+   Anthropic route).
 2. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (default `829800`, range `100000`–`1000000`) is injected so
    the conversation auto-summarizes at that point.
 
@@ -635,16 +663,35 @@ window breaks that model — the chat errors out before the summary can fire.
 
 A model's advertised context window does not guarantee that a tool-heavy request fits the
 upstream input limit. A classified input-limit rejection reaches Claude Code as
-`invalid_request_error` with `context_length_exceeded`; a non-streaming response uses HTTP 400
-instead of a retryable 502. Reduce the current input or compact earlier. If `/compact` also
-exceeds the limit, preserve the original history and try compacting a fork with fewer enabled
-tool or MCP schemas, if your client supports that workflow. Recovery still depends on the
-reduced request fitting the upstream limit. A `[1m]` marker or larger client accounting setting
-does not raise that limit, and OpenCodex does not silently remove history or tools to make it fit.
+`invalid_request_error` with `context_length_exceeded`, worded the way Anthropic words it
+(`prompt is too long: …`, with token counts when the provider states them), so Claude Code
+compacts the conversation and retries on its own; a non-streaming response uses HTTP 400 instead
+of a retryable 502. Providers on the native Messages lane get the same wording. A throughput
+limit that only mentions tokens (for example "too many tokens per minute") keeps its text and is
+not treated as an overflow. If compaction itself still exceeds the limit, preserve the original
+history and try compacting a fork with fewer enabled tool or MCP schemas, if your client supports
+that workflow. A `[1m]` marker or larger client accounting setting does not raise the upstream
+limit, and OpenCodex does not silently remove history or tools to make it fit.
 
-Sub-1M native Anthropic models are never auto-marked. Values you export yourself always win (the
-proxy uses YOUR value to decide which models are safe to mark). Invalid hand-edited config values
+Sub-1M native Anthropic models are never auto-marked. A compact window you export yourself wins
+for launch-slot marking (the proxy uses YOUR value to decide which models are safe to mark).
+Discovery rows ignore that export and keep the fixed floor. Invalid hand-edited config values
 fall back to 829,800.
+
+### Context accounting (1M by default, 200k opt-in)
+
+`claudeCode.contextAccounting` decides what opencodex picks by default. Absent (`1m`, the
+default), long-window models are offered at 1M in the launch env slots, the Desktop pickers,
+Desktop 3P (`prefer1m`) and generated subagents. Set `200k` to opt out: nothing is marked `[1m]`
+automatically, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is not injected, and Desktop 3P drops `prefer1m`
+while keeping `supports1m`. A selector you mark `[1m]` yourself stays available (generated and
+forced subagents still drop a marker the model's window cannot carry), and discovery still lists
+the `· 1M` rows of genuine 1M models. `200k` wins over auto-context: a compact window you export no
+longer turns automatic marking on, though opencodex leaves your own export in place.
+
+```bash
+ocx claude config set --context-accounting 200k
+```
 
 ### Effective model environment
 
@@ -783,9 +830,22 @@ depend on them for long unattended runs.
 
 <!-- TODO(WP5 GUI): Add the sidecar settings-screen walkthrough after the GUI controls ship. -->
 
+## Client tools on Cursor routes
+
+When Claude Code uses a Cursor-backed model, OpenCodex preserves recognized client tool names
+such as `Bash`, `Read`, `Write`, `Edit`, `Grep`, `Glob`, and `Task` in the Cursor catalog, tool
+guidance, and replayed calls. This keeps the names consistent with Claude Code's instructions.
+Denied Cursor-native execution frames direct the model to the client tools available that turn.
+
+A mixed catalog containing a bare Codex `exec_command` or `shell_command` bridge uses wire
+aliases such as `ocx_client_Read` to avoid Cursor tool collisions; calls returned to Claude Code
+still use its original tool names. Namespaced MCP tools keep their namespaced identities.
+OpenCodex includes these aliases in Cursor's transport byte budget, so a tool whose definition
+would exceed the limit is omitted for that turn.
+
 ## Reasoning effort
 
-Claude Code's `/effort` setting is preserved across the adapter:
+On translated Messages → Responses requests, Claude Code's `/effort` setting maps as follows:
 
 | Wire format | Mapping |
 | --- | --- |
@@ -793,7 +853,9 @@ Claude Code's `/effort` setting is preserved across the adapter:
 | `thinking.type: "enabled"` + `budget_tokens` | ≤4096→`low`, ≤16384→`medium`, above→`high` |
 | `thinking.type: "disabled"` | `reasoning: { effort: "none" }`; summary omitted |
 
-The resolved value appears in the request log's **Reasoning effort** column.
+For translated requests, the resolved tier appears in the request log's **Reasoning effort** column.
+Managed native Messages log enabled thinking budgets as `budget:<tokens>` when no recognized
+`output_config.effort` is present; this logging does not change the wire body.
 
 ## Inbound translation (Messages → Responses)
 
@@ -807,6 +869,7 @@ The proxy translates every Anthropic Messages API request into the Codex Respons
 | Assistant text | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringified `arguments`) |
 | User `tool_result` | `function_call_output` (`is_error` → `[tool error]` prefix) |
+| `tool_reference` in a tool result | Text `Tool loaded: <tool_name>` in the paired result; preserves loaded-tool names without adding declarations or enabling translated server-side deferral |
 | `thinking` / `redacted_thinking` replay | `reasoning` items with bounded `ocxr1` envelopes for signatures and redacted payloads |
 | Function tools | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, named function→`{type:"function",name}`, hosted WebSearch/web_search→`{type:"web_search"}` |
@@ -959,7 +1022,7 @@ set (automatic with `ocx claude`). Run `ocx claude` to refresh the gateway model
 
 **200k context ceiling despite big model** — Select the `[1m]` variant in the picker, or enable
 auto-context (on by default). If the picker shows no `[1m]` row, the model's authoritative context
-window may be below the auto-compact threshold.
+window may be below the fixed 829,800-token floor.
 
 **High token count from skill loads** — The bundled `claude-api` skill (~136k tokens) auto-loads
 on Claude model mentions. This is normal for native passthrough; on routed models, opencodex stubs
@@ -991,7 +1054,7 @@ and `"force"`. A value you export yourself always wins over the injected one.
 directives, not the Agent tool's `model` argument. Make sure the directive matches the intended
 route. Pass `"haiku"` as the model placeholder.
 
-Set `claudeCode.stabilizePromptCache` to `true` in `config.json` to relocate supported trailing Claude harness notices from system instructions to a trailing user message on translated routes. The default is `false`. Enable it only when this role change is appropriate for your clients. It preserves fenced examples and unmatched text; native Anthropic passthrough is unchanged. The metadata-less prompt-cache key then follows stabilized instructions. This does not create conversation identity or guarantee upstream cache hits.
+Set `claudeCode.stabilizePromptCache` to `true` in `config.json` to peel supported trailing Claude harness notices from system instructions on translated routes. Recognized `<total_tokens>N tokens left</total_tokens>` footers are dropped, including repeated footers. TaskCreate reminders still move to a trailing user message; if only token footers were peeled, no input message is added. The default is `false`. Enable it only when this role change is appropriate for your clients. It preserves fenced examples and unmatched text; native Anthropic passthrough is unchanged. The metadata-less prompt-cache key then follows stabilized instructions. This does not create conversation identity or guarantee upstream cache hits.
 
 On every translated Chat route, timeline reminders keep their position in the
 conversation, after any pending tool results. This prevents a newly appended
@@ -1017,7 +1080,7 @@ the confirmed obsolete token file and applying first-party mode again; never del
 
 ### First-party picker context markers
 
-The Desktop Code-tab picker adds `[1m]` to routed models whose authoritative context window is at least one million tokens, so Claude uses its 1M accounting instead of the smaller custom-model fallback. Labels, profile order, and provider routes stay unchanged. Unknown and sub-million windows remain unmarked, including native long-window opt-ins: the picker cannot guarantee that a Desktop or remote runner receives the matching compaction environment. The paired auto-context setup for `ocx claude` is unchanged. An existing conversation keeps its saved selector until you select the model again from the refreshed picker.
+The Desktop Code-tab picker adds `[1m]` to routed models whose authoritative context window is at least one million tokens or at least the 829,800-token default compaction threshold (for example a native GPT-6 model opted into its 872k window), so Claude uses its 1M accounting instead of the smaller custom-model fallback. Claude models on an Anthropic route still need a genuine 1M. Labels, profile order, and provider routes stay unchanged. Unknown and shorter windows remain unmarked. The picker cannot guarantee that a Desktop or remote runner receives the matching compaction environment, so a long-window model that outgrows its real window gets a `prompt is too long` error, which Claude Code answers by compacting. Desktop 3P `supports1m`/`prefer1m` and generated subagents follow the same rule. The paired auto-context setup for `ocx claude` is unchanged. An existing conversation keeps its saved selector until you select the model again from the refreshed picker.
 
 ### Forced Claude Code subagent model
 
@@ -1025,7 +1088,7 @@ The Subagents page offers **Force all subagents onto one model**, off by default
 
 `ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
 
-This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` when the authoritative window reaches the fixed 829,800-token floor, and only for a genuine 1M window on Anthropic Claude models and bare `claude-*` selectors; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
 
 Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
 

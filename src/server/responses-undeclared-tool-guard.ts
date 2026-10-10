@@ -909,6 +909,7 @@ function failedBlocks(name: string, newline: string): readonly string[] {
  * @param providerExecutedCallTypes - Call types executed by the provider.
  * @param declaredBare - Explicitly declared bare tool names without namespace provenance.
  * @param declaredCustom - Current bare custom declarations eligible for code-mode recovery.
+ * @param enforceDeclaredToolNames - Refuse undeclared calls; normalization remains active when false.
  * @returns An SSE block rewrite function.
  */
 export function createUndeclaredToolCallGuardBlockRewrite(
@@ -922,6 +923,10 @@ export function createUndeclaredToolCallGuardBlockRewrite(
   // 缺省 false —— phantom 本来就只在 shadow 作用域出现（此时 gate 恒 true），授权/发射/快照
   // 三处必须同答案，所以整条 rewrite 共用这一个布尔。
   allowEmissionRepair?: boolean,
+  // 上游 #6800 系列：chat / anthropic 入站 wire 不做未声明拒绝（那条路径的 catalog 形状与
+  // 客户端授权集合不同构），只保留归一化。与 phantom 丢弃正交：phantom 只出现在 shadow
+  // 作用域，任何 wire 都必须先丢，只有未声明拒绝受这道门约束。
+  enforceDeclaredToolNames = true,
 ): SseBlockRewrite {
   let tripped = false;
   const phantomActive = phantomAllowlist !== undefined && phantomAllowlist.size > 0;
@@ -962,7 +967,9 @@ export function createUndeclaredToolCallGuardBlockRewrite(
         }
       }
     }
-    const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, undefined, allowEmissionRepair);
+    const name = enforceDeclaredToolNames
+      ? undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, undefined, allowEmissionRepair)
+      : undefined;
     if (name !== undefined) {
       tripped = true;
       return failedBlocks(name, block.includes("\r\n") ? "\r\n" : "\n");

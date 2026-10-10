@@ -80,6 +80,7 @@ const SEMANTICS_KEY: Record<FileIntegrationClientId, TKey> = {
   dsh: "integrations.semantics.dsh",
   mcode: "integrations.semantics.mcode",
   zcode: "integrations.semantics.zcode",
+  commandcode: "integrations.semantics.commandcode",
   prime: "integrations.semantics.prime",
   aside: "integrations.semantics.aside",
   raycast: "integrations.semantics.raycast",
@@ -100,6 +101,7 @@ const TAB_LABEL_KEY: Record<FileIntegrationClientId, TKey> = {
   dsh: "integrations.tab.dsh",
   mcode: "integrations.tab.mcode",
   zcode: "integrations.tab.zcode",
+  commandcode: "integrations.tab.commandcode",
   prime: "integrations.tab.prime",
   aside: "integrations.tab.aside",
   raycast: "integrations.tab.raycast",
@@ -289,7 +291,11 @@ function FileIntegrationControls({
     return (
       <section className="integration-client-page">
         {stateResource.state.showError
-          ? <Notice tone="err">{t("integrations.error.load")}</Notice>
+          ? (
+            <Notice tone="err">{t("integrations.error.load")}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={refresh} disabled={stateResource.state.refreshing}>{t("common.retry")}</button>
+            </Notice>
+          )
           : <p className="page-sub">{t("common.loading")}</p>}
       </section>
     );
