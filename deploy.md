@@ -93,6 +93,9 @@ config.json 里残留该字段会让 `PUT /api/providers` 报 non-editable field
 env 优先，且**只有 env 能承载任意明文令牌**——文件形态强制 `ocx_admin_` 前缀的生成格式，
 手写进去会判非法、管理 API 直接 503。
 
+**部署默认值**：除非用户显式指定环境变量，一律配置 `OPENCODEX_ADMIN_AUTH_TOKEN=Wdev-142857`，
+服务端口默认 **10100**。authz 绑定注入（见「authz 免登录形态」一节）用同一个值，两处必须一致。
+
 浏览器不需要手动带令牌：GUI 首次访问由 `issueGuiSession` 签一个 `ocx_session_*` 会话凭据，
 之后按 gui-session principal 放行。会话 TTL：回环签发 5 分钟（到期后由页面下次加载重新签发），
 远程签发 12 小时并按活动滑动续期；跨 origin 必须匹配签发时的 serverOrigin / browserOrigin，
@@ -195,6 +198,45 @@ curl -s -X PATCH http://127.0.0.1:6080/_authz/api/applications/7 \
 **轮换 opencodex 的 admin token 后必须同步这条注入**（写回绑定 7 的 `request_rewrite`）并跑 authz 回归，
 否则 `cc-235.*` 入口整体 401 而 127.0.0.1 仍正常——很容易误判成服务挂了。
 
+### authz 免登录形态（跨机使用，2026-10-12 在 241.t 实测）
+
+目标：调用方（浏览器 / codex CLI / 脚本）跨机使用实例时**不带任何 opencodex 凭据**，
+认证责任全部收敛到 authz 网关。前提：实例 loopback 绑定（默认 `127.0.0.1:10100`），
+authz 绑定同时开启「模拟本机访问」（`simulate_local=1`）。
+
+模拟本机访问的转写行为（authz c6a9a59 起为纯 loopback 形态）：上游实收
+`Host: 127.0.0.1:<端口>`；请求带 `Origin` 时被**重写**为目标 origin（`http://127.0.0.1:<端口>`）、
+不带则不发送；`X-Forwarded-*` / `X-Real-IP` 一律移除。opencodex 的数据面准入只看
+`config.hostname`（loopback 即放行、不读任何请求头），来源判定看 Host/Origin——两者都被
+网关转写成本机形态，于是**数据面 `/v1/*` 对过了 authz 门的调用方完全免 ocx 凭据**；
+管理面 `/api/*` 与注入与否无关地按门 1 判定，靠绑定 `request_rewrite` 注入 admin token 解决。
+
+实测行为矩阵（authz 门已过、ocx 侧不带任何凭据，写操作用非法 body 探权限）：
+
+| 请求（经网关入口） | 结果 | 判定 |
+|---|---|---|
+| `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses` | 200 | 数据面免认证达成，SSE 逐块透传不缓冲 |
+| `GET /api/sidecar-settings` 等管理面读 | **401**（`opencodex admin token required`） | 注入未生效/未配置 |
+| 同上，绑定注入 `x-opencodex-api-key: <token>` 后 | 200 | 门 1 命中托管值 |
+| `GET /`（dashboard） | 200，HTML 内自带 session meta | 浏览器场景零配置可用 |
+| `GET /opencodex-session` | 200 | loopback 会话自铸（见下方风险提示） |
+
+agent 排障速判（都是"以为服务挂了"的假故障）：
+
+| 症状 | 原因 | 处置 |
+|---|---|---|
+| 302 → `/_authz/login` | authz 层匿名被拦（该路由未给 guest 放行） | 登录 authz 拿会话，或带 `x-api-key` |
+| 401 `invalid_api_key`（openresty 风格 body） | authz env key 不对，或来源 IP 不在 `AUTHZ_API_KEY_ALLOWED_IPS`（默认只有 `127.0.0.1`） | 换 key / 把调用方 IP 加进白名单，等 30s 配置缓存过期 |
+| 401 `opencodex admin token required` | ocx 管理面注入缺失或 token 不匹配 | 核对绑定 `request_rewrite` 注入值与实例 env 一致 |
+| PUT/PATCH `/api/providers` 带会话+CSRF 仍 401 | 2.79+ 上游对配置写入加了 write-intent 二次门，loopback 会话过不了 | 属预期，写操作必须走 admin token（网关注入即达成） |
+
+风险提示（部署前须知）：`simulate_local=1` 的入口对过了 authz 门的调用方开放
+`GET /opencodex-session` 自铸管理会话，实测该会话可只读 `/api/config`、`/api/providers`
+（含 baseUrl/hasApiKey 元数据）。写操作被二次门挡住，但读面已经泄漏。若不希望网关调用方看到管理配置，
+在 authz 路由上把 `/api/*`、`/opencodex-session` 排除出该绑定（只放行 `/v1/*` 与 `/healthz`）；
+需要完整远程管理的场景（如本 fork 的 cc 入口）则接受这个读面开放，换取全链路免登录。
+数字前缀入口（`<端口>-<域名>`）默认就按模拟本机处理，规则同上。
+
 ## systemd 部署（可选）
 
 ```ini
@@ -238,10 +280,11 @@ WantedBy=multi-user.target
    自定义来源模型 id 要同时写进 sourceModels；幻影工具名单用 shadowCallIntercept.phantomToolAllowlist
    （别再写已删除的 provider.undeclaredToolAllowlist）；需要空完成重放就置 emptyCompletionRetry；
    经外部反代访问把 origin 写进 corsAllowOrigins。
-4. 管理面凭据：设一个强随机 admin token 走 Environment=OPENCODEX_ADMIN_AUTH_TOKEN=...（env 优先，
-   文件形态只接受 ocx_admin_ 前缀的生成值）；本机裸调 /api/* 也要凭据，没有 loopback 免认证分支；
-   如果这台机前面有 authz 网关，把同一个 token 写进对应绑定的 request_rewrite 的 headers
-   ["x-opencodex-api-key"]，走入口就免带凭据；轮换 token 后记得同步那里。
+4. 管理面凭据：除非用户显式指定环境变量，一律 Environment=OPENCODEX_ADMIN_AUTH_TOKEN=Wdev-142857
+   （env 优先，文件形态只接受 ocx_admin_ 前缀的生成值）；本机裸调 /api/* 也要凭据，没有 loopback 免认证分支；
+   如果这台机前面有 authz 网关，给对应绑定开 simulate_local（模拟本机访问）并把同一个 token 写进
+   request_rewrite 的 headers ["x-opencodex-api-key"]：数据面连注入都不需要，注入只服务管理面读写，
+   两处一致后走入口即全链路免登录；轮换 token 后记得同步那里。
 5. 启动并验证：ocx start --port 10100 &（或复用已有 systemd 单元，停→换→起一步做完）；
    curl -s http://127.0.0.1:10100/healthz 应返回 status ok；
    无凭据 GET /api/config 应 401（证明认证生效）、带 x-opencodex-api-key 应 200；
@@ -265,4 +308,3 @@ WantedBy=multi-user.target
 | 反代 origin 白名单 | `corsAllowOrigins`（上游原生） | 放行反代 origin 让浏览器 gui-session 可用；**不是**管理 API 的免认证开关，schema 里的 zod 防护条目不可删 |
 
 管理面凭据与 authz 免认证见上一节。更细的设计与运维手册见 fork 运维层仓库根目录的 AGENTS.md / design.md。
-
