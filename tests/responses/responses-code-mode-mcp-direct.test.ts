@@ -116,6 +116,17 @@ describe("code-mode direct mcp tool-call recovery", () => {
     );
   });
 
+  test("case-folded spellings keep the host-owned identifier case", () => {
+    // 大小写归宿主所有：折叠成小写的 tools.mcp__Codex__Get_Usage 指向一个不存在的主机工具。
+    const camel = "mcp__Codex__Get_Usage";
+    const compiled = `const result = await tools.${camel}({});\ntext(result);`;
+    for (const emitted of [camel, `default.${camel}`, `functions__${camel}`, `tools.${camel}`]) {
+      expect([emitted, compileCodeModeHelperInput("{}", emitted, "exec")]).toEqual([emitted, compiled]);
+    }
+    // 沙箱前缀本身可以是大写/全角，服务器与工具名的大小写原样保留。
+    expect(compileCodeModeHelperInput("{}", `TOOLS＝${camel}`, "TOOLS＝EXEC")).toBe(compiled);
+  });
+
   test("generated JavaScript uses host tool lookup and keeps arguments as data", async () => {
     const args = { query: '"; throw new Error("injected") //', limit: 3 };
     const input = compileCodeModeHelperInput(JSON.stringify(args), MCP_NAME);

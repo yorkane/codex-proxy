@@ -3,7 +3,13 @@
 本 fork 与上游的定位不同：**仓库只做定时上游同步**（`.github/workflows/sync-upstream.yml`，
 每天 07:00 UTC 把 lidge-jun/opencodex 合入补丁分支，冲突/测试失败自动开 issue）与
 **发布安装包**（`.github/workflows/fork-release.yml`，补丁分支每次非文档 push 自动重建）。
-本地产物仅供调试，正式分发一律走 GitHub Release。
+本地产物仅供调试，对外正式分发走 GitHub Release；**内网固定发布主路径是
+`/data/share/deb/`（2026-10-13 起）**：每轮先 241.t 验收，通过后产物（npm tgz + prefix tar.gz，
+扩展名保持原样，不是 deb）连同 `.sha256` sidecar 发布到该目录，`codex-proxy-latest.json` 是
+机器可读 latest manifest。日常升级一条命令：
+`bash /home/aigc/ChatGPT/codex-proxy/script/upgrade-codex-proxy.sh`（默认后台，读该 manifest，
+只装已验证产物，`--dry-run`/`--status` 见脚本 usage）。旧的 `codex-proxy/build/` 归档目录
+转为 legacy 归档，历史产物保留。详见 `../doc/2026-10-13-fixed-release-deb-dir.md`。
 
 当前基线：上游 v2.78.0，补丁分支 `codex/shadow-call-per-source-modelmap`。
 

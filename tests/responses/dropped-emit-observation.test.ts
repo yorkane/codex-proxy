@@ -235,11 +235,16 @@ describe("silent removals are recorded on the attempt", () => {
     // With no catalog at all the guard's own no-catalog branch removes the container - it is
     // provably not callable whatever the catalog says - and that removal is silent, so it must be
     // recorded. This is the shape a container drop takes without an allowlist.
+    // The terminal is response.failed, not completed: this is third-party traffic (the gate is
+    // on for this file) whose only call was an unconverted container drop, and a done turn whose
+    // one action the proxy deleted is the gap that rule closes. Observability is the point of
+    // this file, so the row assertions below stay exactly as they were.
     const { wire, attempt } = await run("tools", {
       noCatalog: true, phantom: new Set<string>(), freeform: new Set<string>(),
     });
     expect(clientSeesCallNamed(wire, "tools")).toBe(false);
-    expect(wire).toContain("response.completed");
+    expect(wire).toContain("response.failed");
+    expect(wire).toContain("filtered_container_no_valid_output");
     expect(attempt.droppedEmits).toEqual([
       { name: "tools", effective: "tools", decision: "namespace-container", count: 1 },
     ]);
@@ -249,11 +254,15 @@ describe("silent removals are recorded on the attempt", () => {
     // The shadow case: the operator put tools on the phantom allowlist, so the drop happens in the
     // allowlist branch. The label must still say container - the more specific diagnosis wins,
     // otherwise adding the name to the list would erase why the call was really impossible.
+    // Same terminal rule, from the other drop site: the counting criterion is the disposition the
+    // recorder writes, not which branch carried the drop, so an allowlisted container on a
+    // third-party route with no exec channel (no directive is possible) fails the same way.
     const { wire, attempt } = await run("tools", {
       phantom: new Set(["tools"]), enforce: true, freeform: new Set<string>(),
     });
     expect(clientSeesCallNamed(wire, "tools")).toBe(false);
-    expect(wire).toContain("response.completed");
+    expect(wire).toContain("response.failed");
+    expect(wire).toContain("filtered_container_no_valid_output");
     expect(attempt.droppedEmits).toEqual([
       { name: "tools", effective: "tools", decision: "namespace-container", count: 1 },
     ]);

@@ -322,6 +322,12 @@ standing down only for `authMode: "forward"` and requests with no catalog; relay
 `src/server/responses/run-turn-execution.ts`, `src/server/responses/adapter-delivery.ts`, and
 `src/server/responses/passthrough-delivery.ts` scope membership refusal from `inboundWire` for SSE and JSON alike.
 
+## Third-party emission repair
+`thirdPartyEmissionRepair` gates name repair; official gate=false keeps existing semantics. Exact declarations win;
+NFKC/zero-width/case/prefix cleanup selects a unique declared spelling. Helper-body parsing follows the same cleanup; MCP target case is preserved.
+Third-party feedback defaults to 2 per request even without Shadow config; every directive spends it. Max 0 / `phantomToolAllowlistEnabled: false` disables feedback, not name repair.
+Phantom names remain shadow-only; combo preflight clones the budget. Unreplaced namespace-container drops end failed with `filtered_container_no_valid_output` in both bridges; pure phantom removal stays unchanged. Passthrough injects no feedback.
+
 ## Selection outlives the declaration check
 
 Declaration and selection are different questions, and the guard above answers only the first.
@@ -362,16 +368,10 @@ that request with a 400. A forced function selector is preserved: a selector thi
 honor is a client input error, and `src/server/responses/passthrough-dispatch.ts` already answers
 it with one.
 
-Those two omissions are not the same edit, because the scope above is read from the body this
-normalization produces. `auto` selects from the catalog, so removing it from a request with an
-empty one states nothing new. `none` is a prohibition, and on a request whose catalog this
-normalizer emptied it is the only place the turn's client-call boundary is written down. Dropping
-the word alone would let the reconstruction hand back a call the caller ruled out, and nothing
-behind it would catch that: the repair runs on the grok client surface, while the declaration
-guard stands down whenever the provider's `authMode` is `forward` — which is what the xAI OAuth
-lane is. So the prohibition is restated as the explicit empty catalog, which carries the same
-deny-all, which the scope and the declaration guard both already read that way, and which this
-destination receives unchanged whenever a caller sends one itself.
+`auto` selects from the catalog, so dropping it from an empty one states nothing new.
+`none` is the remaining prohibition when normalization empties that catalog. Under
+`authMode: "forward"` the declaration guard stands down, so the normalizer restates the
+prohibition as an explicit empty catalog, preserving the same deny-all boundary.
 
 ## Passthrough SSE stream shapes (#314)
 

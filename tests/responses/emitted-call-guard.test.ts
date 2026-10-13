@@ -6,7 +6,12 @@
  * never be dropped, and a namespace leak must never be silently discarded.
  */
 import { describe, expect, test } from 'bun:test';
-import { resolveEmittedCall } from '../../src/responses/emitted-call-guard';
+import {
+  droppedEmitDisposition,
+  isDroppedNamespaceContainer,
+  preflightEmittedCall,
+  resolveEmittedCall,
+} from '../../src/responses/emitted-call-guard';
 
 const collab = new Set(['collaboration__spawn_agent', 'collaboration__update_plan', 'exec', 'web__run']);
 const freeform = new Set(['exec']);
@@ -47,16 +52,37 @@ describe('resolveEmittedCall layer order', () => {
     expect(v).toEqual({ kind: 'allow', name: 'web__run', repaired: true });
   });
 
-  test('a namespace container becomes directive feedback, not a drop', () => {
+  test('a namespace container becomes directive feedback, and pays for it', () => {
+    // The container directive is a synthetic throw like any other, so it draws on the
+    // same per-request budget: a model looped on a container name must not mint an
+    // unlimited number of directive items (the observed production failure shape).
+    const budget = { remaining: 1 };
     const v = resolveEmittedCall('tools', {
       declaredToolNames: collab,
       freeformToolNames: freeform,
       phantomNames: new Set(['tools']),
+      undeclaredFeedback: budget,
     });
     expect(v.kind).toBe('feedback');
     if (v.kind !== 'feedback') return;
     expect(v.input).toContain('namespace-leak repair');
     expect(v.input).toContain('throw new Error');
+    expect(budget.remaining).toBe(0);
+    // Spent: the container falls back to the drop it had before directives existed.
+    expect(resolveEmittedCall('tools', {
+      declaredToolNames: collab,
+      freeformToolNames: freeform,
+      phantomNames: new Set(['tools']),
+      undeclaredFeedback: budget,
+    })).toEqual({ kind: 'drop', name: 'tools' });
+  });
+
+  test('a namespace container with no budget at all drops, as it did pre-directive', () => {
+    expect(resolveEmittedCall('tools', {
+      declaredToolNames: collab,
+      freeformToolNames: freeform,
+      phantomNames: new Set(['tools']),
+    })).toEqual({ kind: 'drop', name: 'tools' });
   });
 
   test('a namespace leak without an exec channel falls back to dropping', () => {
@@ -100,6 +126,9 @@ describe('resolveEmittedCall observability', () => {
       phantomNames: new Set(['tools', 'web_search']),
       onDecision: (info) => seen.push(info.decision),
       servingRouteIsThirdParty: true,
+      // Budget present: the container layer only reports namespace-leak when it can
+      // actually answer with a directive, which now costs one unit.
+      undeclaredFeedback: { remaining: 5 },
       ...opts,
     });
     track('exec');
@@ -107,7 +136,11 @@ describe('resolveEmittedCall observability', () => {
     track('tools');
     track('web_search');
     track('nonsense');
-    expect(seen).toEqual(['declared', 'repaired', 'namespace-leak', 'phantom-drop', 'undeclared']);
+    // With a budget the two rejected names are answered with directives (each consuming
+    // one unit) instead of the silent drop / fail-closed pair: the allowlisted phantom and
+    // the fresh hallucination both report undeclared-feedback, the container reports
+    // namespace-leak. The budget-less twin of this sequence is the layer-order block above.
+    expect(seen).toEqual(['declared', 'repaired', 'namespace-leak', 'undeclared-feedback', 'undeclared-feedback']);
   });
 
   test('a name that is both ambiguous and allowlisted is never guessed', () => {
@@ -197,5 +230,163 @@ describe('resolveEmittedCall undeclared correction feedback (budget)', () => {
     if (v.kind !== 'feedback') return;
     // The directive rides inside a thrown string literal, so its quotes are escaped.
     expect(v.input).toContain('closest declared tool is \\"collaboration__update_plan\\"');
+  });
+});
+
+describe('canonical container lookup (third-party only)', () => {
+  const zw = '\u200b';
+  const fullwidthEq = '\uff1d';
+
+  test('a misspelled container on a direct route is answered and pays for it', () => {
+    // Layer order is unchanged by the widening: a name the phantom list does not carry is
+    // answered by the fresh-undeclared directive (the catalog listing), drawing on the same
+    // budget. The canonical container reading is what happens WITHOUT a payable directive -
+    // the bridge's container tier (drop + continue, namespace-container telemetry) instead
+    // of the 502 cliff - pinned at the disposition layer below.
+    for (const name of ['TOOLS', 'Tools', 'tools' + zw, 'to' + zw + 'ols', 'COLLABORATION']) {
+      const budget = { remaining: 2 };
+      const v = resolveEmittedCall(name, {
+        declaredToolNames: collab,
+        freeformToolNames: freeform,
+        servingRouteIsThirdParty: true,
+        undeclaredFeedback: budget,
+      });
+      expect(v.kind).toBe('feedback');
+      if (v.kind !== 'feedback') continue;
+      expect(v.reason).toBe('undeclared');
+      expect(v.input).toContain('undeclared-tool repair');
+      expect(budget.remaining).toBe(1);
+    }
+  });
+
+  test('a listed container keeps the namespace tier, and pays for it', () => {
+    // The shadow phantom list is matched raw (it records what the model emitted); a listed
+    // container answers with the flattened-form directive, now budget-charged like any
+    // other synthetic throw.
+    const budget = { remaining: 2 };
+    const v = resolveEmittedCall('tools', {
+      declaredToolNames: collab,
+      freeformToolNames: freeform,
+      phantomNames: new Set(['tools']),
+      servingRouteIsThirdParty: true,
+      undeclaredFeedback: budget,
+    });
+    expect(v.kind).toBe('feedback');
+    if (v.kind !== 'feedback') return;
+    expect(v.reason).toBe('namespace-leak');
+    expect(v.input).toContain('namespace-leak repair');
+    expect(budget.remaining).toBe(1);
+  });
+
+  test('the official gate keeps the raw comparison byte-for-byte', () => {
+    // gate=false must answer exactly as v2.82.0 does: TOOLS is not a container there, so the
+    // emission lands on the undeclared path, never on the container directive.
+    const v = resolveEmittedCall('TOOLS', {
+      declaredToolNames: collab,
+      freeformToolNames: freeform,
+      servingRouteIsThirdParty: false,
+      undeclaredFeedback: { remaining: 2 },
+    });
+    expect(v.kind).toBe('feedback');
+    if (v.kind === 'feedback') expect(v.reason).toBe('undeclared');
+    expect(isDroppedNamespaceContainer('TOOLS', collab)).toBe(false);
+    expect(isDroppedNamespaceContainer('TOOLS', collab, true)).toBe(true);
+  });
+
+  test('canonicalization never releases a name and never outranks a declared tool', () => {
+    // A catalog that declares TOOLS refutes the container reading, and the call is relayed.
+    const declaredTools = new Set(['TOOLS', 'exec']);
+    expect(isDroppedNamespaceContainer('TOOLS', declaredTools, true)).toBe(false);
+    expect(resolveEmittedCall('TOOLS', {
+      declaredToolNames: declaredTools,
+      freeformToolNames: freeform,
+      servingRouteIsThirdParty: true,
+      undeclaredFeedback: { remaining: 1 },
+    })).toEqual({ kind: 'allow', name: 'TOOLS', repaired: false });
+    // A sandbox-prefixed assignment name is NOT a bare container: it is a name repair target,
+    // and the canonical container check must not swallow it into the container tier.
+    expect(isDroppedNamespaceContainer('tools' + fullwidthEq + 'exec_command', collab, true)).toBe(false);
+  });
+
+  test('a canonical container with no budget drops under its folded name', () => {
+    // The drop CARRIES the canonical spelling, so every consumer's raw container check - the
+    // bridge tier and the telemetry label - sees a container, and the turn survives on drop
+    // + continue instead of relaunching the 502 cliff. No consumer has to widen its table.
+    const v = resolveEmittedCall('TOOLS', {
+      declaredToolNames: collab,
+      freeformToolNames: freeform,
+      servingRouteIsThirdParty: true,
+    });
+    expect(v).toEqual({ kind: 'drop', name: 'tools' });
+    expect(droppedEmitDisposition(v.name, 'TOOLS', collab)).toBe('namespace-container');
+    // A raw miss that is not a container under any fold keeps its old label.
+    expect(droppedEmitDisposition('update_plan', 'update_plan', collab)).toBe('phantom');
+    // Official routes get the raw rule only: TOOLS is not a container there, so the drop
+    // carries the emission unchanged and the name lands on the fail-closed path.
+    expect(resolveEmittedCall('TOOLS', {
+      declaredToolNames: collab,
+      freeformToolNames: freeform,
+      servingRouteIsThirdParty: false,
+    })).toEqual({ kind: 'drop', name: 'TOOLS' });
+  });
+});
+
+describe('preflightEmittedCall agrees with the bridge', () => {
+  const phantoms = new Set(['update_plan']);
+
+  test('the preflight passes every emission the bridge would not fail closed', () => {
+    const opts = (budget?: { remaining: number }) => ({
+      declaredToolNames: collab,
+      enforceDeclaredToolNames: true,
+      freeformToolNames: freeform,
+      phantomNames: phantoms,
+      servingRouteIsThirdParty: true,
+      ...(budget ? { undeclaredFeedback: budget } : {}),
+    });
+    // Repaired, declared, container-with-budget, allowlisted phantom, and a container with no
+    // budget left (the bridge drops it and continues) all keep the attempt alive.
+    expect(preflightEmittedCall('spawn_agent', opts())).toEqual({ action: 'pass' });
+    expect(preflightEmittedCall('exec', opts())).toEqual({ action: 'pass' });
+    expect(preflightEmittedCall('tools', opts({ remaining: 1 }))).toEqual({ action: 'pass' });
+    expect(preflightEmittedCall('tools', opts())).toEqual({ action: 'pass' });
+    expect(preflightEmittedCall('update_plan', opts())).toEqual({ action: 'pass' });
+    // A fresh hallucination is only survivable while the budget can pay for its directive.
+    expect(preflightEmittedCall('totally_made_up', opts({ remaining: 1 }))).toEqual({ action: 'pass' });
+    expect(preflightEmittedCall('totally_made_up', opts())).toEqual({ action: 'reject', name: 'totally_made_up' });
+  });
+
+  test('the preflight is a pure query: it clones the budget and reports nothing', () => {
+    const budget = { remaining: 1 };
+    const seen: string[] = [];
+    const opts = {
+      declaredToolNames: collab,
+      enforceDeclaredToolNames: true,
+      freeformToolNames: freeform,
+      phantomNames: phantoms,
+      servingRouteIsThirdParty: true,
+      undeclaredFeedback: budget,
+      onDecision: (info: { decision: string }) => seen.push(info.decision),
+    };
+    expect(preflightEmittedCall('tools', opts)).toEqual({ action: 'pass' });
+    expect(preflightEmittedCall('totally_made_up', opts)).toEqual({ action: 'pass' });
+    expect(budget.remaining).toBe(1);
+    expect(seen).toEqual([]);
+    // The bridge spends exactly one unit for the directive the preflight waved through.
+    expect(resolveEmittedCall('tools', opts).kind).toBe('feedback');
+    expect(budget.remaining).toBe(0);
+  });
+
+  test('the official gate and the deferred wire keep their own answers', () => {
+    // Official enforcing route: a container is fail-closed for the bridge, so the preflight
+    // rejects it too - that pair is the byte-identical v2.82.0 behaviour.
+    const official = {
+      declaredToolNames: collab,
+      enforceDeclaredToolNames: true,
+      freeformToolNames: freeform,
+      servingRouteIsThirdParty: false,
+    };
+    expect(preflightEmittedCall('tools', official)).toEqual({ action: 'reject', name: 'tools' });
+    // Deferred enforcement (#4735): an undeclared provider echo is relayed, never hopped.
+    expect(preflightEmittedCall('provider_echo', { ...official, enforceDeclaredToolNames: false })).toEqual({ action: 'pass' });
   });
 });

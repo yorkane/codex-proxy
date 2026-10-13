@@ -59,7 +59,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, noteToolNameRewriteSafely, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
+import { adapterFailureFromEvent, emptyChunks, filteredContainerFailure, joinChunks, noteDroppedEmitSafely, noteToolNameRewriteSafely, ownedBudgetAbandonedMs, responsesUsage, toolCallArgumentsCouldBeJson, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 
 function sseEvent(name: string, data: Record<string, unknown>): string {
@@ -507,6 +507,13 @@ export function bridgeToResponsesSSE(
       // synthetic compaction item's payload on done.
       let compaction = emptyChunks();
       let currentToolCall: { itemId: string; outputIndex: number; callId: string; name: string; args: string; argsBytes: number; namespace?: string; freeform?: boolean; toolSearch?: boolean; inputEmitted?: string; codeModeHelperName?: string; providerMetadata?: OcxProviderOpaqueToolCallMetadata } | null = null;
+      // 被本代理当容器名整条丢掉的发射数（「丢弃并继续」那一档，且没被转成 directive feedback）。
+      // 三方路由上只要有一笔这样的丢弃，终态就是明确的 failed：被删掉的那次调用没有被恢复的证据，
+      // 同轮剩下的 commentary 或其它调用不能替它作证 —— 现场取证里模型先做真事、尾随裸 tools，
+      // 客户端记一次成功收尾，下一轮继续空转。见 internal.ts 的 filteredContainerFailure。
+      // phantom 允许列表那一档不计数（它的契约就是「静默移除、回合照常收尾」）；feedback 与
+      // 改名中继也不计数 —— 那两条已经把发射变成客户端真的会执行的调用。
+      let filteredContainerDrops = 0;
       // Open native web-search cell (between begin and end). Holds the output index allocated on
       // begin so the matching done reuses it; closed as `failed` if the stream terminates early.
       let currentWebSearch: { itemId: string; eventId: string; outputIndex: number } | null = null;
@@ -1103,11 +1110,21 @@ export function bridgeToResponsesSSE(
                 if (options?.undeclaredToolPhantomNames
                   && (options.undeclaredToolPhantomNames.has(verdict.name)
                     || options.undeclaredToolPhantomNames.has(event.name))) {
+                  const phantomDisposition = droppedEmitDisposition(
+                    verdict.name, event.name, options?.declaredToolNames,
+                    options?.servingRouteIsThirdParty === true,
+                  );
                   noteDroppedEmitSafely(delivery, {
                     emitted: event.name,
                     effective: verdict.name,
-                    decision: droppedEmitDisposition(verdict.name, event.name, options?.declaredToolNames),
+                    decision: phantomDisposition,
                   });
+                  // A container name sitting on the phantom allowlist is dropped through THIS
+                  // branch, not the container branch below, and the budget being spent is what
+                  // routes it here. The counting criterion is "an unconverted container drop",
+                  // not "which branch carried it" — the durable row already reports it as
+                  // namespace-container, and the terminal has to agree with the row.
+                  if (phantomDisposition === "namespace-container") filteredContainerDrops++;
                   break;
                 }
                 // 命名空间容器名（tools / collaboration）在强制模式下也不该整轮 502。
@@ -1132,6 +1149,7 @@ export function bridgeToResponsesSSE(
                     effective: verdict.name,
                     decision: "namespace-container",
                   });
+                  filteredContainerDrops++;
                   break;
                 }
                 if (enforceDeclared) {
@@ -1402,13 +1420,38 @@ export function bridgeToResponsesSSE(
                 reportTerminal("incomplete");
               } else {
                 await awaitThoughtSignatureDurability();
-                const response = { ...responseSnapshot("completed", finishedItems, event.endTurn), usage: responsesUsage(event.usage) };
-                options?.onCompletedResponse?.(response, event.providerState);
-                options?.onUsage?.(event.usage);
-                emit("response.completed", {
-                  response,
-                });
-                reportTerminal("completed");
+                // An unconverted container drop on a third-party route is not a success: the
+                // client records a done turn whose action the proxy deleted, which is the field
+                // shape behind the "interrupted" badge — the empty-output turn, the
+                // commentary-then-stop turn, and the did-some-work-then-leaked turn, all HTTP
+                // 200. Drop-and-continue above stays (the emission verdict is unchanged); only
+                // the terminal changes, and only on the routes that concession exists for. Same
+                // condition, same code as the buffered twin in response-json.ts.
+                const filteredFailure = filteredContainerFailure(
+                  options?.servingRouteIsThirdParty === true,
+                  filteredContainerDrops,
+                );
+                if (filteredFailure) {
+                  // No onCompletedResponse: a failed terminal must not enter the continuation
+                  // cache, the same rule the adapter-error branch below already follows.
+                  const response = {
+                    ...responseSnapshot("failed", finishedItems, event.endTurn),
+                    usage: responsesUsage(event.usage),
+                    error: filteredFailure,
+                    last_error: filteredFailure,
+                  };
+                  options?.onUsage?.(event.usage);
+                  emit("response.failed", { response });
+                  reportTerminal("failed");
+                } else {
+                  const response = { ...responseSnapshot("completed", finishedItems, event.endTurn), usage: responsesUsage(event.usage) };
+                  options?.onCompletedResponse?.(response, event.providerState);
+                  options?.onUsage?.(event.usage);
+                  emit("response.completed", {
+                    response,
+                  });
+                  reportTerminal("completed");
+                }
               }
               terminalEvent = true;
               break;

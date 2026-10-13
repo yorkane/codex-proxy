@@ -56,6 +56,15 @@ describe('repairEmittedToolName', () => {
     const bareOnly = new Set(['update_plan']);
     expect(repairEmittedToolName('collaboration__update_plan', bareOnly)).toBe('update_plan');
   });
+  test('NFKC, case and zero-width variants resolve only to a unique declaration', () => {
+    expect(repairEmittedToolName('WEB__RUN', new Set(['web__run']))).toBe('web__run');
+    expect(repairEmittedToolName('web\u200b__run', new Set(['web__run']))).toBe('web__run');
+    expect(repairEmittedToolName('web__run', new Set(['web__run']))).toBe('web__run');
+    // The exact spelling stays valid even if another declaration has the same lookup key.
+    expect(repairEmittedToolName('TOOLS', new Set(['TOOLS', 'tools']))).toBe('TOOLS');
+    // A non-exact spelling cannot choose between declarations sharing one canonical key.
+    expect(repairEmittedToolName('ToOlS', new Set(['TOOLS', 'tools']))).toBe('ToOlS');
+  });
 });
 describe('sandbox-namespace composition repair', () => {
   test('tools__web_run repairs to declared web__run', () => {
@@ -150,6 +159,19 @@ describe('sandbox-namespace composition repair: = and / spellings', () => {
     // The bare namespace form belongs to the namespace-leak feedback path; lock the
     // behaviour so the prefix table cannot silently start rewriting it.
     expect(repairEmittedToolName('tools', sandboxDeclared)).toBe('tools');
+    expect(repairEmittedToolName('tools\u200b', sandboxDeclared)).toBe('tools\u200b');
+    expect(repairEmittedToolName('TOOLS', new Set(['exec']))).toBe('TOOLS');
+  });
+  test('NFKC and case variants still require a declared unique target', () => {
+    expect(repairEmittedToolName('TOOLS＝EXEC_COMMAND', new Set(['exec']))).toBe('exec');
+    expect(repairEmittedToolName('ＴＯＯＬＳ＝ＥＸＥＣ＿ＣＯＭＭＡＮＤ', new Set(['exec_command'])))
+      .toBe('exec_command');
+    // 剥完前缀的残名与某条声明逐字相同 → 精确命中优先；目录里两种大小写并存时，
+    // 没有任何拼法逐字命中的写法（canonical 键对应两条声明）照旧歧义不放行。
+    const ambiguous = new Set(['exec_command', 'EXEC_COMMAND']);
+    expect(repairEmittedToolName('TOOLS＝EXEC_COMMAND', ambiguous)).toBe('exec_command');
+    expect(repairEmittedToolName('Exec_Command', ambiguous)).toBe('Exec_Command');
+    expect(repairEmittedToolName('TOOLS＝Exec_Command', ambiguous)).toBe('exec_command');
   });
   test('similar-but-different prefixes are not swallowed by the table', () => {
     expect(repairEmittedToolName('toolz=exec', sandboxDeclared)).toBe('toolz=exec');

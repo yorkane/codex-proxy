@@ -52,7 +52,7 @@ import {
   type TranslatorBudget,
   type TranslatorBufferKind,
 } from "../lib/translator-budget";
-import { adapterFailureFromEvent, emptyChunks, joinChunks, noteDroppedEmitSafely, noteToolNameRewriteSafely, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
+import { adapterFailureFromEvent, emptyChunks, filteredContainerFailure, joinChunks, noteDroppedEmitSafely, noteToolNameRewriteSafely, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
 
@@ -218,6 +218,11 @@ function buildResponseJSONWithBudget(
   // which is only true for a `done` without a stop reason. A buffered turn whose adapter simply
   // stopped emitting has no terminal at all, and must not be reported as a success.
   let sawTerminal = false;
+  // Buffered twin of the streaming counter in bridge/sse.ts: container emissions this proxy
+  // dropped whole and never converted into directive feedback. Any such drop on a third-party
+  // route fails the turn, whatever else the response carries. Allowlisted-phantom drops do not
+  // count (that allowlist's contract is a silent removal). Feeds filteredContainerFailure.
+  let filteredContainerDrops = 0;
   let batchCompaction = emptyChunks();
   let compactionEncryptedContent: string | undefined;
 
@@ -524,11 +529,19 @@ function buildResponseJSONWithBudget(
           if (options?.undeclaredToolPhantomNames
             && (options.undeclaredToolPhantomNames.has(verdict.name)
               || options.undeclaredToolPhantomNames.has(e.name))) {
+            const phantomDisposition = droppedEmitDisposition(
+              verdict.name, e.name, options?.declaredToolNames,
+              options?.servingRouteIsThirdParty === true,
+            );
             noteDroppedEmitSafely(delivery, {
               emitted: e.name,
               effective: verdict.name,
-              decision: droppedEmitDisposition(verdict.name, e.name, options?.declaredToolNames),
+              decision: phantomDisposition,
             });
+            // Streaming twin: a container name dropped through the allowlist branch (budget
+            // spent) is still an unconverted container drop, and the terminal must agree with
+            // the namespace-container row the recorder just wrote.
+            if (phantomDisposition === "namespace-container") filteredContainerDrops++;
             break;
           }
           // 与流式孪生同规则：命名空间容器名在强制模式下也是「丢弃并继续」，不整批 502。
@@ -546,6 +559,7 @@ function buildResponseJSONWithBudget(
               effective: verdict.name,
               decision: "namespace-container",
             });
+            filteredContainerDrops++;
             break;
           }
           if (enforceDeclared) {
@@ -721,8 +735,18 @@ function buildResponseJSONWithBudget(
     pushOutput(item, compactionEncryptedContent ? 0 : batchCompaction.bytes);
   }
 
-  const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;
-  const status = errorEvent
+  // Streaming twin above: a container drop that nothing on this turn replaced is not a success.
+  // Keyed on cleanDone so it can fire on exactly the shape streaming checks — a clean terminal
+  // done — and never on an upstream verdict already on the body: an adapter error, an explicit
+  // incomplete, a truncation stop reason, and a no-terminal EOF (adapter_eof) all keep the
+  // status the events themselves justify.
+  const filteredFailure = cleanDone && !errorEvent && !incompleteEvent && stopReason === undefined
+    ? filteredContainerFailure(options?.servingRouteIsThirdParty === true, filteredContainerDrops)
+    : undefined;
+  const failure = errorEvent
+    ? adapterFailureFromEvent(errorEvent)
+    : filteredFailure ? { httpStatus: 502, error: filteredFailure } : undefined;
+  const status = errorEvent || filteredFailure
     ? "failed"
     : incompleteEvent || stopReason === "max_tokens" || stopReason === "content_filter"
       ? "incomplete"

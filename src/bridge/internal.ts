@@ -253,3 +253,53 @@ export function noteToolNameRewriteSafely(
     effective: sanitizeLogMetadataString(info.effective) ?? "unnamed",
   });
 }
+
+/**
+ * The code for "this proxy dropped a namespace-container call on a third-party route and the model
+ * never got a replacement for it". Declared here because both bridge translators terminate on it:
+ * the two must report one signal for one condition.
+ */
+export const FILTERED_CONTAINER_NO_VALID_OUTPUT_CODE = "filtered_container_no_valid_output";
+
+/**
+ * The terminal verdict for a namespace-container drop that nothing on this turn replaced.
+ *
+ * The failure mode: a routed model emits one tool call, the emitted-call guard recognises it as a
+ * tool NAMESPACE container and drops it whole, the bridge keeps the turn alive, and the stream
+ * terminates completed with an empty output. The client records a done turn in which the proxy
+ * threw away the only thing the model asked for, and the session stops mid-task with no stated
+ * reason. Drop-and-continue is the right call about the emission; it says nothing about the turn
+ * that has nothing left.
+ *
+ * Scope is the container drop only, and it is deliberately not the phantom drop. An allowlisted
+ * phantom is a known-hallucination name for this replacement model, and the allowlist's whole
+ * contract is "remove it and let the turn finish" - a model that emits only a phantom is answered
+ * the same way as one that emits a phantom and then writes an answer. A container is different:
+ * it is the model calling the tool NAMESPACE itself, which is the observed shape of the
+ * premature-stop reports, and the model has no way to recover after the drop except to stop.
+ *
+ * So each bridge counts container drops that were not converted into directive feedback. If a
+ * third-party route has any, answer with a stated failure regardless of other text or calls in the
+ * same response: output is not evidence that the deleted intent was restored. Feedback is not a
+ * drop and remains a valid tool call; an ordinary text-only turn, a tool-only turn and an
+ * empty-completion turn with no container drop keep their existing paths.
+ *
+ * The payload is built, not classified. A local verdict keeps its own code, the same rule that
+ * protects input_admission_refused in classifyError: the generic 5xx remap would rename a
+ * decision this proxy made into an upstream server error, which is the one thing an operator
+ * reading the request log must not be told.
+ */
+export function filteredContainerFailure(
+  servingRouteIsThirdParty: boolean,
+  containerDrops: number,
+): OcxErrorPayload | undefined {
+  if (!servingRouteIsThirdParty || containerDrops <= 0) return undefined;
+  return {
+    message: "opencodex filtered " + containerDrops
+      + " namespace-container tool call(s) from this routed provider and the model was given no"
+      + " replacement for the call it tried to make, so the turn is reported failed rather than"
+      + " completed",
+    type: "upstream_error",
+    code: FILTERED_CONTAINER_NO_VALID_OUTPUT_CODE,
+  };
+}

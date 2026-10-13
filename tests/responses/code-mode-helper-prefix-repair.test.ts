@@ -59,7 +59,18 @@ async function viaBatch(emitted: string, args: string, code: Set<string>) {
 }
 
 const CODE_MODE = new Set(["exec"]);
-const EXEC_SPELLINGS = ["exec", "tools=exec", "tools__exec", "tools.exec", "tools/exec", "functions__exec"];
+const EXEC_SPELLINGS = [
+  "exec",
+  "tools=exec",
+  "tools__exec",
+  "tools.exec",
+  "tools/exec",
+  "functions__exec",
+  // 字形规整（NFKC + 大小写）：全角赋值符与全大写前缀必须和裸 exec 完全同命运。
+  "TOOLS＝EXEC",
+  "Tools=Exec",
+  "tools=\u200bexec",
+];
 const BODIES: Array<[string, string, string]> = [
   ["cmd object", JSON.stringify({ cmd: COMMAND }), shellExpected({ cmd: COMMAND })],
   ["command alias", JSON.stringify({ command: COMMAND }), shellExpected({ cmd: COMMAND })],
@@ -100,6 +111,40 @@ describe("helper recognition vocabulary", () => {
     expect(normalizeCodeModeHelperName("functions__get_goal")).toBe("get_goal");
     expect(normalizeCodeModeHelperName("tools/mcp__codex__handoff")).toBe("mcp__codex__handoff");
     expect(normalizeCodeModeHelperName("apply_patch")).toBe("apply_patch");
+  });
+
+  test("fullwidth and case variants of a helper name recognize the same helper", () => {
+    // 名字纠偏与 body 编译共用同一字形逻辑：TOOLS＝EXEC_COMMAND 认成 exec_command 后，
+    // shell 正文必须编译成 await tools.exec_command(...)，而不是改名后交回原始 JSON。
+    expect(normalizeCodeModeHelperName("TOOLS＝EXEC_COMMAND")).toBe("exec_command");
+    expect(normalizeCodeModeHelperName("Tools=Write_Stdin")).toBe("write_stdin");
+    expect(normalizeCodeModeHelperName("tools\u200b=apply_patch")).toBe("apply_patch");
+    const shellBody = JSON.stringify({ cmd: COMMAND });
+    expect(compileCodeModeHelperInput(shellBody, "exec_command", "TOOLS＝EXEC_COMMAND"))
+      .toBe(shellExpected({ cmd: COMMAND }));
+    expect(resolveCodeModeHelperName("tools＝exec_command", "exec", shellBody, undefined, CODE_MODE))
+      .toBe("exec_command");
+    expect(resolveCodeModeHelperName("TOOLS＝EXEC", "exec", shellBody, undefined, CODE_MODE))
+      .toBe("exec_command");
+  });
+
+  test("an exec_command wire name keeps the generic serialization under any spelling", () => {
+    // 扁平桥接目录逐字声明 exec_command 时，调用是结构化 function call：{input: ...} 不是它的
+    // 字段词表，shell 专用解析（解包）不许借字形归一挤进来。全角/大写写法必须与裸写法同命运。
+    const wrapped = JSON.stringify({ input: JSON.stringify({ cmd: COMMAND }) });
+    const generic = "const result = await tools.exec_command(" + wrapped + ");\ntext(result);";
+    for (const wire of ["exec_command", "EXEC_COMMAND", "TOOLS＝EXEC_COMMAND", "tools=exec_command"]) {
+      expect([wire, compileCodeModeHelperInput(wrapped, "exec_command", wire)]).toEqual([wire, generic]);
+    }
+    // 同一个正文在 exec 通道下仍按 shell 解析（对照：归一化改变的是字形，不是语义）。
+    expect(compileCodeModeHelperInput(wrapped, "exec_command", "TOOLS＝EXEC"))
+      .toBe(shellExpected({ cmd: COMMAND }));
+  });
+
+  test("the bare container name is never guessed into a helper", () => {
+    for (const name of ["tools", "TOOLS", "tools\u200b", "Tools"]) {
+      expect(normalizeCodeModeHelperName(name)).toBeUndefined();
+    }
   });
 
   test("unknown names decline instead of becoming a manufactured nested call", () => {

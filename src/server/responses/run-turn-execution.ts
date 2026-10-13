@@ -19,7 +19,7 @@ import type { AdapterEventQueue } from "../../adapters/run-turn-queue";
 import type { AttemptRecoveryKind } from "../../usage/log";
 import { providerFetch } from "./fetch-helpers";
 import { normalizeLogConversationId } from "../request-log-conversation";
-import { normalizeDeclaredToolName, repairEmittedToolName, type AdapterEvent, type OcxProviderContinuationState } from "../../types";
+import type { AdapterEvent, OcxProviderContinuationState } from "../../types";
 import { adapterFailureFromMessage, SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
 import { SendBudgetExhaustedError, markResponseNonReplayable } from "../../lib/upstream-retry";
 import {
@@ -33,6 +33,7 @@ import { tryAlternateAfterTerminalRefresh } from "../../oauth/kiro-terminal-fail
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { formatErrorResponse, bridgeToResponsesSSE, buildResponseJSON } from "../../bridge";
 import { shadowPhantomScope, thirdPartyEmissionRepair } from "./shadow-call-route";
+import { preflightEmittedCall } from "../../responses/emitted-call-guard";
 
 import { redactSecretString } from "../../lib/redact";
 import { adapterFailureFromEvent } from "../../bridge/internal";
@@ -643,7 +644,11 @@ export async function executeResponsesRunTurn(
 
     // Fork: shadow-scoped phantom tolerance + per-request directive-correction
     // budget (see shadow-call-route.ts); empty scope leaves every path byte-identical.
-    const shadowScope = shadowPhantomScope(parsed, config);
+    // route is passed so a direct third-party route gets the correction budget as well; the
+    // phantom list stays shadow-only. Same request-level route as emissionRepairThirdParty
+    // below (oauth rotation swaps credentials, never the route), so budget and repair gate
+    // can never disagree about which traffic they are serving.
+    const shadowScope = shadowPhantomScope(parsed, config, route);
     // Fork: 发射名改写门控 —— 只有三方路由（含 shadow 替换官方名的那一族）才允许 guard 改名；
     // OpenAI 运营的官方 Responses 端点恢复纯上游语义（见 shadow-call-route.ts 的谓词注释）。
     // route 是请求级的：oauth 账号轮换只换凭证/adapter，从不改 route.provider，因此这里算一次
@@ -666,24 +671,30 @@ export async function executeResponsesRunTurn(
     const classifyUndeclaredFirstTool = (
       event: AdapterEvent,
     ): Extract<AdapterEvent, { type: "error" }> | undefined => {
-      if (!enforceDeclaredToolNames || event.type !== "tool_call_start") return undefined;
+      if (event.type !== "tool_call_start") return undefined;
       // This tool is declared to the adapter by the private search loop.
       if (wsPlan && event.name === WEB_SEARCH_TOOL_NAME) return undefined;
-      // 这条预检是全仓库第三个「这个发射名算不算未声明」判定器，原本只 normalize 不 repair，
-      // 于是在 combo 尝试里抢在桥接改名之前把同一个畸形名 502 掉，把修复整个绕过。三套解析器
-      // 对同一输入必须同答案：这里补上改名器这一层（保持原有 502 结构与文案不变）。
-      // 发射名改写门控：官方端点（gate=false）不走改名器，只 normalize —— 预检与桥接的裁决
-      // 仍然同答案（两边此时都只是 normalize），该 502 就 502。
-      const normalized = normalizeDeclaredToolName(event.name, declaredToolNames, undefined, bareCustomToolNames);
-      const effectiveName = emissionRepairThirdParty
-        ? repairEmittedToolName(normalized, declaredToolNames, undefined, bareCustomToolNames)
-        : normalized;
-      if (declaredToolNames.has(effectiveName)) return undefined;
+      // 这条预检是全仓库第三个「这个发射名算不算未声明」判定器。它原本自己 normalize（后来补上
+      // repair）、再自己决定 502，于是同一个发射名在 combo 里得到两副面孔：裸容器名 tools 会被
+      // 桥接「丢弃并继续」，预检却抢先 502 —— 而预检的 502 是让 combo 换目标整轮重发，正是纠偏
+      // directive 想要避免的重放。现在它不再自己下判定，而是问 guard 同一个问题（preflightEmittedCall），
+      // 只把「桥接也会 502」的名字拦下来；放行/反馈/静默丢弃/容器丢弃全部交给桥接处理。
+      // 预算为克隆（预检纯查询，不扣真实预算；那一枚 directive 由桥接注入并计费）。
+      const preflight = preflightEmittedCall(event.name, {
+        declaredToolNames,
+        enforceDeclaredToolNames,
+        freeformToolNames,
+        phantomNames: shadowScope.undeclaredPhantomNames,
+        undeclaredFeedback: shadowScope.undeclaredToolFeedbackBudget,
+        bareCustomToolNames,
+        servingRouteIsThirdParty: emissionRepairThirdParty,
+      });
+      if (preflight.action === "pass") return undefined;
       return {
         type: "error",
         status: 502,
         errorType: "upstream_error",
-        message: undeclaredToolCallMessage(effectiveName),
+        message: undeclaredToolCallMessage(preflight.name),
       };
     };
     const grokDevinPreflight = !options.comboAttempt && logCtx.surface === "grok" && inboundWire === "responses"

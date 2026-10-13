@@ -12,7 +12,8 @@ import { handleResponses, isShadowSourceModel } from "../../src/server/responses
 import { DEFAULT_PHANTOM_TOOL_ALLOWLIST, shadowCallReplacementFor, shadowPhantomToolNames, shadowSourceModelPrefix, shouldInterceptShadowCall } from "../../src/lib/shadow-call";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { RequestLogContext } from "../../src/server/request-log";
-import type { OcxConfig } from "../../src/types";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { shadowPhantomScope } from "../../src/server/responses/shadow-call-route";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
@@ -777,10 +778,13 @@ describe("shadow phantom-tool allowlist scoping", () => {
     expect(payload).not.toContain('"name":"update_plan"');
   });
 
-  // Wiring tests for the per-request directive-correction budget allocated in
-  // core.ts (shadowCallIntercept.phantomToolFeedbackMax): rejected calls on
-  // shadow requests with a declared exec channel must reach the model as an
-  // exec directive instead of the silent drop or the fail-closed error.
+  // Wiring tests for the per-request directive-correction budget
+  // (shadowCallIntercept.phantomToolFeedbackMax): a rejected call on a request with a
+  // declared exec channel reaches the model as an exec directive instead of the silent
+  // drop or the fail-closed error. The budget follows the THIRD-PARTY gate, so it is
+  // allocated on direct (non-shadow) third-party routes too; the phantom ALLOWLIST stays
+  // shadow-scoped, because a replayed native name is a property of the replacement model.
+  // The OpenAI-operated official Responses endpoint stays fail-closed on every layer.
   const execDeclaringBody = (model: string) => JSON.stringify({
     model,
     input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
@@ -820,7 +824,11 @@ describe("shadow phantom-tool allowlist scoping", () => {
     expect(payload).not.toContain('"name":"update_plan"');
   });
 
-  test("a NON-shadow request with exec declared still fails closed (no budget)", async () => {
+  test("a DIRECT third-party request with exec declared is answered with the directive", async () => {
+    // The observed production failure: an explicit-provider (non-shadow) route emitted a
+    // name the request never declared, owned no budget, and the turn died as an undeclared
+    // 502 / empty round. Third-party routes now own the correction budget, so the model is
+    // told what is declared and can retry in form.
     phantomFetch();
     const response = await handleResponses(new Request("http://localhost/v1/responses", {
       method: "POST",
@@ -828,22 +836,146 @@ describe("shadow phantom-tool allowlist scoping", () => {
       body: execDeclaringBody("xai/grok-4.5"),
     }), interceptConfig(), { model: "", provider: "" });
     const payload = JSON.stringify(await response.json());
-    expect(payload).toContain("undeclared client tool");
-    expect(payload).not.toContain("undeclared-tool repair");
+    expect(payload).toContain("undeclared-tool repair");
+    expect(payload).not.toContain("undeclared client tool");
+    expect(payload).not.toContain('"name":"update_plan"');
   });
 
-  test("the kill switch removes the directive path too (pure fail-closed)", async () => {
+  test("a direct third-party request gets no shadow allowlist, and no budget means fail closed", async () => {
+    // Scoping split, pinned: the budget follows the route, the allowlist follows the model.
+    // An allowlisted name on a direct route is a FRESH hallucination - it is answered by the
+    // declared-catalog directive, never dropped silently, and with the budget switched off
+    // the same turn fails closed as it did before the directive layer existed.
     phantomFetch();
     const config = interceptConfig();
-    config.shadowCallIntercept = { ...config.shadowCallIntercept, phantomToolAllowlistEnabled: false };
+    config.shadowCallIntercept = { ...config.shadowCallIntercept, phantomToolFeedbackMax: 0 };
     const response = await handleResponses(new Request("http://localhost/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: execDeclaringBody("gpt-5.6-luna"),
+      body: execDeclaringBody("xai/grok-4.5"),
     }), config, { model: "", provider: "" });
     const payload = JSON.stringify(await response.json());
     expect(payload).toContain("undeclared client tool");
     expect(payload).not.toContain("undeclared-tool repair");
+  });
+
+  test("a direct third-party STREAM gets the gate as well as the budget", async () => {
+    // The budget is only half the fix: the bridge skips its whole emission-repair layer
+    // (name repair, the container drop tier, the filtered-container terminal) unless the
+    // serving-route gate rides the translator options. A streaming direct-third-party turn
+    // that emits an all-caps container must therefore be answered with a directive here,
+    // exactly as the buffered twin above - pinned end-to-end through the adapter-delivery
+    // path (stream=true, openai-chat upstream), not at the guard layer.
+    const zw = String.fromCharCode(0x200b);
+    const sseUpstream = (name: string) => {
+      globalThis.fetch = (async () => new Response([
+        `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-c", function: { name, arguments: "{}" } }] } }] })}`,
+        "data: " + JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+        "data: [DONE]",
+        "",
+      ].join("\n"), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    };
+    const streamBody = JSON.stringify({
+      model: "xai/grok-4.5",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      tools: [
+        { type: "function", function: { name: "web_search", parameters: {} } },
+        { type: "custom", name: "exec" },
+      ],
+      stream: true,
+    });
+    const postStream = () => handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: streamBody,
+    }), interceptConfig(), { model: "", provider: "" });
+
+    // Case 1: all-caps container. With the gate threaded, the container is recognized through
+    // the shared glyph fold and answered with a directive (budget paid); the turn completes.
+    sseUpstream("TOOLS");
+    const sse = await (await postStream()).text();
+    expect(sse).toContain("undeclared-tool repair");
+    expect(sse).toContain("response.completed");
+    expect(sse).not.toContain("response.failed");
+    expect(sse).not.toContain('"name":"TOOLS"');
+
+    // Case 2: budget spent (max 0) -> the same emission falls to the container tier: dropped
+    // and, with no valid call in the turn, the terminal states the loss instead of relaying
+    // the container (the client would end the turn on unsupported call).
+    const noBudget = interceptConfig();
+    noBudget.shadowCallIntercept = { ...noBudget.shadowCallIntercept, phantomToolFeedbackMax: 0 };
+    sseUpstream("tools" + zw);
+    const dropped = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: streamBody,
+    }), noBudget, { model: "", provider: "" });
+    const droppedText = await dropped.text();
+    expect(droppedText).not.toContain("undeclared client tool");
+    expect(droppedText).not.toContain('"name":"tools' + zw + '"');
+    expect(droppedText).toContain("filtered_container_no_valid_output");
+  });
+
+  test("the official OpenAI-operated endpoint allocates no budget (gate=false)", () => {
+    // The official Responses destination is the one route the fork must never apply
+    // third-party semantics to, and the budget is the third-party lever. The integration
+    // path for that endpoint needs a real account pool, so the allocation itself is pinned
+    // at the scope function (the bridge/gate pair is pinned by
+    // tool-name-repair-official-gate.test.ts).
+    const officialRoute = {
+      providerName: "openai",
+      provider: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" } as OcxProviderConfig,
+    };
+    const config = interceptConfig();
+    const direct = shadowPhantomScope({ modelId: "gpt-5.6-luna" } as OcxParsedRequest, config, officialRoute);
+    expect(direct.undeclaredToolFeedbackBudget).toBeUndefined();
+    expect(direct.undeclaredPhantomNames.size).toBe(0);
+    // An internal baseUrl under the same "openai" provider name is third-party, and gets it.
+    const internal = shadowPhantomScope({ modelId: "gpt-5.6-luna" } as OcxParsedRequest, config, {
+      providerName: "openai",
+      provider: { adapter: "openai-responses", baseUrl: "https://8802-248.ai-t.wtvdev.com/v1", authMode: "api-key" } as OcxProviderConfig,
+    });
+    expect(internal.undeclaredToolFeedbackBudget?.remaining).toBe(2);
+    // Shadow interception keeps its historical allocation with or without the route argument.
+    const shadow = { modelId: "gpt-5.6-luna", _shadowIntercepted: true } as OcxParsedRequest;
+    expect(shadowPhantomScope(shadow, config, officialRoute).undeclaredToolFeedbackBudget?.remaining).toBe(2);
+    expect(shadowPhantomScope(shadow, config).undeclaredToolFeedbackBudget?.remaining).toBe(2);
+    // A direct third-party request without the route argument keeps the old shadow-only
+    // allocation, so callers that cannot pass a route change nothing.
+    expect(shadowPhantomScope({ modelId: "xai/grok-4.5" } as OcxParsedRequest, config).undeclaredToolFeedbackBudget).toBeUndefined();
+    // No shadowCallIntercept block at all is the DEFAULT configuration, not an opt-out, so
+    // the direct third-party route gets the default budget there too - the fleet that hit
+    // the production failure runs exactly this shape.
+    const thirdRoute = {
+      providerName: "llm-248",
+      provider: { adapter: "openai-chat", baseUrl: "http://127.0.0.1:8800/v1", authMode: "api-key" } as OcxProviderConfig,
+    };
+    expect(shadowPhantomScope({ modelId: "llm-248/Q38-Flash-Next" } as OcxParsedRequest, {} as OcxConfig, thirdRoute).undeclaredToolFeedbackBudget?.remaining).toBe(2);
+    // The explicit kill switch still wins over the absent block.
+    expect(shadowPhantomScope({ modelId: "llm-248/Q38-Flash-Next" } as OcxParsedRequest, {
+      shadowCallIntercept: { phantomToolAllowlistEnabled: false },
+    } as OcxConfig, thirdRoute).undeclaredToolFeedbackBudget).toBeUndefined();
+  });
+
+  test("the kill switch removes the directive path on every route (pure fail-closed)", async () => {
+    phantomFetch();
+    const config = interceptConfig();
+    config.shadowCallIntercept = { ...config.shadowCallIntercept, phantomToolAllowlistEnabled: false };
+    const send = async (model: string) => {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: execDeclaringBody(model),
+      }), config, { model: "", provider: "" });
+      return JSON.stringify(await response.json());
+    };
+    // Shadow traffic keeps its historical behaviour; the DIRECT third-party route the budget
+    // was just extended to loses it in the same breath. The operator who turned the allowlist
+    // off asked for pure fail-closed, not for fail-closed on one family of third-party calls.
+    expect(await send("gpt-5.6-luna")).toContain("undeclared client tool");
+    const direct = await send("xai/grok-4.5");
+    expect(direct).toContain("undeclared client tool");
+    expect(direct).not.toContain("undeclared-tool repair");
   });
 });
 

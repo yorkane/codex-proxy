@@ -9,7 +9,7 @@ import type { AdapterContinuations } from "./adapter-continuation";
 import { guardTerminalEventStream } from "./terminal-guard";
 import { guardEmptyCompletionEventStream } from "./empty-completion-guard";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "../../bridge";
-import { shadowPhantomScope } from "./shadow-call-route";
+import { shadowPhantomScope, thirdPartyEmissionRepair } from "./shadow-call-route";
 
 import type { OcxProviderContinuationState, AdapterEvent } from "../../types";
 import { rememberResponseState } from "../../responses/state";
@@ -128,7 +128,15 @@ export async function deliverAdapterResponse(
       : eventStream;
     // Fork: shadow-scoped phantom tolerance + per-request directive-correction
     // budget (see shadow-call-route.ts); empty scope leaves every path byte-identical.
-    const shadowScope = shadowPhantomScope(parsed, config);
+    // The route is passed so a DIRECT third-party route also gets the correction budget; the
+    // phantom list stays shadow-only (it is a property of the replacement model).
+    // The gate is the SAME predicate on the SAME request-level route: the bridge skips its
+    // whole emission-repair layer (name repair, the container drop-and-continue tier, the
+    // filtered-container terminal) without servingRouteIsThirdParty, so handing it a budget
+    // alone left this delivery path half-patched - the directive the budget pays for existed,
+    // the repair that turns a dirty container into one did not.
+    const shadowScope = shadowPhantomScope(parsed, config, route);
+    const servingRouteIsThirdParty = thirdPartyEmissionRepair(parsed, route);
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames } = toolBridgeMaps;
     // One completion owner for both deliveries: the bridge calls it from its terminal, the
     // direct client encoder from the fold of the same events.
@@ -190,6 +198,7 @@ export async function deliverAdapterResponse(
         declaredToolNames,
         undeclaredToolPhantomNames: shadowScope.undeclaredPhantomNames,
         undeclaredToolFeedback: shadowScope.undeclaredToolFeedbackBudget,
+        servingRouteIsThirdParty,
         bareCustomToolNames,
         enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
         toolParameterSchemas,
@@ -268,7 +277,11 @@ export async function deliverAdapterResponse(
     }
     // Fork: shadow-scoped phantom tolerance + per-request directive-correction
     // budget (see shadow-call-route.ts); empty scope leaves every path byte-identical.
-    const shadowScope = shadowPhantomScope(parsed, config);
+    // Streaming twin above, gate included: budget and gate are the same predicate on the same
+    // route, so no emission can be repaired by the budget-bearing layer and then 502'd by the
+    // gate-bearing layer on this path (the runTurn twin threads the pair the same way).
+    const shadowScope = shadowPhantomScope(parsed, config, route);
+    const servingRouteIsThirdParty = thirdPartyEmissionRepair(parsed, route);
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, bareCustomToolNames, toolSearchToolNames } = toolBridgeMaps;
     let providerState: OcxProviderContinuationState | undefined;
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
@@ -280,6 +293,7 @@ export async function deliverAdapterResponse(
       declaredToolNames,
       undeclaredToolPhantomNames: shadowScope.undeclaredPhantomNames,
       undeclaredToolFeedback: shadowScope.undeclaredToolFeedbackBudget,
+      servingRouteIsThirdParty,
       bareCustomToolNames,
       enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
       toolParameterSchemas,

@@ -89,11 +89,17 @@ describe('batch bridge exec repair', () => {
   });
 });
 
-const leakFeedbackOptions = {
+// The namespace directive is a synthetic throw like any other, so it pays out of the same
+// per-request budget the undeclared directive draws on. The helper hands out a FRESH
+// budget per call (the object is mutable and consumed), and passing nothing pins the
+// budget-less shape: allowlisted names drop silently, exactly as they did before the
+// directive path existed.
+const leakFeedbackOptions = (feedback?: { remaining: number }) => ({
   declaredToolNames: new Set(['exec', 'web_search', 'collaboration__update_plan']),
   freeformToolNames: new Set(['exec']),
   undeclaredToolPhantomNames: new Set(['tools', 'collaboration', 'update_plan']),
-};
+  ...(feedback ? { undeclaredToolFeedback: feedback } : {}),
+});
 
 function phantomCall(name: string): AsyncGenerator<AdapterEvent> {
   return (async function* () {
@@ -106,41 +112,51 @@ function phantomCall(name: string): AsyncGenerator<AdapterEvent> {
 
 describe('namespace-leak feedback', () => {
   test('the sandbox namespace itself is replaced by a directive exec error', async () => {
-    const sse = await drain(bridgeToResponsesSSE(phantomCall('tools'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions));
+    const feedback = { remaining: 2 };
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('tools'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions(feedback)));
     expect(sse).toContain('namespace-leak repair');
     expect(sse).toContain('response.completed');
     expect(sse).not.toContain('response.failed');
     // The feedback rides an exec custom_tool_call, not the phantom name.
     expect(sse).toContain('custom_tool_call');
     expect(sse).not.toContain('"name":"tools"');
+    expect(feedback.remaining).toBe(1);
   });
 
   test('a declared-but-collapsed namespace prefix gets the same feedback', async () => {
-    const sse = await drain(bridgeToResponsesSSE(phantomCall('collaboration'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions));
+    const feedback = { remaining: 2 };
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('collaboration'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions(feedback)));
     expect(sse).toContain('namespace-leak repair');
     expect(sse).toContain('response.completed');
+    expect(feedback.remaining).toBe(1);
   });
 
   test('a non-namespace phantom still drops silently', async () => {
-    const sse = await drain(bridgeToResponsesSSE(phantomCall('update_plan'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions));
+    // No budget: the allowlisted non-container name keeps its silent drop.
+    const sse = await drain(bridgeToResponsesSSE(phantomCall('update_plan'), 'llm-248/x', undefined, new Set(['exec']), undefined, undefined, 50_000, leakFeedbackOptions()));
     expect(sse).not.toContain('namespace-leak repair');
     expect(sse).not.toContain('undeclared client tool');
     expect(sse).toContain('response.completed');
   });
 
   test('without an exec channel the namespace leak falls back to a silent drop', async () => {
-    const noExec = { ...leakFeedbackOptions, declaredToolNames: new Set(['web_search']), freeformToolNames: new Set<string>() };
+    const budget = { remaining: 2 };
+    const noExec = { ...leakFeedbackOptions(budget), declaredToolNames: new Set(['web_search']), freeformToolNames: new Set<string>() };
     const sse = await drain(bridgeToResponsesSSE(phantomCall('tools'), 'llm-248/x', undefined, undefined, undefined, undefined, 50_000, noExec));
     expect(sse).not.toContain('namespace-leak repair');
     expect(sse).toContain('response.completed');
+    // Nowhere to deliver the correction, so nothing is charged for it.
+    expect(budget.remaining).toBe(2);
   });
 
   test('batch path replaces the namespace leak with the same feedback', async () => {
     const events: AdapterEvent[] = [];
     for await (const e of phantomCall('tools')) events.push(e);
-    const built = buildResponseJSON(events, 'llm-248/x', leakFeedbackOptions);
+    const feedback = { remaining: 2 };
+    const built = buildResponseJSON(events, 'llm-248/x', leakFeedbackOptions(feedback));
     const json = JSON.stringify(built);
     expect(json).toContain('namespace-leak repair');
     expect(built.status).toBe('completed');
+    expect(feedback.remaining).toBe(1);
   });
 });

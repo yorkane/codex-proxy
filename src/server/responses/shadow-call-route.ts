@@ -135,25 +135,49 @@ export function thirdPartyEmissionRepair(
  * a replacement model replaying a native tool name the request never declared is
  * dropped (or answered with namespace-leak feedback by the emitted-call guard)
  * instead of failing the turn. Only requests whose model the shadow intercept
- * actually replaced consult the list — direct routes stay fail-closed. Consumed
- * by the passthrough guard rewrite, the passthrough terminal checks, and both
- * bridge translators; empty (disabled or non-shadow) leaves every path
- * byte-identical. The per-request directive-correction budget
- * (phantomToolFeedbackMax, default 2) is allocated only for shadow-intercepted
- * requests with the kill switch on; the bridge translators consume it, the
- * passthrough guard cannot inject feedback and keeps drop/fail-closed semantics.
+ * actually replaced consult the list — direct routes keep the list empty.
+ *
+ * The directive-correction budget is a wider scope than the list, and the two
+ * must not be conflated. The list is a per-MODEL fact (a replayed native name is
+ * a property of the replacement model, so only shadow traffic can know it);
+ * the budget is a per-ROUTE fact ("this traffic is third-party, so a rejected
+ * call may be answered with a directive instead of a drop/502"). Direct
+ * third-party routes therefore get the budget with an empty list: a fresh
+ * hallucination is answered by the declared-catalog directive, and the
+ * allowlist's silent-drop branch stays unreachable for them by construction.
+ * Allocation uses the same predicate as the emission-repair gate
+ * (thirdPartyEmissionRepair) and the same kill switch and cap as shadow:
+ * `phantomToolAllowlistEnabled: false` removes the budget everywhere, and
+ * `phantomToolFeedbackMax: 0` disables it. Both are default-on keys, so a config with
+ * no shadowCallIntercept block allocates the default 2 on third-party routes - that
+ * absent-block shape is exactly the production fleet that hit the empty-round failure.
+ * Omitting `route` keeps the historical shadow-only allocation for callers that serve
+ * the official endpoint semantics (the passthrough guard cannot inject feedback and
+ * keeps drop/fail-closed).
  */
-export function shadowPhantomScope(parsed: OcxParsedRequest, config: OcxConfig): {
+export function shadowPhantomScope(
+  parsed: OcxParsedRequest,
+  config: OcxConfig,
+  route?: { providerName: string; provider: OcxProviderConfig },
+): {
   undeclaredPhantomNames: ReadonlySet<string>;
   undeclaredToolFeedbackBudget: { remaining: number } | undefined;
 } {
   const shadowIntercepted = parsed._shadowIntercepted === true;
   const sci = config.shadowCallIntercept;
+  // Kill switch: phantomToolAllowlistEnabled is default-ON, and the block being absent
+  // entirely is the default configuration, not an opt-out - a fleet running with no
+  // shadowCallIntercept block at all is exactly the direct-third-party fleet the budget
+  // was extended for. Only an explicit false asks for pure fail-closed, on every route.
+  const killSwitchOn = sci?.phantomToolAllowlistEnabled !== false;
+  const feedbackEligible = route !== undefined
+    ? thirdPartyEmissionRepair(parsed, route)
+    : shadowIntercepted;
   return {
     undeclaredPhantomNames: shadowIntercepted ? shadowPhantomToolNames(sci) : new Set<string>(),
     undeclaredToolFeedbackBudget:
-      shadowIntercepted && sci !== undefined && sci.phantomToolAllowlistEnabled !== false
-        ? { remaining: Math.max(0, Math.min(10, sci.phantomToolFeedbackMax ?? 2)) }
+      killSwitchOn && feedbackEligible
+        ? { remaining: Math.max(0, Math.min(10, sci?.phantomToolFeedbackMax ?? 2)) }
         : undefined,
   };
 }

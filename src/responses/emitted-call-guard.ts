@@ -30,7 +30,12 @@
  * drops per model and see a regression coming instead of meeting it by hand.
  */
 
-import { isSandboxNamespacePrefixedName, normalizeDeclaredToolName, repairEmittedToolName } from "../types/tools";
+import {
+  canonicalToolNameForLookup,
+  isSandboxNamespacePrefixedName,
+  normalizeDeclaredToolName,
+  repairEmittedToolName,
+} from "../types/tools";
 import type { DroppedEmitDecision } from "../usage/telemetry-contract";
 import {
   buildNamespaceLeakFeedback,
@@ -74,8 +79,45 @@ export function shouldEnforceDeclaredToolNames(options: {
 export function isDroppedNamespaceContainer(
   name: string,
   declaredToolNames?: ReadonlySet<string>,
+  canonicalLookup = false,
 ): boolean {
-  return isNamespaceContainerName(name, declaredToolNames ?? EMPTY_DECLARED_TOOL_NAMES);
+  return isNamespaceContainerName(name, declaredToolNames ?? EMPTY_DECLARED_TOOL_NAMES, canonicalLookup);
+}
+
+/**
+ * Whether THIS emission may consult the canonicalized container table.
+ *
+ * The answer is the emission-repair gate itself, not a separate switch: widening the
+ * container table is a third-party-only concession (a raw-misspelled container that used to
+ * land on the fail-closed path now lands on the container path), and the official endpoint
+ * keeps the byte-identical v2.82.0 comparison. One gate, one behaviour, so no caller has to
+ * keep two flags in agreement.
+ */
+function containerLookupFromGate(options: EmittedCallGuardOptions): boolean {
+  return options.servingRouteIsThirdParty === true;
+}
+
+/**
+ * The spelling an emission drops under when it is a namespace container, else undefined.
+ *
+ * The RAW container reading is the upstream rule and stays ungated (official routes keep
+ * dropping the bare tools name exactly as v2.82.0 does). The CANONICAL reading is the
+ * third-party widening, so it is asked only with the emission-repair gate on, and carries
+ * the folded spelling because the bridge's container tier compares its inputs raw. A
+ * canonical drop name is never relayed, so this lookup releases nothing; the raw declared
+ * name check always outranks the container heuristic.
+ */
+function containerDropSpelling(
+  name: string,
+  declared: ReadonlySet<string> | undefined,
+  options: EmittedCallGuardOptions,
+): string | undefined {
+  const catalog = declared ?? EMPTY_DECLARED_TOOL_NAMES;
+  if (isNamespaceContainerName(name, catalog, false)) return name;
+  if (options.servingRouteIsThirdParty !== true) return undefined;
+  if (!isNamespaceContainerName(name, catalog, true)) return undefined;
+  const canonical = canonicalToolNameForLookup(name);
+  return canonical.length > 0 ? canonical : undefined;
 }
 
 /** What the caller should do with one emitted tool call. */
@@ -174,9 +216,10 @@ export function resolveEmittedCall(
     // the client an `unsupported call: <ns>` that ends the turn. The question is asked through
     // the one exported entry point rather than the raw predicate, so this branch and the caller's
     // fail-closed branch cannot give one emission two different answers.
-    if (isDroppedNamespaceContainer(emitted, declared)) {
-      options.onDecision?.({ emitted, effective: emitted, decision: "namespace-leak" });
-      return { kind: "drop", name: emitted };
+    const containerSpelling = containerDropSpelling(emitted, declared, options);
+    if (containerSpelling !== undefined) {
+      options.onDecision?.({ emitted, effective: containerSpelling, decision: "namespace-leak" });
+      return { kind: "drop", name: containerSpelling };
     }
     // Same argument, wider net: a sandbox-namespace-qualified name (`tools.apply_patch`) is
     // every bit as uncallable as the container itself, because `tools` is the exec sandbox
@@ -230,11 +273,28 @@ export function resolveEmittedCall(
       return { kind: "feedback", name: effective, input: freshCorrection, reason: "undeclared" };
     }
     report("undeclared");
-    return { kind: "drop", name: effective };
+    // Same canonical-spelling rule as the no-catalog branch: an emission that IS a
+    // namespace container under the shared fold drops AS one when the directive tier
+    // cannot pay for it (no budget, exhausted, no exec channel), so the bridge's raw
+    // container check sees a container and the turn survives on drop + continue.
+    return { kind: "drop", name: containerDropSpelling(effective, declared, options) ?? effective };
   }
 
-  const feedback = buildNamespaceLeakFeedback(effective, declared, options.freeformToolNames);
-  if (feedback !== undefined) {
+  const feedback = buildNamespaceLeakFeedback(
+    effective,
+    declared,
+    options.freeformToolNames,
+    containerLookupFromGate(options),
+  );
+  // A namespace directive is a synthetic throw like any other directive, so it pays out of
+  // the SAME budget the fresh-undeclared directive draws on. It used to be free, which is a
+  // hole in the cap: a model looped on a container name (the observed failure shape) mints
+  // an unlimited number of directive items per request, so the "at most N corrections"
+  // guarantee only held for the names the budget was written for. With the budget spent or
+  // absent, the container falls through to the allowlisted-drop / fail-closed pair below,
+  // which is exactly the pre-directive behaviour for it.
+  if (feedback !== undefined && options.undeclaredFeedback && options.undeclaredFeedback.remaining > 0) {
+    options.undeclaredFeedback.remaining -= 1;
     report("namespace-leak");
     return { kind: "feedback", name: effective, input: feedback, reason: "namespace-leak" };
   }
@@ -265,11 +325,58 @@ export function droppedEmitDisposition(
   effective: string,
   emitted: string,
   declaredToolNames?: ReadonlySet<string>,
+  canonicalLookup = false,
 ): DroppedEmitDecision {
-  return isDroppedNamespaceContainer(effective, declaredToolNames)
-    || isDroppedNamespaceContainer(emitted, declaredToolNames)
+  return isDroppedNamespaceContainer(effective, declaredToolNames, canonicalLookup)
+    || isDroppedNamespaceContainer(emitted, declaredToolNames, canonicalLookup)
     ? "namespace-container"
     : "phantom";
+}
+
+/**
+ * The combo preflight's twin of the bridge's disposition for one emitted call.
+ *
+ * The combo preflight runs BEFORE the bridge translator, on the first meaningful adapter
+ * event, and its only power is to fail the attempt so the combo layer hops the turn to the
+ * next target. That makes it a gate in front of the gate: when it derives its answer from a
+ * narrower rule than the guard, it kills emissions the bridge would have repaired, dropped,
+ * or answered with a directive - and a hop re-sends the whole turn to another provider, the
+ * replay the directive path exists to avoid. It used to be exactly that: a bare container
+ * name, a sandbox-prefixed helper echo, and any feedback-eligible name were all killed by
+ * the preflight, so the repair never ran on combo traffic.
+ *
+ * So the preflight asks the guard - one question, same verdict as the bridge - and passes
+ * anything the bridge would not fail closed:
+ *   - allow / feedback: the bridge emits an item for it;
+ *   - an allowlisted phantom: silent drop, turn survives;
+ *   - a container on a route that tolerates containers (deferred-enforcement wire, or the
+ *     third-party emission gate): drop and continue;
+ *   - everything else: the bridge's fail-closed 502, so hop.
+ *
+ * The budget is CLONED, never shared, and no decision hook fires: the preflight is a pure
+ * query, and the one directive the turn gets is injected (and paid for) by the bridge.
+ */
+export function preflightEmittedCall(
+  emitted: string,
+  options: EmittedCallGuardOptions,
+): { action: "pass" } | { action: "reject"; name: string } {
+  const budget = options.undeclaredFeedback;
+  const verdict = resolveEmittedCall(emitted, {
+    ...options,
+    undeclaredFeedback: budget === undefined ? undefined : { remaining: budget.remaining },
+    onDecision: undefined,
+  });
+  if (verdict.kind !== "drop") return { action: "pass" };
+  const phantom = options.phantomNames;
+  if (phantom !== undefined && (phantom.has(verdict.name) || phantom.has(emitted))) return { action: "pass" };
+  const declared = options.declaredToolNames;
+  const canonical = containerLookupFromGate(options);
+  const container = isDroppedNamespaceContainer(verdict.name, declared, canonical)
+    || isDroppedNamespaceContainer(emitted, declared, canonical);
+  const enforce = shouldEnforceDeclaredToolNames(options);
+  if (container && (!enforce || options.servingRouteIsThirdParty === true)) return { action: "pass" };
+  if (!enforce) return { action: "pass" };
+  return { action: "reject", name: verdict.name };
 }
 
 export { repairExecEnvelopeLeak };

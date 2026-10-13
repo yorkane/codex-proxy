@@ -829,19 +829,23 @@ JSON header are exempt, so an explicitly spawned sub-agent keeps its model.
 `modelMap` routes each source model to its own replacement id; a source absent from the map
 falls back to `model`. Custom source ids must also be listed in `sourceModels`.
 
-Replacement models sometimes replay tool names the request never declared (for example
-`update_plan`), or hallucinate fresh ones. Shadow-routed requests get a correction budget
-first: the rejected call is replaced by a directive exec error that tells the model the name
-is undeclared, lists the declared tools, and suggests the closest match, so the model can
-retry correctly. `phantomToolFeedbackMax` sets the per-request budget (default 2, 0 turns
-corrections off). Requests without a declared exec tool cannot carry directives and fall
-back to the list behavior immediately. Once the budget is spent, names on the built-in
-phantom list are dropped end to end (the turn completes with only the legitimate calls) and
-unknown names fail the turn closed. `phantomToolAllowlistEnabled: false` disables the
-tolerance (everything fails closed again); `phantomToolAllowlist` replaces the built-in list
-with an operator-curated one (an empty array means fail-closed). Everything here is scoped
-to shadow-replaced requests only: direct routes are unaffected. Edit it in the dashboard
-under Shadow call intercept.
+Routed models, shadow-replaced and direct third-party alike, sometimes replay tool names
+the request never declared (for example `update_plan`), or hallucinate fresh ones. A gated
+route gets a correction budget first: the rejected call is replaced by a directive exec
+error that tells the model the name is undeclared, lists the declared tools, and suggests
+the closest match, so the model can retry correctly. `phantomToolFeedbackMax` sets the
+per-request budget (default 2, 0 turns corrections off) and applies to direct third-party
+routes too: a config with no `shadowCallIntercept` block still allocates the default. The
+OpenAI-operated official endpoint keeps its fail-closed contract unchanged. Requests
+without a declared exec tool cannot carry directives and fall back to the list behavior
+immediately. Once the budget is spent, names on the built-in phantom list are dropped end
+to end (the turn completes with only the legitimate calls); a namespace-container call
+dropped without becoming a directive fails the turn with code
+`filtered_container_no_valid_output`, streamed and buffered alike; other unknown names fail
+the turn closed. `phantomToolAllowlistEnabled: false` disables feedback and phantom tolerance
+(name repair and the filtered-container terminal protection remain active); `phantomToolAllowlist` replaces the built-in list with an
+operator-curated one (an empty array removes silent phantom tolerance) and stays shadow-scoped. The
+passthrough path injects no feedback. Edit it in the dashboard under Shadow call intercept.
 
 ### When the target is unavailable
 

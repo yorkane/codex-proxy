@@ -15,7 +15,12 @@
 // mid-program and `{"use strict";` blocks — is never touched.
 
 const EXEC_TOOL_NAME = "exec";
-/** `{` immediately followed by a quoted key and a colon: illegal as JS, the leak signature. */
+
+// The shared glyph canonicalization lives in the name-repair layer (one implementation,
+// one cleaning discipline: NFKC + zero-width/control residue + case fold, lookup only).
+import { canonicalToolNameForLookup } from "../types/tools";
+export { canonicalToolNameForLookup };
+
 const LEAKED_JSON_ENVELOPE = /^\{\s*['"][^'"\n]{1,200}['"]\s*:/;
 /** Program opening on a serialized parameter tag: also never valid JS. */
 const LEAKED_PARAMETER_TAG = /^<\/?parameter[\s>=]/i;
@@ -95,7 +100,11 @@ const SANDBOX_NAMESPACE = "tools";
  * name counts only when a declared tool actually lives under it (`collaboration` for
  * `collaboration__update_plan`).
  */
-export function isNamespaceContainerName(name: string, declaredToolNames: ReadonlySet<string>): boolean {
+export function isNamespaceContainerName(
+  name: string,
+  declaredToolNames: ReadonlySet<string>,
+  canonicalLookup = false,
+): boolean {
   // A declared tool outranks every container heuristic. This line is what turns the sandbox
   // special case below from an assertion into a claim the request's catalog can refute.
   if (declaredToolNames.has(name)) return false;
@@ -103,6 +112,26 @@ export function isNamespaceContainerName(name: string, declaredToolNames: Readon
   const prefix = name + "__";
   for (const declared of declaredToolNames) {
     if (declared.length > prefix.length && declared.startsWith(prefix)) return true;
+  }
+  // Canonical lookup widens the TABLE, not the release gate, and only on third-party
+  // traffic. The observed direct-third-party shapes include an all-caps spelling, a
+  // zero-width char inside the name, and a fullwidth equals sign; the raw comparisons
+  // above do not recognize them, so the turn lands on a 502 - strictly worse than the
+  // bare container's drop-and-continue, for the same intent. The canonical form feeds
+  // ONLY this lookup: the declared check above is still the raw name (a real tool declared
+  // as TOOLS keeps its name and its call), and a container is never released under any
+  // spelling. Callers pass canonicalLookup only when the emission-repair gate is on, so
+  // the official endpoint keeps byte-identical upstream semantics.
+  if (canonicalLookup) {
+    const canonical = canonicalToolNameForLookup(name);
+    if (canonical.length === 0) return false;
+    if (canonical === SANDBOX_NAMESPACE) return true;
+    const canonicalPrefix = canonical + "__";
+    for (const declared of declaredToolNames) {
+      const canonicalDeclared = canonicalToolNameForLookup(declared);
+      if (canonicalDeclared.length > canonicalPrefix.length
+        && canonicalDeclared.startsWith(canonicalPrefix)) return true;
+    }
   }
   return false;
 }
@@ -117,10 +146,11 @@ export function buildNamespaceLeakFeedback(
   name: string,
   declaredToolNames?: ReadonlySet<string>,
   freeformToolNames?: ReadonlySet<string>,
+  canonicalLookup = false,
 ): string | undefined {
   if (!declaredToolNames || !freeformToolNames) return undefined;
   if (!declaredToolNames.has(EXEC_TOOL_NAME) || !freeformToolNames.has(EXEC_TOOL_NAME)) return undefined;
-  if (!isNamespaceContainerName(name, declaredToolNames)) return undefined;
+  if (!isNamespaceContainerName(name, declaredToolNames, canonicalLookup)) return undefined;
   const message =
     "opencodex namespace-leak repair: \"" + name + "\" is a tool namespace, not a callable tool, " +
     "so the call was intercepted and not executed. Emit the call with the flattened form " +

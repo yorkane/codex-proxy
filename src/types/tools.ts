@@ -129,6 +129,17 @@ export function isSandboxNamespacePrefixedName(name: string): boolean {
 }
 
 /**
+ * Comparison key for conservative tool-name lookups. This never becomes a wire name:
+ * callers must return the unique original declaration that owns the key.
+ */
+export function canonicalToolNameForLookup(name: string): string {
+  return name.normalize("NFKC")
+    .replace(/[\u200b-\u200f\u2060\ufeff]/g, "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .toLowerCase();
+}
+
+/**
  * Collaboration/sub-agent call-shape repair.
  *
  * Routed models (Q38-class) frequently emit a Codex tool in a different naming
@@ -147,8 +158,12 @@ export function isSandboxNamespacePrefixedName(name: string): boolean {
  * 绝不会被当作对外发出的名字：名字本身是否合法由调用方的 schema 校验决定，这里放宽的只是
  * 「同一个意图的另一种脏写法」，不是「多接受一个名字」。清洗后为空或不命中，照旧 fail closed。
  */
-function sanitizedNameForMatching(name: string): string {
-  let out = name;
+/**
+ * 导出给正文侧（code-mode-helper-compat 的前缀剥离）复用：名字纠偏与 helper 识别必须是同一套
+ * 字形逻辑，两处各写一遍清洗迟早漂移。
+ */
+export function sanitizedNameForMatching(name: string): string {
+  let out = name.normalize("NFKC");
   // 成对残尾与赋值残渣一律用码位写，避免在源码里嵌引号转义：
   // 双引号 34、单引号 39、反引号 96、尖括号 60/62、等号 61、冒号 58。
   const PAIRED = [[34, 34], [39, 39], [96, 96], [60, 62]] as const;
@@ -188,16 +203,35 @@ export function repairEmittedToolName(
   declaredBare?: ReadonlySet<string>,
   declaredCustom?: ReadonlySet<string>,
 ): string {
+  // Exact declared spelling always wins, even when another declaration shares its lookup key.
+  if (declared?.has(name)) return name;
   const repaired = repairEmittedToolNameShape(name, declared, declaredBare, declaredCustom);
   if (repaired !== name) return repaired;
   // 脏字符可能落在前缀与名字之间（`tools=\u200b="exec_command"`），那种位置在「剥完前缀再清洗」
   // 之后仍然把 `=` 后面的残块留在串首，认不出来。所以整名清洗一次再走同一套规则：清洗只影响
   // 匹配，命中后回传的仍然是声明表里的名字，不会把脏串发出去。原始名优先，保证已声明的名字
   // 永远先按原样命中。
+  // 第二趟：零宽/控制/成对残渣。第三趟：大小写与全角（canonical 键）。两趟都只影响查表，
+  // 命中后回传的仍是声明表里的拼写；全大写 ASCII 名的 cleaned===name，所以第三趟无条件跑。
   const cleaned = sanitizedNameForMatching(name);
-  if (cleaned === name || cleaned.length === 0) return name;
-  const repairedCleaned = repairEmittedToolNameShape(cleaned, declared, declaredBare, declaredCustom);
-  return repairedCleaned === cleaned ? name : repairedCleaned;
+  if (cleaned.length > 0 && cleaned !== name) {
+    const repairedCleaned = repairEmittedToolNameShape(cleaned, declared, declaredBare, declaredCustom);
+    if (repairedCleaned !== cleaned) return repairedCleaned;
+  }
+  const canonical = canonicalToolNameForLookup(cleaned.length > 0 ? cleaned : name);
+  if (canonical.length === 0 || canonical === name) return name;
+  // 大小写/全角只作为「唯一声明候选」的查表键：canonical 逐字命中某条声明时改名过去；
+  // 命中多条（目录里同时声明了两种拼法）则歧义不放行，原样交回 phantom 层。
+  if (declared) {
+    const matches: string[] = [];
+    for (const d of declared) {
+      if (canonicalToolNameForLookup(d) === canonical) matches.push(d);
+    }
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return name;
+  }
+  const repairedCanonical = repairEmittedToolNameShape(canonical, declared, declaredBare, declaredCustom);
+  return repairedCanonical === canonical ? name : repairedCanonical;
 }
 
 function repairEmittedToolNameShape(
@@ -209,7 +243,17 @@ function repairEmittedToolNameShape(
   if (!declared || declared.size === 0 || declared.has(name)) return name;
   const candidates: string[] = [];
   const push = (n: string) => {
-    if (declared.has(n) && !candidates.includes(n)) candidates.push(n);
+    if (declared.has(n)) {
+      if (!candidates.includes(n)) candidates.push(n);
+      return;
+    }
+    const lookupKey = canonicalToolNameForLookup(n);
+    if (!lookupKey) return;
+    for (const declaration of declared) {
+      if (canonicalToolNameForLookup(declaration) === lookupKey && !candidates.includes(declaration)) {
+        candidates.push(declaration);
+      }
+    }
   };
   // 脏写法（零宽/控制字符/成对残尾）只在查候选时归一，不改变 candidates 里真正回传的名字。
   const consider = (n: string): void => {

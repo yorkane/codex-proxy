@@ -5,8 +5,10 @@ import {
 } from "./apply-patch-envelope";
 import {
   CODE_MODE_HELPER_WIRE_NAMES,
+  canonicalToolNameForLookup,
   declaresCodeModeExec,
   isCodeModeMcpDirectName,
+  sanitizedNameForMatching,
   SANDBOX_NAMESPACE_PREFIXES,
 } from "../types/tools";
 import { parseCodeModeShellInput } from "./code-mode-shell-input";
@@ -37,10 +39,19 @@ export function compileCodeModeHelperInput(
   wireToolName?: string,
 ): string {
   if (typeof argumentsText !== "string") return "";
-  const helperName = toolName.startsWith("default.")
-    ? toolName.slice("default.".length)
-    : toolName;
-  if (helperName === "exec_command" && wireToolName === "exec") {
+  // 字形归一与名字侧共用同一套逻辑（全角/大小写/零宽前缀），但 shell 专用解析的触发条件
+  // 不放宽：只有 wire 名归一为 exec 才走 parseCodeModeShellInput。wire 名本身就是
+  // exec_command（扁平桥接目录的逐字声明）时，调用是原样中继的结构化 function call，
+  // 它没有 {input: ...} 这类输入包装词表，解包等于给 exec_command 的 schema 凭空加字段；
+  // 归一化只用来认前缀字形，不用来改变语义，所以这里保持 wireKey === "exec"。
+  // 内置闭集 helper 用 canonical 小写键匹配（它们的名字归我们所有，全角/大小写只是脏写法）；
+  // MCP 直连名（mcp__<server>__<tool>）的服务器/工具大小写归宿主所有，编译必须用剥前缀后的
+  // 原始拼写——折叠成小写会指向一个不存在的主机工具（tools.mcp__codex__get_usage 不是
+  // tools.mcp__Codex__Get_Usage），#5925 的身份完整性。
+  const strippedToolName = stripKnownHelperPrefixes(toolName);
+  const helperName = canonicalToolNameForLookup(strippedToolName);
+  const wireKey = canonicalToolNameForLookup(stripKnownHelperPrefixes(wireToolName ?? strippedToolName));
+  if (helperName === "exec_command" && wireKey === "exec") {
     const args = parseCodeModeShellInput(argumentsText);
     if (args) return `const result = await tools.exec_command(${JSON.stringify(args)});\ntext(result);`;
   }
@@ -57,9 +68,7 @@ export function compileCodeModeHelperInput(
     // declines it under `exec`; reading it here would compile a body that recognition rejected,
     // which is exactly the drift a second, looser unwrap introduces.
     const bodyToolName = wireToolName ?? helperName;
-    const normalizedBodyToolName = bodyToolName.startsWith("default.")
-      ? bodyToolName.slice("default.".length)
-      : bodyToolName;
+    const normalizedBodyToolName = stripKnownHelperPrefixes(bodyToolName);
     const patch = normalizeApplyPatchDelimiters(
       unwrapFreeformToolInput(argumentsText, normalizedBodyToolName),
     );
@@ -103,14 +112,14 @@ export function compileCodeModeHelperInput(
   if (helperName === "create_goal" || helperName === "get_goal" || helperName === "update_goal") {
     return `const result = await tools.${helperName}(${JSON.stringify(args)});\ntext(result);`;
   }
-  if (isCodeModeMcpDirectName(helperName)) {
+  if (isCodeModeMcpDirectName(strippedToolName)) {
     // Direct `mcp__<server>__<tool>` call under a code-mode catalog: the emitted name IS the
     // nested host tool's name, so compile to the same `tools.<name>(args)` the model could
     // have written. Dot access when the name is a clean identifier (the common case); bracket
     // access otherwise, so a hyphenated server name still addresses the same tool.
-    const target = CODE_MODE_IDENTIFIER_NAME.test(helperName)
-      ? `tools.${helperName}`
-      : `tools[${JSON.stringify(helperName)}]`;
+    const target = CODE_MODE_IDENTIFIER_NAME.test(strippedToolName)
+      ? `tools.${strippedToolName}`
+      : `tools[${JSON.stringify(strippedToolName)}]`;
     return `const result = await ${target}(${JSON.stringify(args)});\ntext(result);`;
   }
   return `const result = await tools.exec_command(${JSON.stringify(args)});\ntext(result);`;
@@ -123,7 +132,7 @@ export function compileCodeModeHelperInput(
 // 决定要不要编译成 await tools.<helper>(...)。两张表各自持字面量时必然漂移——冒号形态先前只
 // 加在名字侧，结果名字修好了、helper 解析返回 undefined，shell/patch 正文就以裸 exec JavaScript
 // 的形式送给客户端，静默丢掉 wrapper 语义（正是 normalizeCodeModeHelperName 注释警告的失效）。
-const HELPER_NAMESPACE_PREFIXES = [
+const HELPER_NAMESPACE_PREFIXES: readonly string[] = [
   ...SANDBOX_NAMESPACE_PREFIXES,
   "functions__",
   "functions.",
@@ -131,19 +140,33 @@ const HELPER_NAMESPACE_PREFIXES = [
   "default__",
 ] as const;
 
-function stripKnownHelperPrefixes(name: string): string {
-  let out = name;
+/**
+ * 剥掉所有已知的命名空间前缀（沙箱 + 历史 + default），顺序与原实现一致：循环剥前缀，
+ * 最后整串清洗一次。循环内的字形归一只做 NFKC 与零宽/控制字符，不做边界 = / : 与成对
+ * 残尾清洗——那会吃掉双冒号前缀的半个分隔符：对 tools::apply_patch 先剥首尾冒号得到
+ * tools:apply_patch，双冒号前缀再也匹配不上，最后只剩 patch，helper 归属整个丢失
+ * （241.t 回归：patch 正文以裸 exec JS 送给客户端）。剥完前缀后的残块才交给整串清洗
+ * （sanitizedNameForMatching），所以零宽夹在赋值符与名字之间、双冒号、嵌套前缀都收敛到
+ * 同一个裸名。前缀匹配大小写不敏感（表全小写）；返回不折叠大小写：那是查词表那一步
+ * （normalizeCodeModeHelperName）的事，MCP 直连名的大小写归宿主所有。
+ */
+export function stripKnownHelperPrefixes(name: string): string {
+  let out = name.normalize("NFKC").replace(/[\u200b-\u200f\u2060\ufeff]/g, "").replace(/[\u0000-\u001f\u007f]/g, "");
   let changed = true;
   while (changed) {
     changed = false;
     for (const prefix of HELPER_NAMESPACE_PREFIXES) {
-      if (out.length > prefix.length && out.startsWith(prefix)) {
+      // 每次匹配都重新取小写：lowered 若在 slice 后不更新，前缀表里排在后面的短前缀
+      // （双冒号之后还有单冒号）会拿过期字符串再切一刀，tools::apply_patch 就被切成 patch，
+      // helper 归属丢失 —— 这正是原实现逐次读 out 的原因。
+      const lowered = out.toLowerCase();
+      if (lowered.length > prefix.length && lowered.startsWith(prefix)) {
         out = out.slice(prefix.length);
         changed = true;
       }
     }
   }
-  return out;
+  return sanitizedNameForMatching(out);
 }
 
 /**
@@ -162,7 +185,16 @@ export function normalizeCodeModeHelperName(name: string | undefined): string | 
   if (!name) return undefined;
   const bare = stripKnownHelperPrefixes(name);
   if (bare === "") return undefined;
-  return CODE_MODE_HELPER_WIRE_NAMES.has(bare) || isCodeModeMcpDirectName(bare) ? bare : undefined;
+  if (CODE_MODE_HELPER_WIRE_NAMES.has(bare) || isCodeModeMcpDirectName(bare)) return bare;
+  // 大小写字形：闭集 helper 词表用 canonical 键查，返回表内标准拼写。MCP 直连名不折叠
+  // 大小写（服务器/工具名对宿主区分大小写，canonical 化会伪造身份），裸容器名（"tools"）
+  // 不在词表里，因此也不会被猜成任何 helper —— 容器识别归 exec-envelope-repair。
+  const canonical = canonicalToolNameForLookup(bare);
+  if (canonical !== bare && canonical.length > 0
+    && CODE_MODE_HELPER_WIRE_NAMES.has(canonical)) {
+    return canonical;
+  }
+  return undefined;
 }
 
 /**

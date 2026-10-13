@@ -589,12 +589,8 @@ keeps only allowlisted transport verdict codes. Adapter error events take a diff
 `output_tokens_details` are always emitted, with zero defaults, because strict Responses clients
 deserialize them as required fields.
 
+Both bridges count namespace-container emissions they dropped whole that never became directive feedback. Any such count on a third-party route replaces a clean terminal with `response.failed` (buffered: `status: "failed"`) carrying code `filtered_container_no_valid_output` from `filteredContainerFailure` in `src/bridge/internal.ts`, built rather than classified so the generic 5xx remap cannot rename this proxy's decision into an upstream server error. The failure is appended, not withheld: same-turn text and surviving calls still reach the client, and a failed terminal is not retained as continuation state. Official-gate turns never count, and allowlisted-phantom drops keep their silent-removal contract. Coverage: `tests/responses/namespace-leak-feedback.test.ts`, `tests/responses/dropped-emit-observation.test.ts`.
 
-Active-turn admission owns workflow admission, so both remain held until a streaming body finishes or
-is cancelled.
 
-The shared endpoint path also preserves the cyber-policy stop when a malformed UTF-8 5xx body is
-replacement-decoded; other malformed-body usage, quota, reset evidence and classification retain the
-status-only fallback. Rebuilt failures remain non-replayable and cyber-policy failures carry neither
-`Retry-After` nor quota-reset metadata. The [Responses failover contract](responses-failover.md)
-owns the bounded recovery and replay decisions.
+Active-turn admission owns workflow admission; both remain held until a streaming body finishes or is cancelled. The shared endpoint path preserves the cyber-policy stop when a malformed UTF-8 5xx body is replacement-decoded; other malformed-body usage, quota, reset evidence and classification retain the status-only fallback.
+Rebuilt failures remain non-replayable and cyber-policy failures carry neither `Retry-After` nor quota-reset metadata. The [Responses failover contract](responses-failover.md) owns the bounded recovery and replay decisions.
