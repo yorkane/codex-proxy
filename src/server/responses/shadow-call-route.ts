@@ -131,6 +131,26 @@ export function thirdPartyEmissionRepair(
 }
 
 /**
+ * passthrough 翻译桥接的发射修复作用域。inspection 与 relay 必须对同一个发射名给同一个答案，
+ * 所以门控与 phantom 名单在同一点一次算好。共享的上游文件有 2000 行门禁（2.84.0 轮
+ * passthrough-dispatch.ts 被顶爆），成对的展开注释只能住在这个 fork 自有文件里，
+ * 调用点只剩解构一行。
+ */
+export function passthroughEmissionRepairScope(
+  parsed: OcxParsedRequest,
+  config: OcxConfig,
+  route: { providerName: string; provider: OcxProviderConfig },
+): {
+  shadowScope: ReturnType<typeof shadowPhantomScope>;
+  emissionRepairThirdParty: boolean;
+} {
+  return {
+    shadowScope: shadowPhantomScope(parsed, config),
+    emissionRepairThirdParty: thirdPartyEmissionRepair(parsed, route),
+  };
+}
+
+/**
  * Shadow-scoped phantom tool names (shadowCallIntercept.phantomToolAllowlist):
  * a replacement model replaying a native tool name the request never declared is
  * dropped (or answered with namespace-leak feedback by the emitted-call guard)

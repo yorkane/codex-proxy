@@ -31,7 +31,7 @@ import {
   undeclaredToolCallNameInResponse,
   normalizeDefaultNamespaceInResponse,
 } from "../responses-undeclared-tool-guard";
-import { shadowPhantomScope, thirdPartyEmissionRepair } from "./shadow-call-route";
+import { passthroughEmissionRepairScope } from "./shadow-call-route";
 import { collectSelfNamedNamespaceScrubAuthorization } from "../responses-self-named-namespace-scrub";
 import type { ProviderExecutedCallType } from "../responses-undeclared-tool-guard";
 import {
@@ -257,13 +257,8 @@ export async function preparePassthroughExchange(
     substituteMainCredential,
     callerAuthHeaders,
   } = requestState;
-  // Fork: shadow-scoped phantom names ride the passthrough inspection so a
-  // replacement-model replay is recorded as seen instead of latching the guard.
-  // (The passthrough guard cannot inject feedback; budget stays bridge-only.)
-  const shadowScope = shadowPhantomScope(parsed, config);
-  // Fork: 发射名改写门控 —— 与 deliverPassthroughResponse 里的同名判定同源（同一 route、
-  // 同一谓词），inspection 与 relay 必须对同一个发射名给同一个答案（见 shadow-call-route.ts）。
-  const emissionRepairThirdParty = thirdPartyEmissionRepair(parsed, route);
+  // Fork: 门控 + phantom 名单一次算好（展开注释在 shadow-call-route.ts，行数门禁）。
+  const { shadowScope, emissionRepairThirdParty } = passthroughEmissionRepairScope(parsed, config, route);
   const {
     passiveQuotaWriterGeneration,
     oauthDispatch,
