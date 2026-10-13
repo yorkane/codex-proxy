@@ -264,6 +264,48 @@ WantedBy=multi-user.target
 导致后续 start 失败。`KillMode=mixed` 下自重启时看到成批 `SIGKILL` 属正常（按设计清扫接班进程），
 中间约 5 秒不可用也不是故障。
 
+## headless wdev 桌面与 ocx 联动（部署规范与验收项）
+
+headless 部署（wdev bundle 桌面网关 + ocx 代理）里「同步无效：没有正在运行的 Codex app-server」
+有两层独立根因，部署时一次性对齐，验收项跑完才算装好：
+
+- **uid 隔离**：ocx 枚举 app-server 只数同 uid 进程（`src/codex/app-server-processes.ts` 的
+  `listUnixProcSnapshots` 按 `process.getuid()` 过滤；这是 SIGTERM 安全边界，上游设计，不拆）。
+  ocx 跑 aigc、桌面网关跑专用账号（codex-desktop 等）→ 枚举恒 0，同步/状态按钮对桌面失效。
+- **CODEX_HOME 错位**：ocx 与桌面 gateway 各用各的 codexhome → 同步写 A 处、桌面读 B 处，
+  列表永远旧。桌面 catalog 的 mtime 是判据，不是界面的 toast。
+
+**部署规范（fleet 标准，2026-10-12 在 coding-170 全绿落地）**：
+
+1. 桌面网关与 ocx **同一服务账号**（fleet 口径统一 aigc）：单元 drop-in 只加
+   `/etc/systemd/system/codex-desktop-gateway.service.d/10-user-aigc.conf`：
+   `[Service]` + `User=aigc` + `Group=aigc`，不动包内单元文件本体。
+2. `/etc/codex-desktop/gateway.env` 五键对齐到同一数据树：`CODEX_HOME` 直接指向 ocx 的
+   codexhome（两进程共读写同一个 opencodex-catalog.json）；`CODEX_WEB_RUNTIME_DIR` /
+   `REPORTS_DIR` / `OFFICIAL_BUNDLE_DIR` / `OFFICIAL_USER_DATA_DIR` 从旧账号树迁到新 HOME 下
+   （`install -o <账号>` 迁移）；`GATEWAY_SERVICE_USER/GROUP` 同步取消注释改 aigc。
+   漏改任一数据目录 → 首启必 EACCES（旧 uid 的 0700 树）。
+3. 迁移前**停服冷备份**整棵旧状态树（热 tar 会被 0700 目录卡出 exit=2）；旧树整棵保留不删，
+   gateway.env 带时间戳 .bak。已知噪音：旧账号遗留的 `/tmp/codex-browser-use`（内含陈旧
+   socket）会阻塞 aigc 首启建监听，移开即恢复。xvfb 单元无 User 时不需要 drop-in。
+4. 迁移后 `daemon-reload` + 重启 xvfb/gateway 两个单元（单独执行、is-active 复核）。
+
+**验收项（全过才算装好，任一红 → 回滚 drop-in 与 env 后重启两单元）**：
+
+- [ ] `systemctl is-active` gateway 与 xvfb 均 active；`/health`（3737）200；
+- [ ] 桌面侧全部进程（Electron 主/renderer/app-server）属主 = 服务账号，专用账号进程数 = 0；
+- [ ] `GET /api/system/codex-app-server`（带 admin token）→ `state` 为 fresh/stale 且
+      `runningCount >= 1`（不是 not_running/0，核心判据）；
+- [ ] `POST /api/sync` → `status=applied`、`ok=true`，响应无「没有正在运行」语义；
+- [ ] 桌面与 ocx 的 catalog 是同一文件（同 inode），mtime 随点同步前进；
+- [ ] gateway 日志无 EACCES/ECONNREFUSED 红字（对旧数据目录的引用全部清零）。
+
+轻量替代（不能动单元时）：root 桥脚本 + `systemd path` 监视 ocx 侧 catalog 落盘，自动
+`install -o <桌面账号>` 投递到桌面 codexhome 并重启 gateway（`ocx-desktop-sync` 模式，241.t 在用）。
+它只解决列表新鲜度，不解决按钮的 runningCount——界面「没有正在运行的 app-server」在跨账号形态下
+是预期噪音。桌面内「重启 App」按钮依赖官方 deb 布局（`/usr/bin/chatgpt`），wdev bundle 上恒
+`package_discovery_failed`，桌面重启用 `systemctl restart codex-desktop-gateway.service`。
+
 ## 交给 agent 的 Prompt（复制即用）
 
 把下面整段发给目标机上的编码 agent，它会完成下载、安装、配置、验证：
@@ -291,6 +333,7 @@ WantedBy=multi-user.target
    再 POST /v1/responses 发一个带 tools 声明的最小请求（影子拦截只在 /v1/responses 生效，
    /v1/chat/completions 不测影子），确认工具往返正常、无 502。
 6. 报告：healthz 输出、版本号、认证四态（/healthz 200、裸 /api/config 401、带凭据 200）、
+   （若本机有 headless wdev 桌面网关，跑「headless wdev 桌面与 ocx 联动」一节的验收项全部 6 条）
    以及影子映射是否生效（响应里模型是否被替换）。
 ```
 
