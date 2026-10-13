@@ -33,6 +33,7 @@ import { resolveContextPrincipal } from "../auth-cors";
 import { resolveSkillsSnapshotScopeKey, snapshotSkillsCatalogInBody } from "./skills-snapshot";
 import {
   isShadowSourceModel,
+  shadowCallPreservesSelectedModel,
   shadowCallReplacementFor,
   shadowSourceModelPrefix,
 } from "../../lib/shadow-call";
@@ -276,10 +277,11 @@ export async function prepareResponsesRequest(
     }
   }
   let shadowCallIntercepted = false;
-  // A spawned sub-agent turn names its model on purpose; gpt-6-luna is both the helper
-  // slug and a default sub-agent model, so neither intercept site may rewrite that turn.
+  // Luna is also selectable by users/children. Both intercept sites use the same
+  // per-turn provenance; WS frames must not inherit the handshake's classification.
   const threadSpawn = isThreadSpawnRequest(req.headers);
-  if (!concreteSelection && !options.compactionRoutingOverride && !options.internalDecisionCall && !threadSpawn && !memoryModelApplies && body && typeof body === "object" && !Array.isArray(body)) {
+  const preserveShadowModel = shadowCallPreservesSelectedModel(body, req.headers, options.inboundTransport);
+  if (!concreteSelection && !options.compactionRoutingOverride && !options.internalDecisionCall && !preserveShadowModel && !memoryModelApplies && body && typeof body === "object" && !Array.isArray(body)) {
     const shadowIntercept = config.shadowCallIntercept;
     const rawShadowModel = (body as { model?: unknown }).model;
     const shadowReplacement = shadowIntercept?.enabled && typeof rawShadowModel === "string"
@@ -626,7 +628,9 @@ export async function prepareResponsesRequest(
     // helper slug is also a default sub-agent model): none of these may be rewritten
     // by the intercept.
     let shadowRoute: RouteResult | undefined;
-    if (!concreteSelection && !memoryRoute && !options.memoryModelPhase && !options.compactionRoutingOverride && !options.internalDecisionCall && !threadSpawn) {
+    // Upstream 2.84 (#6921): explicit user turns and spawned children keep their
+    // selected model; the provenance gate joins the fork delegation gate list.
+    if (!concreteSelection && !memoryRoute && !options.memoryModelPhase && !options.compactionRoutingOverride && !options.internalDecisionCall && !threadSpawn && !preserveShadowModel) {
       // Upstream 2.76 gates stay in front of the delegation: a concrete selector (combo child or
       // policy fallback candidate) and an internal decision call own their model, so the intercept
       // must not rewrite them. The fork-owned resolver keeps the per-source mapping (#5618 fail-fast

@@ -143,6 +143,11 @@ timer. Requests already sent upstream retain their original credentials.
 
 ### Filtering request logs
 
+A proxy replay refusal keeps HTTP 429 and error code `upstream_reset_replay_refused`, but
+its request and attempt failure cause is `transport-ambiguous`, with resend permission
+`refused-ambiguous`: the upstream may already have processed the turn. A genuine provider
+429 remains `rate-limit` with resend permission `permitted`.
+
 Logs filters combine surface, intercepted requests, provider, exact model, status, time,
 speed, and conversation ID over the currently loaded request ring. Provider and model
 choices also include fallback attempts; model matching ignores case and surrounding spaces
@@ -335,6 +340,10 @@ maintainers do not provide policy advice and cannot resolve provider enforcement
   request, and only requests already in flight keep the account they captured. A manual choice is also
   pinned: the card shows a **PINNED** badge, and a higher selection order cannot preempt that account
   until it is drained, you select another account, or you change any account's selection order.
+  Selecting the badge again asks to release the pin: confirming clears the selection, bound threads
+  keep their captured account, and new or unbound requests return to the selection order and
+  thresholds.
+  If the pin changes while confirmation is open, that confirmation cannot release the newer pin. After a refused or uncertain release, the account view is refreshed; review the current selection before confirming again.
 - Each account card carries a **Selection order** control (First, Earlier, Normal, Later, Last).
   Higher order is used first, and the pool drops to a lower order only once every account above it is
   drained or unavailable. A changed order applies from the next unbound request and never moves a

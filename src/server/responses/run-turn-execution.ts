@@ -1,3 +1,4 @@
+import { mapSpendLedgerStorageError } from "./spend-storage-error";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -19,8 +20,8 @@ import type { AdapterEventQueue } from "../../adapters/run-turn-queue";
 import type { AttemptRecoveryKind } from "../../usage/log";
 import { providerFetch } from "./fetch-helpers";
 import { normalizeLogConversationId } from "../request-log-conversation";
-import type { AdapterEvent, OcxProviderContinuationState } from "../../types";
-import { adapterFailureFromMessage, SEND_BUDGET_EXHAUSTED_CODE } from "../../lib/errors";
+import { normalizeDeclaredToolName, type AdapterEvent, type OcxProviderContinuationState } from "../../types";
+import { adapterFailureFromMessage, SEND_BUDGET_EXHAUSTED_CODE, SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE, type OcxErrorPayload } from "../../lib/errors";
 import { SendBudgetExhaustedError, markResponseNonReplayable } from "../../lib/upstream-retry";
 import {
   hasEligibleGenericOAuthFailoverTarget,
@@ -318,7 +319,8 @@ export async function executeResponsesRunTurn(
           Object.assign(parsed, routeState);
         }
       } catch (err) {
-        emit(err instanceof RequestPacingQueueOverloadError
+        const storageRefusal = mapSpendLedgerStorageError(err, logCtx);
+        emit(storageRefusal ? { type: "error", ...storageRefusal } : err instanceof RequestPacingQueueOverloadError
           ? {
               type: "error",
               status: 429,
@@ -754,7 +756,8 @@ export async function executeResponsesRunTurn(
           runTurnAbort.abort();
           queue.close();
           const message = preflight.error?.message ?? "Adapter ended before producing a response";
-          const failure = formatErrorResponse(502, "upstream_error", redactSecretString(message));
+          const failure = formatErrorResponse(preflight.error?.code === SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE ? 503 : 502,
+            preflight.error?.code === SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE ? SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE : "upstream_error", redactSecretString(message));
           // A replay-unsafe heartbeat means the adapter already ran a local side effect, so the
           // combo must not send this turn to another target: the failure stays with this child.
           if (preflight.replayUnsafe) markResponseNonReplayable(failure);
@@ -962,7 +965,9 @@ export async function executeResponsesRunTurn(
           const message = classifiedError?.message ?? (firstMeaningful?.type === "error"
             ? firstMeaningful.message
             : "Adapter ended before producing a response");
-          const failure = formatErrorResponse(502, "upstream_error", redactSecretString(message));
+          const storageRefusal = firstMeaningful?.type === "error" && firstMeaningful.code === SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE;
+          const failure = formatErrorResponse(storageRefusal ? 503 : 502,
+            storageRefusal ? SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE : "upstream_error", redactSecretString(message));
           if (replayUnsafe) markResponseNonReplayable(failure);
           return failure;
         }
@@ -1011,7 +1016,10 @@ export async function executeResponsesRunTurn(
         commitReasoningReplayServingRoute();
       }
       notifyResponseComplete(json);
-      return new Response(JSON.stringify(json), { headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify(json), {
+        status: (json.error as OcxErrorPayload | undefined)?.code === SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE ? 503 : 200,
+        headers: { "Content-Type": "application/json" },
+      });
     } catch (error) {
       if (!isTranslatorBudgetExceededError(error)) throw error;
       runTurnAbort.abort();

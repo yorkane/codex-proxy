@@ -116,7 +116,7 @@ Some adapters share another adapter's routed-tool semantics while retaining inde
   outer error message. Each bounded replay evaluates its own typed delay or compatible message, so
   a later refusal may change between the raw reset sentence and the generated diagnostic without
   losing the next wait. Raw text stays internal because it can reflect credentials. Investigation and limits:
-  `devlog/_plan/260917_devin_input_ceiling/000_review.md`.
+  `devlog/_fin/260917_devin_input_ceiling/000_review.md`.
 
 The registry records those relationships with `contractParent`. A parent relationship does **not** mean the registry recursively constructs a parent adapter and injects it into the child. Azure and MiMo keep owning their existing internal composition. This avoids making production constructors depend on test/conformance needs and keeps this authority refactor behavior-neutral.
 
@@ -150,6 +150,24 @@ Registry selection neither derives nor consumes Google's endpoint-scoped
 owned by the selected adapter's final compiler and cannot affect adapter selection.
 
 The shared Responses path follows the [bounded multipart recovery contract](../subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged.
+
+## Empty assistant history
+
+`src/adapters/openai-chat/messages.ts` omits an assistant turn whose joined text is empty and
+that carries neither tool calls nor serialized reasoning while earlier tool calls still await
+their results, so the empty turn cannot split a call from its result. Outside that window, a
+standalone answer made of explicit blank text parts keeps `content: ""`, because dropping it
+would put two user turns next to each other on chat templates that require strict alternation.
+A message with no text parts at all (`content: ""` or `[]` on input) is still omitted, as it
+was before. Whitespace and nonempty answer text stay byte-exact; tool-call and reasoning-only
+continuations keep their existing content shape.
+
+On native Responses, `src/adapters/openai-responses/empty-assistant.ts` removes only explicit
+content-empty assistant message items sent to `api.kimi.com/coding/v1/responses`. Refusals,
+nonempty annotations, unknown parts/fields, reasoning and tools are retained. A same-input `item_reference` keeps its target message, even
+when empty, so filtering cannot create a dangling reference. Independent
+reasoning/call/result items, caller-owned raw history and other destinations are unchanged.
+`tests/adapters/openai/openai-empty-assistant-history.test.ts` covers both final wires.
 
 ## Moonshot `$ref`-with-siblings normalization
 

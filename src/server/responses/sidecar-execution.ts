@@ -32,7 +32,7 @@ import { classifyKiroRefusal } from "../../adapters/kiro-refusal";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
 import { noteKiroMonthlyRefusal, noteKiroServedSuccess } from "../../providers/kiro-usage";
 import { persistKiroAccountState } from "../../providers/kiro-account-state-disk";
-import { readDisplaySafeErrorText } from "./core-errors";
+import { anthropicPoolCooldownResponse, readDisplaySafeErrorText } from "./core-errors";
 import {
   ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
   anthropicRoutingFor,
@@ -79,6 +79,7 @@ export async function executeResponsesSidecars(
     | "anthropicSessionKey"
     | "commitResolvedOAuthSelection"
     | "resolveSelectionAdapter"
+    | "resolveCopilotSelection"
     | "oauthDispatch"
     | "noteRoutedAttemptSend"
     | "bindKeyUsageFromBridge"
@@ -103,6 +104,7 @@ export async function executeResponsesSidecars(
     anthropicSessionKey,
     commitResolvedOAuthSelection,
     resolveSelectionAdapter,
+    resolveCopilotSelection,
     oauthDispatch,
   } = transportState;
   const {
@@ -196,6 +198,7 @@ export async function executeResponsesSidecars(
   // A single request may rotate once for a verification refusal. Keep this separate from the
   // broader OAuth failover count: a sidecar turn can also spend that count on rate-limit recovery.
   let antigravityValidationRotationAttempted = false;
+  /** Admit a replacement credential, or leave the loop's original refusal authoritative. */
   const rotateSidecarProviderOn429 = async (
     retryAfter: string | null,
     responseHeaders?: Headers,
@@ -280,6 +283,8 @@ export async function executeResponsesSidecars(
       // `applyFailoverSnapshot` has already rebound the route to the sibling identity/project.
     } else if (rotated) {
       route.provider = rotated;
+      try { await resolveCopilotSelection(retryParsed ?? parsed); }
+      catch { return null; } // Keep the sidecar's original refusal when replacement negotiation fails.
     } else if (
       // A POSITIVE gate, not an early return. An early `return null` here made every later arm
       // unreachable: Anthropic never has a genericFailoverAccountId (isGenericFailoverProvider
@@ -550,7 +555,7 @@ export async function executeResponsesSidecars(
         modelId: route.modelId,
         ...sidecarBudget.fetchOptions(transportState.adapter),
       })(input, init)) as typeof globalThis.fetch;
-    const wsResponse = await runWithWebSearch({
+    const loopResponse = await runWithWebSearch({
       parsed, adapter: transportState.adapter,
       onIterationEnd: sidecarBudget.releaseUnsentHop,
       fetchForRequest: (request, iterParsed, adapter) => providerFetch(route.provider, options.codexWsRuntimeIdentity, {
@@ -617,6 +622,15 @@ export async function executeResponsesSidecars(
         notifyResponseComplete(response);
       },
     });
+    // A routed Anthropic model whose last pool account refused on spent quota fails the loop's
+    // first iteration with a generic 429 before any search runs. Answer the usage limit instead,
+    // as the main path does (#6991), so Codex stops rather than retrying the whole turn.
+    const poolUsageLimit = loopResponse.status === 429 && anthropicInstance && route.provider.authMode === "oauth"
+      && !options.comboAttempt
+      ? anthropicRoutingFor(anthropicInstance).anthropicPoolUsageLimitAfterRefusal(Date.now(), transportState.anthropicRouteDecision, route.modelId)
+      : null;
+    if (poolUsageLimit) void loopResponse.body?.cancel().catch(() => {});
+    const wsResponse = poolUsageLimit ? anthropicPoolCooldownResponse(poolUsageLimit, { logCtx }) : loopResponse;
     // Register the sidecar stream as an active turn so drainAndShutdown waits for (or aborts)
     // in-flight web-search turns instead of skipping them during graceful shutdown.
     if (wsResponse.body) {
