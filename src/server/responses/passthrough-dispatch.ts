@@ -21,6 +21,7 @@ import { imageGenToolCallAliases } from "../responses-image-gen-repair";
 import { rememberResponseState, isBodyNonPersistable } from "../../responses/state";
 import {
   currentTurnWireToolCatalogBody,
+  hasExplicitEmptyToolCatalog,
   hasExplicitWireToolCatalog,
   collectDeclaredWireToolNames,
   collectDeclaredBareWireToolNames,
@@ -188,6 +189,7 @@ export async function preparePassthroughExchange(
     | "selectedForwardHeaders"
     | "clientRequestedStream"
     | "inboundWire"
+    | "clientDeclaredEmptyToolCatalog"
     | "substituteMainCredential"
     | "callerAuthHeaders"
     | "subagentFallbackAccountId"
@@ -254,6 +256,7 @@ export async function preparePassthroughExchange(
     responseStateOptions,
     clientRequestedStream,
     inboundWire,
+    clientDeclaredEmptyToolCatalog,
     substituteMainCredential,
     callerAuthHeaders,
   } = requestState;
@@ -534,10 +537,18 @@ export async function preparePassthroughExchange(
           declaredWireToolNames.add(name);
         }
       }
+      // Chat and Anthropic inbounds may deliver tools deferred/partially: their client registry
+      // owns the full catalog, so this guard cannot read the translated body as the authorization
+      // boundary. An explicit empty catalog — flagged by the translating ingress or present
+      // verbatim in a replayed body — is still a deny-all the caller declared; everything else
+      // stays deferred to the caller's own tool handling.
       undeclaredToolGuardActive = (
-        declaredWireToolNames.size > 0
-        || clientDeclaredNamelessCallTypes.size > 0
-        || clientExplicitWireToolCatalog
+        inboundWire === "responses"
+          ? declaredWireToolNames.size > 0
+            || clientDeclaredNamelessCallTypes.size > 0
+            || clientExplicitWireToolCatalog
+          : clientDeclaredEmptyToolCatalog
+            || hasExplicitEmptyToolCatalog(clientToolAuthorizationBody)
       ) && route.provider.authMode !== "forward";
       options.nativeControl?.configureToolAuthorization?.(
         undeclaredToolGuardActive,

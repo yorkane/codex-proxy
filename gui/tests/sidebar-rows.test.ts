@@ -18,14 +18,14 @@ const raw = await Bun.file(new URL("../src/App.tsx", import.meta.url)).text();
  */
 const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-test("the sidebar is nine group rows, in order, owning every sidebar page once", async () => {
+test("the sidebar is ten group rows, in order, owning every sidebar page once", async () => {
   const { NAV_GROUPS, groupForPage } = await import("../src/nav-groups");
   const { VALID_PAGES } = await import("../src/app-routing");
 
   // The exact rows, in order. A count alone would pass if a row were swapped for
   // another, and Routing folding into Models is precisely that kind of change.
   expect(NAV_GROUPS.map(group => group.id)).toEqual([
-    "dashboard", "connect", "codex-set", "providers", "models", "shadow", "subagents", "usage-logs", "remote",
+    "dashboard", "connect", "codex-set", "providers", "models", "shadow", "subagents", "advisor", "usage-logs", "remote",
   ]);
   expect(Object.fromEntries(NAV_GROUPS.map(group => [group.id, [...group.pages]]))).toEqual({
     dashboard: ["dashboard"],
@@ -37,6 +37,7 @@ test("the sidebar is nine group rows, in order, owning every sidebar page once",
     // Shadow is the fork's standalone intercept page, kept as its own row.
     shadow: ["shadow"],
     subagents: ["subagents"],
+    advisor: ["advisor"],
     // Usage leads, so the row opens Usage first.
     "usage-logs": ["usage", "logs", "storage"],
     // Last row, by request.

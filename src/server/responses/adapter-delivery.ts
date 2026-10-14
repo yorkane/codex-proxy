@@ -115,17 +115,29 @@ export async function deliverAdapterResponse(
           continuation: next => fetchTerminalGuardContinuation(next, undefined, !parsed.stream),
         })
       : initialEventStream;
+    // Optional advisor guard (registered per request by the sidecar planner; absent unless the
+    // user enabled the advisor): holds synthetic `advisor` tool calls, consults the configured
+    // expert model, and re-dispatches the worker. Sits inside the empty-completion guard so an
+    // advisor-only turn never reads as an empty completion, and outside the bridge so the
+    // synthetic call never reaches the client.
+    const advisorStream = parsed._advisorGuard
+      ? parsed._advisorGuard({
+          parsed,
+          firstEvents: eventStream,
+          continuation: fetchTerminalGuardContinuation,
+        })
+      : eventStream;
     // The empty-completion guard sits OUTSIDE the terminal guard: a completed
     // turn with no text and no tool call is retried with the IDENTICAL request
     // (fetchTerminalGuardContinuation(parsed) replays the cached byte-identical
     // request — same body, same headers, same signal).
     const guardedEventStream = emptyCompletionGuardEnabled
       ? guardEmptyCompletionEventStream({
-          firstEvents: eventStream,
+          firstEvents: advisorStream,
           continuation: fetchGuardedEmptyCompletionRetry,
           maxRetries: emptyCompletionGuardMaxRetries,
         })
-      : eventStream;
+      : advisorStream;
     // Fork: shadow-scoped phantom tolerance + per-request directive-correction
     // budget (see shadow-call-route.ts); empty scope leaves every path byte-identical.
     // The route is passed so a DIRECT third-party route also gets the correction budget; the
@@ -256,6 +268,16 @@ export async function deliverAdapterResponse(
         })) guardedEvents.push(event);
       } else {
         guardedEvents = initialEvents;
+      }
+      // Optional advisor guard — same semantics as the streaming branch above.
+      if (parsed._advisorGuard) {
+        const advisorEvents: AdapterEvent[] = [];
+        for await (const event of parsed._advisorGuard({
+          parsed,
+          firstEvents: (async function* () { yield* guardedEvents; })(),
+          continuation: fetchTerminalGuardContinuation,
+        })) advisorEvents.push(event);
+        guardedEvents = advisorEvents;
       }
       if (emptyCompletionGuardEnabled) {
         events = [];

@@ -25,6 +25,7 @@ export type NavGroupId =
   | "models"
   | "shadow"
   | "subagents"
+  | "advisor"
   | "usage-logs"
   | "remote";
 
@@ -44,6 +45,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   { id: "models", tkey: "nav.models", Icon: IconBoxes, pages: ["models"] },
   { id: "shadow", tkey: "nav.shadow", Icon: IconBot, pages: ["shadow"] },
   { id: "subagents", tkey: "nav.subagents", Icon: IconBot, pages: ["subagents"] },
+  { id: "advisor", tkey: "nav.advisor", Icon: IconBot, pages: ["advisor"] },
   { id: "usage-logs", tkey: "nav.usageLogs", Icon: IconActivity, pages: ["usage", "logs", "storage"] },
   { id: "remote", tkey: "nav.remote", Icon: IconMonitor, pages: ["remote", "remote-workspace"] },
 ];

@@ -1,3 +1,4 @@
+import { UNDECLARED_TOOL_CALL_ERROR_CODE } from "../lib/errors";
 import {
   collectAmbiguousDottedAliases,
   dottedAliasIsUnambiguous,
@@ -82,7 +83,7 @@ const NAMELESS_TOOL_SPEC_TYPES = new Set([
 /** An upstream-supplied name reaches the error message; keep it bounded. */
 const MAX_REPORTED_NAME_CHARS = 100;
 
-export const UNDECLARED_TOOL_CALL_ERROR_CODE = "undeclared_tool_call";
+export { UNDECLARED_TOOL_CALL_ERROR_CODE };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -425,6 +426,24 @@ export function hasExplicitWireToolCatalog(body: unknown): boolean {
     isPlainObject(item)
     && item.type === "additional_tools"
     && isReadableWireToolCatalog(item.tools)
+  );
+}
+
+/**
+ * Whether the caller declared an explicitly EMPTY catalog — `tools: []` or an
+ * `additional_tools` item with `tools: []`. Unlike an absent or partial catalog this is an
+ * unambiguous deny-all: no deferred registry can exist under it, so even deferred wires
+ * enforce it. A hosted-only catalog is NOT empty — it still defers like an absent one.
+ */
+export function hasExplicitEmptyToolCatalog(body: unknown): boolean {
+  if (!isPlainObject(body)) return false;
+  if (Array.isArray(body.tools) && body.tools.length === 0) return true;
+  if (!Array.isArray(body.input)) return false;
+  return body.input.some(item =>
+    isPlainObject(item)
+    && item.type === "additional_tools"
+    && Array.isArray(item.tools)
+    && item.tools.length === 0
   );
 }
 
@@ -909,7 +928,6 @@ function failedBlocks(name: string, newline: string): readonly string[] {
  * @param providerExecutedCallTypes - Call types executed by the provider.
  * @param declaredBare - Explicitly declared bare tool names without namespace provenance.
  * @param declaredCustom - Current bare custom declarations eligible for code-mode recovery.
- * @param enforceDeclaredToolNames - Refuse undeclared calls; normalization remains active when false.
  * @returns An SSE block rewrite function.
  */
 export function createUndeclaredToolCallGuardBlockRewrite(
@@ -923,11 +941,14 @@ export function createUndeclaredToolCallGuardBlockRewrite(
   // 缺省 false —— phantom 本来就只在 shadow 作用域出现（此时 gate 恒 true），授权/发射/快照
   // 三处必须同答案，所以整条 rewrite 共用这一个布尔。
   allowEmissionRepair?: boolean,
-  // 上游 #6800 系列：chat / anthropic 入站 wire 不做未声明拒绝（那条路径的 catalog 形状与
-  // 客户端授权集合不同构），只保留归一化。与 phantom 丢弃正交：phantom 只出现在 shadow
-  // 作用域，任何 wire 都必须先丢，只有未声明拒绝受这道门约束。
-  enforceDeclaredToolNames = true,
+  // 上游 2.85（#6800 系列定型）：chat / anthropic 等 deferred-catalog wire 不做未声明拒绝
+  // （那条路径的 catalog 形状与客户端授权集合不同构），只保留归一化。与 phantom 丢弃正交：
+  // phantom 只出现在 shadow 作用域，任何 wire 都必须先丢，只有未声明拒绝受这道门约束。
+  options?: { refuseUndeclared?: boolean },
 ): SseBlockRewrite {
+  // Deferred-catalog wires (Chat/Anthropic) keep the default-namespace normalization — the
+  // client can only resolve the bare name it declared — while the refusal itself stays off.
+  const refuse = options?.refuseUndeclared !== false;
   let tripped = false;
   const phantomActive = phantomAllowlist !== undefined && phantomAllowlist.size > 0;
   // Ids of items whose announce event the phantom allowlist dropped; every later block
@@ -945,6 +966,8 @@ export function createUndeclaredToolCallGuardBlockRewrite(
     } catch {
       return [block];
     }
+    // Phantom 丢弃在 refuse 门之外：phantom 只在 shadow 作用域出现，任何入站 wire 都必须先丢，
+    // 受门约束的只有未声明拒绝本身（与上游 refuseUndeclared 语义正交）。
     if (phantomActive && isPlainObject(parsed)) {
       if (droppedItemIds.size > 0 && referencesDroppedItem(parsed, droppedItemIds)) return [];
       if (parsed.type === "response.completed" || parsed.type === "response.incomplete") {
@@ -967,12 +990,12 @@ export function createUndeclaredToolCallGuardBlockRewrite(
         }
       }
     }
-    const name = enforceDeclaredToolNames
-      ? undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, undefined, allowEmissionRepair)
-      : undefined;
-    if (name !== undefined) {
-      tripped = true;
-      return failedBlocks(name, block.includes("\r\n") ? "\r\n" : "\n");
+    if (refuse) {
+      const name = undeclaredToolCallName(parsed, declared, declaredNamelessClientCallTypes, providerExecutedCallTypes, declaredBare, declaredCustom, undefined, allowEmissionRepair);
+      if (name !== undefined) {
+        tripped = true;
+        return failedBlocks(name, block.includes("\r\n") ? "\r\n" : "\n");
+      }
     }
     const normalized = normalizeDefaultNamespaceInPayload(parsed, declared, declaredBare, allowEmissionRepair);
     if (normalized.changed) {

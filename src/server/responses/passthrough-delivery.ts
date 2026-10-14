@@ -108,6 +108,7 @@ import { createResponsesFunctionToolRepairBlockRewrite } from "../responses-func
 import {
   createUndeclaredToolCallGuardBlockRewrite,
   currentTurnWireToolCatalogBody,
+  UNDECLARED_TOOL_CALL_ERROR_CODE,
   undeclaredToolCallNameInResponse,
   undeclaredToolCallMessage,
   normalizeDefaultNamespaceInJson,
@@ -440,13 +441,14 @@ export async function deliverPassthroughResponse(
   } = nativeExchange;
   const { commitReasoningReplayServingRoute, recordTerminalOutcomes } = responseEffects;
   // route 已在函数顶部解构（上游 main-dispatch 证据需要它），这里不再重复取。
-  const { parsed, subagentQuotaFailureModel, clientRequestedStream, translatorBudget, inboundWire } = requestState;
-  const enforceDeclaredToolNames = inboundWire !== "chat" && inboundWire !== "anthropic";
+  const { parsed, subagentQuotaFailureModel, clientRequestedStream, translatorBudget } = requestState;
   // Fork: shadow-scoped phantom tolerance for the passthrough relay (see shadow-call-route.ts).
   const shadowScope = shadowPhantomScope(parsed, config);
   // Fork: 发射名改写门控 —— 授权/发射/快照三处共用同一个判定（见 shadow-call-route.ts）。
   // phantom 只在 shadow 作用域出现、此时 gate 恒 true；官方端点缺省 false 时整条 guard
   // 退回纯 normalize 语义（95f462434 之前），与桥接侧的官方门控同答案。
+  // 未声明拒绝的门自 2.85 起改由 refuseUndeclared（= undeclaredToolGuardActive）承担：
+  // chat/anthropic 的 deferred catalog 天然不拒绝，fork 的 enforceDeclaredToolNames 形参已删。
   const emissionRepairThirdParty = thirdPartyEmissionRepair(parsed, route);
   const { openAiSidecar } = sidecarState;
   const { requestBindings } = transportState;
@@ -866,7 +868,10 @@ export async function deliverPassthroughResponse(
           : undefined,
         // Last: every rewrite above can still rename or reshape a call item, so the guard must
         // compare the names the client will actually receive against the declared catalog.
-        nativeExchange.undeclaredToolGuardActive
+        // Deferred-catalog wires keep the rewrite for its normalization half only: a provider's
+        // `default.X` call still collapses to the declared `X`, but an undeclared name is the
+        // client's own deferred registry's business, not this proxy's verdict.
+        nativeExchange.undeclaredToolGuardActive || declaredWireToolNames.size > 0
           ? createUndeclaredToolCallGuardBlockRewrite(
             declaredWireToolNames,
             declaredNamelessClientCallTypes,
@@ -875,7 +880,7 @@ export async function deliverPassthroughResponse(
             recoverableBareCustomWireToolNames,
             shadowScope.undeclaredPhantomNames,
             emissionRepairThirdParty,
-            enforceDeclaredToolNames,
+            { refuseUndeclared: nativeExchange.undeclaredToolGuardActive },
           )
           : undefined,
         grokUpstreamEchoEnabled
@@ -1341,10 +1346,7 @@ export async function deliverPassthroughResponse(
       if (grokUpstreamEchoEnabled) {
         clientJson = stripGrokUpstreamEnvelopeEchoFromResponsesJson(clientJson);
       }
-      // #1700: same inbound-wire refusal policy as the SSE relay above. Both the plain JSON answer and
-      // the reframed-SSE branch below are built from this body, so one check covers them. This
-      // runs BEFORE the continuation cache write below: a refused turn must not become state a
-      // later `previous_response_id` replay can expand from.
+      // Both response formats use this body, before a refused turn can enter continuation state.
       if (nativeExchange.undeclaredToolGuardActive) {
         const undeclared = (() => {
           try {
@@ -1362,9 +1364,15 @@ export async function deliverPassthroughResponse(
             return undefined;
           }
         })();
-        if (enforceDeclaredToolNames && undeclared !== undefined) {
-          return formatErrorResponse(502, "upstream_error", undeclaredToolCallMessage(undeclared));
+        if (undeclared !== undefined) {
+          return formatErrorResponse(502, "upstream_error", undeclaredToolCallMessage(undeclared), {
+            code: UNDECLARED_TOOL_CALL_ERROR_CODE,
+          });
         }
+      }
+      // Same split as the SSE rewrite: normalization applies whenever a declared name exists,
+      // even on wires whose deferred catalog stands the refusal down.
+      if (declaredWireToolNames.size > 0) {
         clientJson = normalizeDefaultNamespaceInJson(
           clientJson,
           declaredWireToolNames,
