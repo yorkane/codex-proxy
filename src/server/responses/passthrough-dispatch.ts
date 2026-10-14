@@ -260,8 +260,7 @@ export async function preparePassthroughExchange(
     substituteMainCredential,
     callerAuthHeaders,
   } = requestState;
-  // Fork: 门控 + phantom 名单一次算好（展开注释在 shadow-call-route.ts，行数门禁）。
-  const { shadowScope, emissionRepairThirdParty } = passthroughEmissionRepairScope(parsed, config, route);
+  const { shadowScope, emissionRepairThirdParty } = passthroughEmissionRepairScope(parsed, config, route);  // Fork: 门控与 phantom 名单一次算好（展开注释见 shadow-call-route.ts）
   const {
     passiveQuotaWriterGeneration,
     oauthDispatch,
@@ -555,10 +554,7 @@ export async function preparePassthroughExchange(
         declaredWireToolNames,
         declaredBareWireToolNames,
         declaredNamelessClientCallTypes,
-        providerExecutedCallTypes,
-        // native 注入通道是官方 Codex 的 native 路径：把同一个门控带进它的授权检查，
-        // shadow 替换过的请求（gate=true）才会走改名器，官方请求只 normalize。
-        emissionRepairThirdParty,
+        providerExecutedCallTypes, emissionRepairThirdParty,
       );
     };
     refreshUndeclaredToolGuard(request);
@@ -622,9 +618,7 @@ export async function preparePassthroughExchange(
         declaredNamelessClientCallTypes,
         providerExecutedCallTypes,
         declaredBareWireToolNames,
-        recoverableBareCustomWireToolNames,
-        shadowScope.undeclaredPhantomNames,
-        emissionRepairThirdParty,
+        recoverableBareCustomWireToolNames, shadowScope.undeclaredPhantomNames, emissionRepairThirdParty,
       ) !== undefined) {
         inspectionSawUndeclaredTool = true;
       }
@@ -670,9 +664,7 @@ export async function preparePassthroughExchange(
           declaredNamelessClientCallTypes,
           providerExecutedCallTypes,
           declaredBareWireToolNames,
-          recoverableBareCustomWireToolNames,
-          shadowScope.undeclaredPhantomNames,
-          emissionRepairThirdParty,
+          recoverableBareCustomWireToolNames, shadowScope.undeclaredPhantomNames, emissionRepairThirdParty,
         ) !== undefined
       ) {
         return;
