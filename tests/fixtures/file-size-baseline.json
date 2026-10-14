@@ -35,7 +35,7 @@
     "src/responses/state.ts": 1360,
     "src/server/index.ts": 890,
     "src/server/responses/core.ts": 210,
-    "src/server/responses/passthrough-dispatch.ts": 2000,
+    "src/server/responses/passthrough-dispatch.ts": 1999,
     "tests/ci-workflows/ci-workflows.test.ts": 5546,
     "tests/cli/cli-account.test.ts": 2313,
     "tests/codex-integration/codex-auth-api.test.ts": 6548,

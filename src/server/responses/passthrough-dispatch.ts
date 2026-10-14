@@ -32,8 +32,7 @@ import {
   undeclaredToolCallNameInResponse,
   normalizeDefaultNamespaceInResponse,
 } from "../responses-undeclared-tool-guard";
-import { passthroughEmissionRepairScope } from "./shadow-call-route";
-import { collectSelfNamedNamespaceScrubAuthorization } from "../responses-self-named-namespace-scrub";
+import { passthroughEmissionRepairScope } from "./shadow-call-route"; import { collectSelfNamedNamespaceScrubAuthorization } from "../responses-self-named-namespace-scrub";
 import type { ProviderExecutedCallType } from "../responses-undeclared-tool-guard";
 import {
   releaseCodexAuthContextProbeLease,
