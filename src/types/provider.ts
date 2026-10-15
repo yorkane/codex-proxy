@@ -460,6 +460,17 @@ export interface OcxProviderConfig {
    */
   allowEncryptedV2AgentTasks?: boolean;
   /**
+   * 该 provider 支持协作工具的明文 message，允许代理对它应用
+   * preparePlaintextV2AgentMessages 改写（v2 工具目录临时换别名、剥离 encrypted 标记，
+   * 返回时还原工具身份）。
+   *
+   * 与全局键 plaintextV2AgentMessages 的关系：全局键是总闸，必须为 true 才会考虑本字段；
+   * 本字段把生效范围从 canonical ChatGPT 转发扩展到显式 opt-in 的第三方 provider。
+   * canonical 转发的行为由全局键单独覆盖，不需要本字段。
+   * 缺省或 false 保持现状（仅 canonical 生效）。
+   */
+  plaintextV2AgentMessages?: boolean;
+  /**
    * Explicit opt-in for non-registry private-network destinations such as localhost, RFC1918,
    * link-local, or unique-local upstreams. Metadata endpoints remain blocked.
    */

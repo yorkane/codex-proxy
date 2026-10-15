@@ -33,6 +33,27 @@ export function shouldPreparePlaintextV2AgentMessages(args: {
     && hasPlaintextV2CollaborationCatalog(args.requestBody);
 }
 
+/**
+ * 明文 V2 协作消息对某个 provider 是否具备生效资格（纯判定，不看请求体）。
+ *
+ * 语义：全局开关开启，且（该请求走 canonical ChatGPT 转发 **或** 该 provider 显式
+ * opt-in 了 provider 级 plaintextV2AgentMessages）时为 true。canonical 分支保持
+ * 全局键单独控制的既有行为；provider 分支把生效范围扩展到第三方 Responses 线路。
+ *
+ * isCanonical 由调用方传入：core-normalize 与 passthrough 两处已 import
+ * isCanonicalOpenAiForwardProvider，本模块反向 import 会引入循环依赖，
+ * 因此 canonical 判定留在调用点，这里只吃布尔值。
+ */
+export function plaintextV2AgentMessagesEligibleForProvider(args: {
+  enabled: boolean;
+  providerName: string;
+  provider: { plaintextV2AgentMessages?: boolean };
+  isCanonical: boolean;
+}): boolean {
+  if (!args.enabled) return false;
+  return args.isCanonical || args.provider.plaintextV2AgentMessages === true;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }

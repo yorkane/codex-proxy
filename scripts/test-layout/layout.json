@@ -1323,6 +1323,7 @@
     "pinned-https-get.test.ts": "images",
     "plaintext-v2-agent-messages-server.test.ts": "server",
     "plaintext-v2-agent-messages.test.ts": "responses",
+    "plaintext-v2-agent-messages-thirdparty.test.ts": "responses",
     "plan-video.test.ts": "videos",
     "plan.test.ts": "images",
     "platform-dialog-guard.test.ts": "gui",
