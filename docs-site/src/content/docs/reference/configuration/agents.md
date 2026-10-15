@@ -188,17 +188,20 @@ on a mid-thread model switch.
 ## Plaintext v2 agent messages
 
 `plaintextV2AgentMessages` is unset in a fresh config and runs only when explicitly set to `true`.
-The caller must use the Responses wire, and the final destination must use the canonical ChatGPT
-Codex forward transport: `adapter: "openai-responses"`, `authMode: "forward"`, and the exact base URL
-`https://chatgpt.com/backend-api/codex`. OpenAI API-key providers, custom OpenAI-compatible
-gateways, routes whose final destination is another provider, and non-Responses callers are never
-rewritten.
+The caller must use the Responses wire. A canonical ChatGPT Codex forward destination
+(adapter: openai-responses, authMode: forward, and the exact base URL
+https://chatgpt.com/backend-api/codex) needs no provider-level flag. A third-party
+openai-responses provider, including a custom OpenAI-compatible gateway, must also set
+providers.<id>.plaintextV2AgentMessages: true; the global key remains the master switch.
+Routes whose final destination is another protocol and non-Responses callers are never rewritten.
 
 For an eligible v2 request, opencodex recognizes the catalog by a top-level `collaboration`
-namespace with a direct `spawn_agent` child. The catalog can be in top-level `tools`, or in the
-first input item's developer `additional_tools` when `tools` is absent (Responses Lite).
-An explicit top-level catalog takes precedence; user-role and later historical catalogs do not
-activate the option. It removes
+namespace with a direct `spawn_agent` child. The catalog can be in top-level tools, or in any developer additional_tools item when tools is absent
+(Responses Lite), including catalogs replayed after earlier history. An explicit top-level catalog
+takes precedence, and user-role catalogs are ignored. Native collaboration namespaces in
+tool_search_output history are rewritten consistently; flattened private names and pre-existing
+private aliases still fail closed.
+It removes
 `parameters.properties.message.encrypted: true`, when present, only from `spawn_agent`,
 `send_message`, and `followup_task`. ChatGPT reserves both the `collaboration` namespace and those
 three tool names, so the request uses fixed private aliases for all four identities. Before making

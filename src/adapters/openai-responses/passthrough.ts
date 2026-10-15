@@ -438,6 +438,23 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         convertedRoutedToolSearchNames = rewritten.names;
       }
       if (!isCanonicalOpenAiForwardProvider(provider)) {
+        // 第三方线路随后会把私有 namespace 展平。明文改写必须先于展平发生，
+        // 否则 prepare 只会看到 collaboration__spawn_agent 并保守跳过，encrypted 标记
+        // 将一路保留到上游。canonical 路径不经过这段展平，仍在 compaction 后处理。
+        if (parsed._plaintextV2AgentMessages === true
+          && plaintextV2AgentMessagesEligibleForProvider({
+            enabled: true,
+            providerName: incoming.providerName,
+            provider,
+            isCanonical: false,
+          })) {
+          const prepared = preparePlaintextV2AgentMessages(outBody);
+          outBody = prepared.body;
+          if (prepared.namespaceAliased) {
+            plaintextV2AgentMessageToolNames = prepared.toolNames;
+            plaintextV2AgentMessageAliasedToolNames = prepared.aliasedAgentMessageToolNames;
+          }
+        }
         // Codex 0.147 emits private namespace tool groups, while public/third-party Responses
         // gateways accept only flat tool variants. Run after custom/tool-search lowering so
         // namespace children already carry their final public kind before they are promoted.
@@ -484,7 +501,8 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       outBody = stripKimiEmptyAssistantMessages(outBody, url);
       // 全局总闸与目录检查已在 core-normalize 折进 parsed._plaintextV2AgentMessages；
       // 这里按最终落地的 provider 再判一次资格，因为 fallback 可能换目标。
-      if (parsed._plaintextV2AgentMessages === true
+      if (isCanonicalOpenAiForwardProvider(provider)
+        && parsed._plaintextV2AgentMessages === true
         && plaintextV2AgentMessagesEligibleForProvider({
           enabled: true,
           providerName: incoming.providerName,

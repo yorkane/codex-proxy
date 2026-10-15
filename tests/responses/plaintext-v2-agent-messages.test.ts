@@ -34,6 +34,10 @@ function collaborationTool(name: string, encrypted: boolean = true): Record<stri
   };
 }
 
+function messageSchema(tool: Record<string, unknown>): Record<string, unknown> {
+  return ((tool.parameters as Record<string, unknown>).properties as Record<string, Record<string, unknown>>).message;
+}
+
 describe("plaintext v2 agent message request preparation", () => {
   test("strips only the three message markers and aliases collaboration catalogs", () => {
     const body = {
@@ -747,8 +751,67 @@ describe("plaintext v2 agent message route policy", () => {
       { ...body, tools: [] },
       { ...body, tools: null },
       { input: [{ ...initial, role: "user" }] },
-      { input: [{ type: "message", role: "developer", content: "history" }, initial] },
     ]) expect(preparePlaintextV2AgentMessages(rejected).namespaceAliased).toBe(false);
+  });
+
+  test("accepts a developer additional_tools catalog replayed after earlier history", () => {
+    const tools = [{ type: "namespace", name: "collaboration", tools: [collaborationTool("spawn_agent")] }];
+    const catalog = { type: "additional_tools", role: "developer", tools };
+    const body = {
+      input: [
+        { type: "message", role: "developer", content: "history" },
+        { type: "message", role: "user", content: "earlier turn" },
+        catalog,
+        { type: "message", role: "user", content: "delegate again" },
+      ],
+    };
+    expect(shouldPreparePlaintextV2AgentMessages({
+      enabled: true,
+      inboundWire: "responses",
+      canonicalChatGpt: true,
+      requestBody: body,
+    })).toBe(true);
+    const prepared = preparePlaintextV2AgentMessages(body);
+    expect(prepared.namespaceAliased).toBe(true);
+    const result = prepared.body as { input: Array<typeof catalog> };
+    expect(result.input[2]!.tools[0]!.name).toBe(PLAINTEXT_V2_COLLABORATION_NAMESPACE);
+    expect(result.input[2]!.tools[0]!.tools[0]!.name).toBe("start_delegated_task");
+  });
+
+  test("rewrites a native collaboration namespace carried by tool-search history", () => {
+    const catalog = {
+      type: "additional_tools",
+      role: "developer",
+      tools: [{ type: "namespace", name: "collaboration", tools: [collaborationTool("spawn_agent")] }],
+    };
+    const history = {
+      type: "tool_search_output",
+      tools: [{
+        type: "namespace",
+        name: "collaboration",
+        tools: [collaborationTool("send_message"), collaborationTool("followup_task")],
+      }],
+    };
+    const body = { input: [{ type: "message", role: "developer", content: "history" }, catalog, history] };
+    const prepared = preparePlaintextV2AgentMessages(body);
+    expect(prepared.namespaceAliased).toBe(true);
+    const result = prepared.body as { input: Array<typeof catalog & typeof history> };
+    expect(result.input[2]!.tools[0]!.name).toBe(PLAINTEXT_V2_COLLABORATION_NAMESPACE);
+    expect(result.input[2]!.tools[0]!.tools.map(tool => tool.name)).toEqual([
+      "deliver_delegated_message", "continue_delegated_task",
+    ]);
+    for (const tool of result.input[2]!.tools[0]!.tools) expect(messageSchema(tool).encrypted).toBeUndefined();
+  });
+
+  test("keeps refusing flattened native names in tool-search history", () => {
+    const body = {
+      tools: [{ type: "namespace", name: "collaboration", tools: [collaborationTool("spawn_agent")] }],
+      input: [{
+        type: "tool_search_output",
+        tools: [{ type: "function", name: "collaboration__spawn_agent", parameters: { type: "object" } }],
+      }],
+    };
+    expect(preparePlaintextV2AgentMessages(body).namespaceAliased).toBe(false);
   });
 
   test("requires an explicit opt-in, Responses inbound, canonical ChatGPT, and a v2 catalog", () => {

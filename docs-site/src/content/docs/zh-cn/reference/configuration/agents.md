@@ -84,13 +84,17 @@ opencodex 会跳过已禁用、不可路由、不健康、处于冷却中，或�
 ## 明文 v2 代理消息
 
 新配置不会写入 `plaintextV2AgentMessages`。只有显式设置为 `true` 才会启用。调用方必须使用 Responses
-格式，最终目标必须采用规范的 ChatGPT Codex 转发配置，即 `adapter: "openai-responses"`、
-`authMode: "forward"` 和准确的基础地址 `https://chatgpt.com/backend-api/codex`。OpenAI API key
-provider、自定义 OpenAI 兼容网关、最终发往其他 provider 的请求，以及非 Responses 调用都不会被改写。
+格式。规范的 ChatGPT Codex 转发目标（adapter: openai-responses、authMode: forward 和准确的
+基础地址 https://chatgpt.com/backend-api/codex）无需 provider 级字段。第三方
+openai-responses provider（包括自定义 OpenAI 兼容网关）还必须设置
+providers.<id>.plaintextV2AgentMessages: true；全局键仍是总开关。最终发往其他协议的请求和
+非 Responses 调用都不会被改写。
 
 对于符合条件的 v2 请求，opencodex 只识别工具目录顶层的 `collaboration` namespace，而且它必须直接包含
-`spawn_agent`。目录可以位于顶层 `tools`；如果该字段不存在，也可以位于首个输入项的 developer
-`additional_tools` 中（Responses Lite）。显式顶层目录优先，user 角色和后续历史目录不会启用转换。
+`spawn_agent`。目录可以位于顶层 tools；如果该字段不存在，也可以位于 developer additional_tools 中
+（Responses Lite），包括重放到历史后段的目录。显式顶层目录优先，user 角色的目录不会启用转换。
+tool_search_output 历史中的原生 collaboration namespace 会同步改写；扁平私有名称和临时别名
+仍会触发保守拒绝。
 原生 ChatGPT 收到请求前，opencodex 会删除 `spawn_agent`、`send_message` 和
 `followup_task` 中已有的 `parameters.properties.message.encrypted: true`。ChatGPT 会按保留的
 `collaboration` namespace 和三个工具名处理消息，因此请求会给这四个名称使用固定的临时别名。

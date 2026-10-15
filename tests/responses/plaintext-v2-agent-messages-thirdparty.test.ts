@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
 import {
   PLAINTEXT_V2_COLLABORATION_NAMESPACE,
   plaintextV2AgentMessagesEligibleForProvider,
   preparePlaintextV2AgentMessages,
   shouldPreparePlaintextV2AgentMessages,
 } from "../../src/responses/plaintext-v2-agent-messages";
+import { withTestTranslatorBudget } from "../helpers/translator-budget";
+
+const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
+  withTestTranslatorBudget(createResponsesPassthroughAdapterProduction(...args));
 
 // 第三方 Responses provider 的 provider 级明文 opt-in 契约（fork 定制）：
 // 全局键是总闸，provider 字段把生效范围从 canonical ChatGPT 转发扩展到显式 opt-in 的第三方线路；
@@ -134,5 +139,37 @@ describe("plaintext v2 agent messages third-party provider opt-in", () => {
     const namespace = (prepared.body as typeof body).tools[0] as { name: string; tools: Record<string, unknown>[] };
     expect(namespace.name).toBe(PLAINTEXT_V2_COLLABORATION_NAMESPACE);
     expect(messageSchema(namespace.tools[0]!).encrypted).toBeUndefined();
+  });
+
+  test("第三方线路在 namespace 展平前完成明文改写", () => {
+    const provider = {
+      adapter: "openai-responses",
+      baseUrl: "http://127.0.0.1:10100/v1",
+      authMode: "key" as const,
+      allowPrivateNetwork: true,
+      plaintextV2AgentMessages: true,
+    };
+    const rawBody = thirdPartyRequestBody();
+    const request = createResponsesPassthroughAdapter(provider).buildRequest({
+      modelId: "gpt-6.1-sol",
+      context: { messages: [] },
+      stream: false,
+      options: {},
+      _rawBody: rawBody,
+      _plaintextV2AgentMessages: true,
+    }, { headers: new Headers({ authorization: "Bearer test" }) });
+    const sent = JSON.parse(request.body);
+    const serialized = JSON.stringify(sent);
+    expect(serialized).toContain("collaboration-optimize__start_delegated_task");
+    expect(serialized).not.toContain('"encrypted":true');
+    expect(serialized).not.toContain("collaboration__spawn_agent");
+    expect([...(request.plaintextV2AgentMessageToolNames ?? [])]).toEqual([
+      "spawn_agent", "send_message", "followup_task",
+    ]);
+    expect([...(request.plaintextV2AgentMessageAliasedToolNames ?? [])]).toEqual([
+      "spawn_agent", "send_message", "followup_task",
+    ]);
+    expect(rawBody.tools[0]!.name).toBe("collaboration");
+    expect(JSON.stringify(rawBody)).toContain('"encrypted":true');
   });
 });

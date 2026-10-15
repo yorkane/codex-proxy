@@ -66,7 +66,7 @@ function responseToolCatalogs(body: Record<string, unknown>): unknown[][] {
   for (const item of body.input) {
     if (
       isPlainObject(item)
-      && item.type === "additional_tools"
+      && (item.type === "additional_tools" || item.type === "tool_search_output")
       && Array.isArray(item.tools)
     ) {
       catalogs.push(item.tools);
@@ -117,15 +117,17 @@ function collaborationCatalogInfo(catalogs: readonly unknown[][]): {
 export function hasPlaintextV2CollaborationCatalog(body: unknown): boolean {
   if (!isPlainObject(body)) return false;
   if (Array.isArray(body.tools)) return collaborationCatalogInfo([body.tools]).hasV2Catalog;
-  // Responses Lite carries its default catalog as the first developer input item.
-  // An explicit top-level catalog wins; later historical catalogs are not defaults.
+  // Responses Lite may replay its active developer catalog after earlier history.
+  // Match the same developer additional_tools items that responseToolCatalogs rewrites;
+  // requiring input[0] silently skips long-running desktop turns.
   if (body.tools !== undefined || !Array.isArray(body.input)) return false;
-  const initial = body.input[0];
-  return isPlainObject(initial)
-    && initial.type === "additional_tools"
-    && initial.role === "developer"
-    && Array.isArray(initial.tools)
-    && collaborationCatalogInfo([initial.tools]).hasV2Catalog;
+  return body.input.some(item => (
+    isPlainObject(item)
+    && item.type === "additional_tools"
+    && item.role === "developer"
+    && Array.isArray(item.tools)
+    && collaborationCatalogInfo([item.tools]).hasV2Catalog
+  ));
 }
 
 function hasOptimizedNamespaceConflict(catalogs: readonly unknown[][]): boolean {
@@ -208,11 +210,10 @@ function hasToolSearchCollaborationConflict(body: Record<string, unknown>): bool
         if (!isPlainObject(tool)) continue;
         if (
           typeof tool.name === "string"
-          && (tool.name === COLLABORATION_NAMESPACE
-            || tool.name === PLAINTEXT_V2_COLLABORATION_NAMESPACE
+          && (tool.name === PLAINTEXT_V2_COLLABORATION_NAMESPACE
             || tool.name.startsWith(COLLABORATION_NAME_PREFIX)
-              || tool.name.startsWith(COLLABORATION_DOTTED_NAME_PREFIX)
-              || tool.name.startsWith(PLAINTEXT_V2_COLLABORATION_NAME_PREFIX)
+            || tool.name.startsWith(COLLABORATION_DOTTED_NAME_PREFIX)
+            || tool.name.startsWith(PLAINTEXT_V2_COLLABORATION_NAME_PREFIX)
             || tool.name.startsWith(PLAINTEXT_V2_COLLABORATION_DOTTED_NAME_PREFIX))
         ) {
           return true;
@@ -521,7 +522,7 @@ export function preparePlaintextV2AgentMessages(body: unknown): {
     const rewrittenInput = body.input.map(item => {
       if (
         !isPlainObject(item)
-        || item.type !== "additional_tools"
+        || (item.type !== "additional_tools" && item.type !== "tool_search_output")
         || !Array.isArray(item.tools)
       ) {
         return item;
