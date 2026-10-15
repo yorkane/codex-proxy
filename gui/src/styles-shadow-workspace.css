@@ -25,6 +25,17 @@
   font-weight: 600;
 }
 
+/* The diagnostics feed holds up to 50 events per refresh. Without a height
+   cap one refresh pushes every following control off the page, so the filter
+   and the switch above it stop being reachable. min() keeps it usable on a
+   short window without wasting the bottom half of a tall one. */
+.shadow-diagnostics-feed {
+  max-height: min(50vh, 480px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 0.25rem;
+}
+
 /* The custom-source rows still span full width inside the section's single
    column; the grid-column rule from the Models two-column grid does not apply
    here, so the row just stays a normal flex row. */

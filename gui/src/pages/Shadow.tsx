@@ -594,7 +594,10 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
           <p className="muted text-control">No events in the current request-log window.</p>
         )}
         {diagnostics && diagnostics.events.length > 0 && (
-          <div className="models-shadow-row models-shadow-row-full muted text-control" style={{ flexDirection: "column", gap: "0.3rem" }}>
+          <div
+            className="models-shadow-row models-shadow-row-full shadow-diagnostics-feed muted text-control"
+            style={{ flexDirection: "column", gap: "0.3rem" }}
+          >
             {diagnostics.events.map((event, index) => (
               <div
                 key={`${event.requestId}-${event.kind}-${event.names.join(",")}-${index}`}
