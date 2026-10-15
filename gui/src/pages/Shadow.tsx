@@ -167,6 +167,8 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
   // The empty-completion guard is a TOP-LEVEL config field, independent of whether shadow
   // interception is on, so its section renders whether or not the intercept is enabled.
   const emptyCompletionRetryOn = shadowCall?.emptyCompletionRetry === true;
+  // 明文 V2 总闸同样是顶层 config 字段，不依赖影子拦截开关，因此本节与拦截状态无关。
+  const plaintextV2On = shadowCall?.plaintextV2AgentMessages === true;
   // The budget comes from the server's resolved value, so it may already reflect the environment
   // override rather than config.json. Clamped to the bounds the server reported; an older server
   // that reports neither bound still gets the historical 1..3 window.
@@ -514,6 +516,35 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
               this number until the variable is removed.
             </p>
           )}
+        </div>
+        <div className="models-phantom-section shadow-page-section">
+          <h3 className="shadow-page-heading">Plaintext V2 agent messages</h3>
+          <div className="models-shadow-row row muted text-control">
+            <span className="models-shadow-label">
+              Deliver collaboration tasks in plaintext{" "}
+              <Tooltip
+                content="Experimental. Native v2 collaboration tools normally mark task messages as encrypted, so a routed parent model receives ciphertext it cannot read. With this on, the proxy strips the three message encryption markers from the v2 tool declarations of a canonical native Responses parent request, and the spawned tasks are delivered as plaintext. Plaintext messages are visible to the ChatGPT backend and to every provider in the path, and may be retained in Codex history, provider records and local debug state. This does not decrypt tasks that already exist: only tasks dispatched after the switch is on are plaintext. Third-party providers are a second gate — each one also needs its own provider-level opt-in, which this page does not set."
+                side="top"
+                maxWidth={320}
+              >
+                <span style={{ cursor: "help" }} aria-label="Plaintext V2 agent messages help">ⓘ</span>
+              </Tooltip>
+            </span>
+            <Switch
+              on={plaintextV2On}
+              onClick={() => void saveShadowCall({ plaintextV2AgentMessages: !plaintextV2On })}
+              disabled={!shadowCall || saving}
+              label="Enable"
+            />
+          </div>
+          <p className="muted text-control">
+            Experimental and off by default. With it on, collaboration task messages are delivered
+            in plaintext, so the ChatGPT backend and every provider in the path can read them, and
+            they may be retained in Codex history, provider records and local debug state. This does
+            not decrypt tasks that already exist: only tasks dispatched after the switch is on are
+            plaintext. Third-party providers need a second, per-provider opt-in that this page does
+            not set. The switch takes effect on the next request without a restart.
+          </p>
         </div>
       </div>
       {feedback && (

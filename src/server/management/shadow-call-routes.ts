@@ -52,6 +52,9 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     emptyCompletionRetryMaxLimit: EMPTY_COMPLETION_RETRY_MAX_LIMIT,
     emptyCompletionRetryMaxEnvOverride: process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== undefined
       && process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== "",
+    // 全局明文 V2 协作消息总闸。与 provider 级同名字段是两层门：本页只编辑全局总闸，
+    // provider 级 opt-in 仍由各自的 provider 配置面负责，故此处不投影 provider 字段。
+    plaintextV2AgentMessages: config.plaintextV2AgentMessages === true,
   });
 }
 
@@ -59,7 +62,7 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    let raw: unknown;
    try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
    if (!isPlainRecord(raw)) return jsonResponse({ error: "body must be a JSON object" }, 400);
-   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown; emptyCompletionRetryMax?: unknown };
+   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown; emptyCompletionRetryMax?: unknown; plaintextV2AgentMessages?: unknown };
    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
      return jsonResponse({ error: "enabled must be a boolean" }, 400);
    }
@@ -68,6 +71,10 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    if (body.emptyCompletionRetry !== undefined && typeof body.emptyCompletionRetry !== "boolean") {
      return jsonResponse({ error: "emptyCompletionRetry must be a boolean" }, 400);
    }
+  // 与 emptyCompletionRetry 同样的严格布尔：字符串 "true" 是客户端 bug，400 拒绝而不是强制转换落盘。
+  if (body.plaintextV2AgentMessages !== undefined && typeof body.plaintextV2AgentMessages !== "boolean") {
+    return jsonResponse({ error: "plaintextV2AgentMessages must be a boolean" }, 400);
+  }
    // Strictly integer-or-absent, mirroring src/config/diagnostics.ts. A "2" string or a 1.5 is a
    // client bug: reject it with 400 rather than letting the number reach the persisted config,
    // where the schema's catch would leave a value that the pipeline silently ignores.
@@ -158,6 +165,10 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     // restart, because the request pipeline reads this very reference.
     config.emptyCompletionRetryMax = body.emptyCompletionRetryMax;
   }
+  // 与 emptyCompletionRetry 相同的 live 对象赋值：下一请求即生效，无需重启。
+  if (typeof body.plaintextV2AgentMessages === "boolean") {
+    config.plaintextV2AgentMessages = body.plaintextV2AgentMessages;
+  }
   saveConfigPreservingClaudeCode(config);
   const sci = config.shadowCallIntercept;
   return jsonResponse({
@@ -176,6 +187,7 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     emptyCompletionRetryMaxLimit: EMPTY_COMPLETION_RETRY_MAX_LIMIT,
     emptyCompletionRetryMaxEnvOverride: process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== undefined
       && process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== "",
+    plaintextV2AgentMessages: config.plaintextV2AgentMessages === true,
   });
 }
   return null;

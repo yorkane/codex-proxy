@@ -38,6 +38,11 @@ export interface ShadowCallSettings extends ShadowCallData {
   emptyCompletionRetryMaxLimit?: number;
   /** True while OCX_EMPTY_COMPLETION_RETRY_MAX overrides the persisted budget. */
   emptyCompletionRetryMaxEnvOverride?: boolean;
+  /**
+   * 全局明文 V2 协作消息总闸（顶层 config 键）。本页是该总闸的唯一编辑面；
+   * provider 级同名 opt-in 字段不在本页配置，第三方 provider 需各自单独开启。
+   */
+  plaintextV2AgentMessages?: boolean;
 }
 
 /**
