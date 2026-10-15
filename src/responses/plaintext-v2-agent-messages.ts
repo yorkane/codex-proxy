@@ -46,7 +46,8 @@ export function shouldPreparePlaintextV2AgentMessages(args: {
  */
 export function plaintextV2AgentMessagesEligibleForProvider(args: {
   enabled: boolean;
-  providerName: string;
+  /** 仅用于日志与后续诊断；不参与判定，调用点可能拿不到（如 passthrough 的 IncomingMeta）。 */
+  providerName?: string;
   provider: { plaintextV2AgentMessages?: boolean };
   isCanonical: boolean;
 }): boolean {

@@ -73,11 +73,26 @@ export const DATA_SNAPSHOT_PATHS = [
   "scripts/model-metadata.source.json",
 ] as const;
 
+/**
+ * Test-layout registry: one entry per test file, added by every legitimate new test.
+ *
+ * It was briefly capped (baseline 1923) by 73517872a, which made adding any single test
+ * file a file-size-ratchet failure — the registry grows for exactly the reason the cap
+ * exists to catch everywhere else. tests/test-layout.test.ts still enforces that every
+ * test file is registered and lands in the right domain, so the size signal this file
+ * would give is already covered structurally. Exempt for the same reason as the data
+ * snapshots above: it is a registry, not logic.
+ */
+export const REGISTRY_PATHS = [
+  "scripts/test-layout/layout.json",
+] as const;
+
 /** Every path exempt from a size cap, whatever the reason. */
 export const EXEMPT_PATHS = [
   ...GENERATED_PATHS,
   ...I18N_CATALOG_PATHS,
   ...DATA_SNAPSHOT_PATHS,
+  ...REGISTRY_PATHS,
 ].sort() as readonly string[];
 
 export type Verdict =

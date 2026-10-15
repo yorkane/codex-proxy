@@ -21,7 +21,10 @@ import { rewriteRoutedCustomToolsForUpstream, validateFinalCustomToolCompatibili
 import { rewriteRoutedToolSearchForUpstream } from "../../responses/tool-search-compat";
 import { rewriteRoutedNamespaceToolsForUpstream } from "../../responses/namespace-tool-compat";
 import { repairLegacyDottedToolCallNames } from "../../responses/legacy-dotted-tool-name-repair";
-import { preparePlaintextV2AgentMessages } from "../../responses/plaintext-v2-agent-messages";
+import {
+  plaintextV2AgentMessagesEligibleForProvider,
+  preparePlaintextV2AgentMessages,
+} from "../../responses/plaintext-v2-agent-messages";
 import { isMetaAiResponsesDestination, rewriteMuseToolNamesForUpstream } from "../../responses/muse-tool-name-alias";
 import { openaiResponsesUrl } from "../openai-responses-url";
 import { normalizeResponsesCodeMode } from "../responses-code-mode";
@@ -479,7 +482,15 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // tool output is flattened to text and can no longer be inspected structurally.
       outBody = repairUnidentifiedToolOutputItems(outBody);
       outBody = stripKimiEmptyAssistantMessages(outBody, url);
-      if (parsed._plaintextV2AgentMessages === true && isCanonicalOpenAiForwardProvider(provider)) {
+      // 全局总闸与目录检查已在 core-normalize 折进 parsed._plaintextV2AgentMessages；
+      // 这里按最终落地的 provider 再判一次资格，因为 fallback 可能换目标。
+      if (parsed._plaintextV2AgentMessages === true
+        && plaintextV2AgentMessagesEligibleForProvider({
+          enabled: true,
+          providerName: incoming.providerName,
+          provider,
+          isCanonical: isCanonicalOpenAiForwardProvider(provider),
+        })) {
         const prepared = preparePlaintextV2AgentMessages(outBody);
         outBody = prepared.body;
         if (prepared.namespaceAliased) {

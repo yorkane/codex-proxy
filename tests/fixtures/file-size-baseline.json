@@ -13,13 +13,13 @@
     "gui/src/i18n/zh-TW.ts",
     "gui/src/i18n/zh.ts",
     "scripts/model-metadata.source.json",
+    "scripts/test-layout/layout.json",
     "src/adapters/cursor/gen/agent_pb.ts"
   ],
   "files": {
     ".github/scripts/issue-quality.test.cjs": 2143,
     "gui/src/pages/Models.tsx": 2745,
     "gui/src/styles.css": 2954,
-    "scripts/test-layout/layout.json": 1923,
     "src/adapters/openai-chat.ts": 821,
     "src/adapters/openai-responses.ts": 6,
     "src/bridge.ts": 7,

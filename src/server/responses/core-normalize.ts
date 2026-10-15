@@ -16,7 +16,10 @@ import type { HandleResponsesOptions } from "./core-options";
 import { prepareEffortNormalization, stripEmptyLadderEffort, supportedLadderFor } from "../effort-policy";
 import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
 import { getOrAllocateRequestSessionLane } from "../request-log-conversation";
-import { shouldPreparePlaintextV2AgentMessages } from "../../responses/plaintext-v2-agent-messages";
+import {
+  plaintextV2AgentMessagesEligibleForProvider,
+  shouldPreparePlaintextV2AgentMessages,
+} from "../../responses/plaintext-v2-agent-messages";
 import { hasValidatedActiveReasoningEffort } from "../../responses/parser";
 import { responseTierAuthorityForProvider } from "../../providers/openai-tiers-destination";
 import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
@@ -193,7 +196,15 @@ export async function applyFinalRouteRequestNormalization(args: {
   parsed._plaintextV2AgentMessages = shouldPreparePlaintextV2AgentMessages({
     enabled: config.plaintextV2AgentMessages === true,
     inboundWire,
-    canonicalChatGpt: isCanonicalOpenAiForwardProvider(route.provider),
+    // 生效范围 = 全局总闸 + （canonical ChatGPT 转发 或 provider 级 opt-in）。
+    // provider 级 opt-in 让第三方 Responses 线路也能交出明文协作消息；canonical
+    // 分支保持由全局键单独控制的既有行为，不因本次扩展而改变。
+    canonicalChatGpt: plaintextV2AgentMessagesEligibleForProvider({
+      enabled: config.plaintextV2AgentMessages === true,
+      providerName: route.providerName,
+      provider: route.provider,
+      isCanonical: isCanonicalOpenAiForwardProvider(route.provider),
+    }),
     requestBody: parsed._rawBody,
   });
   // Recompute from the original wire preference on every route, including fallback.
