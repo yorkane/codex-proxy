@@ -58,6 +58,7 @@ import {
   hasResponsesSnapshotRepair,
   createResponsesSnapshotBlockRewrite,
 } from "../responses-snapshot-repair";
+import { rewriteResponsesIncompleteReasonJson } from "../../responses/incomplete-reason";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
 import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson } from "../responses-image-gen-repair";
 import {
@@ -779,6 +780,7 @@ export async function deliverPassthroughResponse(
         : undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass (image-gen restore first).
       const payloadRewrites = [
+        rewriteResponsesIncompleteReasonJson,
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         // #3217: a call whose namespace repeats its own name is unroutable in codex-rs.
         createSelfNamedToolCallNamespaceScrubRewrite(selfNamedNamespaceScrubAuthorization),
@@ -1330,10 +1332,12 @@ export async function deliverPassthroughResponse(
         const modelRewritten = parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
           ? rewriteResponsesModelJson(repaired, parsed._responseModelId)
           : repaired;
-        // Fork: the bounded-JSON answer bypasses the SSE block rewrite, so phantom calls
-        // need the same removal here (no-op for every non-shadow request).
+        // Upstream 2.87: the bounded-JSON answer normalizes the incomplete reason like the
+        // SSE payload-rewrite list above. Fork: the bounded-JSON answer bypasses the SSE block
+        // rewrite, so phantom calls need the same removal here (no-op for every non-shadow
+        // request), applied last so anything the reason rewrite touches is scrubbed.
         return stripDroppableToolCallsInJsonString(
-          modelRewritten,
+          rewriteResponsesIncompleteReasonJson(modelRewritten),
           declaredWireToolNames,
           shadowScope.undeclaredPhantomNames,
           declaredBareWireToolNames,

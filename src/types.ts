@@ -124,6 +124,7 @@ export type {
   ProviderWebSearchBridgeBackend,
   ProviderWebSearchBridgeConfig,
   ProviderCostOverlay,
+  PromptLengthPricing,
   RequestPacingRule,
   ProviderRequestPacingConfig,
   FastWire,

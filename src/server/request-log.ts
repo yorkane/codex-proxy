@@ -1439,7 +1439,12 @@ export function addFinalRequestLog(
       : {}),
   }));
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
-  const aggregate = isCombo ? aggregateAttemptUsage(attempts ?? []) : null;
+  // A key or account rotation splits the attempt and clears `logCtx.usage`, so a multi-attempt
+  // request totals from its attempts, combo or not. One attempt keeps the request-level usage
+  // (and its input estimate); a locally answered row sent nothing and keeps its own.
+  const aggregate = isCombo || ((attempts?.length ?? 0) > 1 && logCtx.localTerminalReason === undefined)
+    ? aggregateAttemptUsage(attempts ?? [])
+    : null;
   const loggedUsage = aggregate?.usage ?? existing.usage;
   const usageStatus = aggregate?.status ?? existing.status;
   const totalTokens = aggregate?.totalTokens ?? existing.totalTokens;
