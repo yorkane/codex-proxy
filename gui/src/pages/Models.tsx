@@ -58,6 +58,7 @@ import {
   type ModelVisibilityTarget,
 } from "../model-visibility";
 import {
+  activeModelOptions,
   CAP_OPTION_SET,
   CAP_OPTIONS,
   collectDisabledNamespaced,
@@ -452,14 +453,13 @@ export default function Models({ apiBase, restartEpoch = 0, connected = false, c
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
   }, []);
 
-  const shadowModelOptions = useMemo(
-    () => activeModelOptions(models, disabled, selectedModels ?? {}, t),
-    [models, disabled, selectedModels, t],
-  );
-
+  // Fork: the shadow intercept UI lives on the standalone #shadow page (Shadow.tsx), so the
+  // upstream shadowModelOptions ladder is not imported here. AutoReview keeps the upstream
+  // active-option set: a reviewer model the operator hid from the picker would otherwise
+  // disappear from this Select and read as "unset".
   const autoReviewOptions = useMemo(
-    () => [{ value: "", label: "—" }, ...routedModelOptions(shadowModelOptions, models, autoReview?.model)],
-    [models, shadowModelOptions, autoReview?.model],
+    () => [{ value: "", label: "—" }, ...routedModelOptions(activeModelOptions(models, disabled, selectedModels ?? {}, t), models, autoReview?.model)],
+    [models, disabled, selectedModels, autoReview?.model],
   );
 
   const loadV2 = useCallback(async () => {

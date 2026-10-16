@@ -17,6 +17,7 @@ import {
   EXEMPT_PATHS,
   GENERATED_PATHS,
   I18N_CATALOG_PATHS,
+  REGISTRY_PATHS,
   THRESHOLD,
   countLines,
   evaluate,
@@ -229,7 +230,9 @@ describe("file-size ratchet: exemption classification", () => {
     readFileSync(repoPath(path), "utf8").split("\n").slice(0, 12).join("\n");
 
   test("분류: 세 목록은 서로소이고 합집합이 면제 목록이다", () => {
-    const lists = [GENERATED_PATHS, I18N_CATALOG_PATHS, DATA_SNAPSHOT_PATHS].map(list => [...list]);
+    // Fork: the test-layout registry is a fourth exempt category (a registry, not logic;
+    // the 2.85 round capped it and every new test file tripped the ratchet).
+    const lists = [GENERATED_PATHS, I18N_CATALOG_PATHS, DATA_SNAPSHOT_PATHS, REGISTRY_PATHS].map(list => [...list]);
     const all = lists.flat();
 
     // Exact allowlists: no duplicates within a list, none across two lists, and the union is
