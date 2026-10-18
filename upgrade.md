@@ -21,7 +21,7 @@ manifest（schema=1，`wdev_manager/artifacts.py` 校验）关键字段与拒收
 | `sha256` | 64 hex；下载/落盘强校验，不符拒收 |
 | `buildId`/`build` 五分量 | 全分量一致才算同一 release（no-op 判据）；仅 version+sha 相同**不构成** no-op |
 | `url` | 只允许 https 且 host 白名单**仅** `file-235.ai-t.wtvdev.com`；**GitLab Release 链接不可作为 manifest url**（GitLab 仅作 provenance/下载入口：先下载+对账 sha256，再落 trusted roots 用 `path` 提交） |
-| `validatedOn` | 正式通道必须 `241.t`（`REQUIRED_VALIDATED_ON`）；引导/快照走公开 CLI `install.py --deb X --engine-tgz Y import-baseline`（记 `validatedOn:"imported"`、`validated:false`） |
+| `validatedOn` | 正式通道必须 `241.t`（`REQUIRED_VALIDATED_ON`）；引导/快照走公开 CLI `import-baseline`，**一次调用只导一类**（判序 deb→engine-tgz→engine-dir，`args.deb` 命中即 return，同传只导 web、engine 静默跳过），拆两次独立调用、全局 `--apply` 前置子命令：`python3 install.py --engine-tgz wdev-proxy_<ver>-wdev.<short>_linux-amd64.tar.gz --apply import-baseline`（engine-only；web 侧对应 `--deb wdev_<ver>_amd64.deb --apply import-baseline`）。记 `validatedOn:"imported"`、`validated:false` |
 
 **两条真实边界（并列，不得绕过）**：
 
