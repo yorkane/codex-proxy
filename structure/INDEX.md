@@ -127,6 +127,7 @@ Background service, docs, release, and design discipline.
 | [`design-methodology.md`](design-methodology.md) | Stage ordering for new GUI, CLI, and user-facing surfaces. |
 | [`ops/cross-platform-ci.md`](ops/cross-platform-ci.md) | Test lanes, platform coverage, aggregate gating, and release CI proof. |
 | [`ops/test-sandbox-cleanup.md`](ops/test-sandbox-cleanup.md) | Test-runner home and case-scoped lifecycle teardown ordering. |
+| [`wdev-manager.md`](wdev-manager.md) | Opt-in registration of this proxy as a wdev-managed component: the deploy-time env trust contract, the manager CLI verbs, the /api/wdev routes, and the supervisor maintenance fence on the request path. |
 
 ## Which doc describes which source
 
@@ -186,7 +187,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/companion/` | [`overview.md`](overview.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`companion.md`](companion.md) |
 | `src/compatibility/` | [`runtime.md`](runtime.md)<br>[`adapters/compatibility-contracts.md`](adapters/compatibility-contracts.md) |
 | `src/config.ts` | [`overview.md`](overview.md)<br>[`runtime.md`](runtime.md)<br>[`config.md`](config.md)<br>[`providers/openai-accounts.md`](providers/openai-accounts.md) |
-| `src/config/` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md)<br>[`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md) |
+| `src/config/` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md)<br>[`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md)<br>[`wdev-manager.md`](wdev-manager.md) |
 | `src/config/live-reconcile.ts` | [`pricing.md`](pricing.md) |
 | `src/config/persisted-mutation.ts` | [`runtime.md`](runtime.md) |
 | `src/config/schema/leaf-validators.ts` | [`pricing.md`](pricing.md) |
@@ -227,11 +228,12 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/router.ts` | [`runtime.md`](runtime.md) |
 | `src/routing/` | [`catalog.md`](catalog.md) |
 | `src/routing/history/` | [`dashboard-and-usage.md`](dashboard-and-usage.md) |
-| `src/server/` | [`providers/generic-account-pool.md`](providers/generic-account-pool.md)<br>[`runtime.md`](runtime.md)<br>[`codex-prompts.md`](codex-prompts.md)<br>[`catalog.md`](catalog.md)<br>[`subagents.md`](subagents.md)<br>[`transports/byte-accounting.md`](transports/byte-accounting.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md)<br>[`transports/responses-wire-shapes.md`](transports/responses-wire-shapes.md)<br>[`transports/responses-failover.md`](transports/responses-failover.md)<br>[`transports/policy-fallback.md`](transports/policy-fallback.md)<br>[`transports/streaming-health.md`](transports/streaming-health.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/images.md`](data-planes/images.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers/anthropic-progress.md`](providers/anthropic-progress.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/jev-decision.md`](providers/jev-decision.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`adapters/registry.md`](adapters/registry.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`dashboard-and-usage.md`](dashboard-and-usage.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) |
+| `src/server/` | [`providers/generic-account-pool.md`](providers/generic-account-pool.md)<br>[`runtime.md`](runtime.md)<br>[`codex-prompts.md`](codex-prompts.md)<br>[`catalog.md`](catalog.md)<br>[`subagents.md`](subagents.md)<br>[`transports/byte-accounting.md`](transports/byte-accounting.md)<br>[`transports/responses.md`](transports/responses.md)<br>[`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md)<br>[`transports/responses-wire-shapes.md`](transports/responses-wire-shapes.md)<br>[`transports/responses-failover.md`](transports/responses-failover.md)<br>[`transports/policy-fallback.md`](transports/policy-fallback.md)<br>[`transports/streaming-health.md`](transports/streaming-health.md)<br>[`transports/inventory.md`](transports/inventory.md)<br>[`data-planes/images.md`](data-planes/images.md)<br>[`data-planes/inbound-compat.md`](data-planes/inbound-compat.md)<br>[`providers/anthropic-progress.md`](providers/anthropic-progress.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`providers/jev-decision.md`](providers/jev-decision.md)<br>[`providers/xai-grok.md`](providers/xai-grok.md)<br>[`adapters/registry.md`](adapters/registry.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md)<br>[`dashboard-and-usage.md`](dashboard-and-usage.md)<br>[`clients/claude-desktop.md`](clients/claude-desktop.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md)<br>[`wdev-manager.md`](wdev-manager.md) |
 | `src/server/gui-pair-delivery.ts` | [`remote-link.md`](remote-link.md) |
 | `src/server/index.ts` | [`adapters/compatibility-lab.md`](adapters/compatibility-lab.md) |
+| `src/server/index/` | [`wdev-manager.md`](wdev-manager.md) |
 | `src/server/inference/advisor-diagnostics.ts` | [`advisor.md`](advisor.md) |
-| `src/server/management/` | [`providers/oauth-code-display-login.md`](providers/oauth-code-display-login.md) |
+| `src/server/management/` | [`providers/oauth-code-display-login.md`](providers/oauth-code-display-login.md)<br>[`wdev-manager.md`](wdev-manager.md) |
 | `src/server/management/anthropic-pool-settings.ts` | [`providers/anthropic-account-pool.md`](providers/anthropic-account-pool.md) |
 | `src/server/management/companion-routes.ts` | [`desktop-shell.md`](desktop-shell.md) |
 | `src/server/management/model-routes.ts` | [`pricing.md`](pricing.md) |
@@ -254,7 +256,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/storage/` | [`runtime.md`](runtime.md) |
 | `src/tray/` | [`runtime.md`](runtime.md) |
 | `src/types.ts` | [`runtime.md`](runtime.md)<br>[`config.md`](config.md) |
-| `src/types/` | [`providers/generic-account-pool.md`](providers/generic-account-pool.md)<br>[`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md)<br>[`providers/anthropic-progress.md`](providers/anthropic-progress.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md) |
+| `src/types/` | [`providers/generic-account-pool.md`](providers/generic-account-pool.md)<br>[`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md)<br>[`providers/anthropic-progress.md`](providers/anthropic-progress.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md)<br>[`wdev-manager.md`](wdev-manager.md) |
 | `src/types/provider.ts` | [`pricing.md`](pricing.md) |
 | `src/update/` | [`runtime.md`](runtime.md)<br>[`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) |
 | `src/update/job-supervised-restart.ts` | [`ops/update-supervised-recovery.md`](ops/update-supervised-recovery.md) |
@@ -266,6 +268,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/usage/user-cost-overlays.ts` | [`pricing.md`](pricing.md) |
 | `src/usage/user-cost-validation.ts` | [`pricing.md`](pricing.md) |
 | `src/vision/` | [`runtime.md`](runtime.md)<br>[`gui-and-management-api.md`](gui-and-management-api.md) |
+| `src/wdev/` | [`wdev-manager.md`](wdev-manager.md) |
 | `src/web-search/` | [`runtime.md`](runtime.md)<br>[`providers/anthropic-progress.md`](providers/anthropic-progress.md)<br>[`providers-and-adapters.md`](providers-and-adapters.md) |
 | `tests/` | [`ops/test-sandbox-cleanup.md`](ops/test-sandbox-cleanup.md) |
 

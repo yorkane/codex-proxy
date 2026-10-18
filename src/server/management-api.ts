@@ -99,6 +99,7 @@ import { siblingOfLivePort, siblingSkipMessage } from "../codex/sibling-start";
 import { packageVersion } from "../lib/package-version";
 import { isLocalAccountSwitchPath } from "../lib/local-account-switch-capability";
 import { readVerifiedAccountSwitchBody } from "./local-account-switch-auth";
+import { wdevManagerEnabled } from "../wdev/activation";
 
 // installed npm version instead of a stale hardcode.
 const MANAGEMENT_VERSION_FALLBACK = "0.0.0";
@@ -221,6 +222,21 @@ async function handleLinkRoutesOnDemand(ctx: ManagementContext): Promise<Respons
   if (!pathInManagementNamespace(ctx.url.pathname, "/api/link")) return null;
   const { handleLinkRoutes } = await import("./management/link-routes");
   return handleLinkRoutes(ctx);
+}
+
+/**
+ * Lazy like the Lab handlers, and the gate is load-bearing, not cosmetic: with the wdev
+ * manager block absent the dispatcher answers 404 from HERE, so a disabled install imports
+ * neither the routes module nor the spawn layer behind it. tests/wdev/wdev-core-boundary
+ * .test.ts walks this file's graph and fails if that stops being true.
+ */
+async function handleWdevRoutesOnDemand(ctx: ManagementContext): Promise<Response | null> {
+  if (!pathInManagementNamespace(ctx.url.pathname, "/api/wdev")) return null;
+  if (!wdevManagerEnabled(ctx.config)) {
+    return jsonResponse({ error: "wdev manager disabled", code: "wdev_disabled" }, 404);
+  }
+  const { handleWdevRoutes } = await import("./management/wdev-routes");
+  return handleWdevRoutes(ctx);
 }
 
 export async function handleManagementAPI(
@@ -375,6 +391,7 @@ export async function handleManagementAPI(
     ??     (await handleComboRoutes(ctx))
     ??     (await handleSystemRoutes(ctx))
     ??     (await handleLabRoutesOnDemand(ctx))
+    ??     (await handleWdevRoutesOnDemand(ctx))
       ?? (await handleUsageTimelineRoutes(ctx))
       ?? (await handleCompanionRoutes(ctx))
       ?? (await handleSidebarRoutes(ctx));
