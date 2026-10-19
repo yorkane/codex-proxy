@@ -77,8 +77,7 @@ npm 全局树通道（旧 prod 形态，235 现网在用）：`npm install -g --
 ## 3. 配置（`~/.opencodex/config.json`）
 
 首次运行自动生成。fork 定制全部可选、默认关闭、不影响上游行为（契约速查见仓内 AGENTS.md 与 `structure/wdev-manager.md`）。
-下面样例的 JSON 等价形（去注释、占位符替换为真实值，如 baseUrl 用公网域名）经仓库 `configSchema.safeParse` 纯校验通过
-（不 launch 服务，校验脚本 `/data/tmp/wdev-release-20261019/schema-check3.mjs`）：
+下面样例的 JSON 等价形（去注释、占位符替换为真实值，如 baseUrl 用公网域名）应经仓库 `configSchema.safeParse` 纯校验；校验只读执行，不 launch 服务。
 `providers` 是 record(id -> 对象) 非数组；provider 必填 `adapter`＋`baseUrl`；`models` 为字符串数组
 （providerConfigSchema 对该键 passthrough 透传，模型表由适配器侧消费）；私网 baseUrl 须该 provider 加 `allowPrivateNetwork:true`：
 
