@@ -90,7 +90,7 @@ describe("CodeRabbit overlay integrity regressions", () => {
     writeFileSync(getConfigPath(), "{ not json", "utf8");
     const fallback = loadConfig();
 
-    expect(fallback.defaultProvider).toBe("openai");
+    expect(fallback.defaultProvider).toBe("openai-apikey");
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(activeUserCostOverlays()).toHaveLength(1);
     expect(resolveMatchedPrice("acme", "model-x")?.source).toBe("user");
@@ -103,7 +103,7 @@ describe("CodeRabbit overlay integrity regressions", () => {
     unlinkSync(getConfigPath());
     const defaults = loadConfig();
 
-    expect(defaults.defaultProvider).toBe("openai");
+    expect(defaults.defaultProvider).toBe("openai-apikey");
     expect(activeUserCostOverlays()).toHaveLength(0);
     expect(resolveMatchedPrice("acme", "model-x")?.source).not.toBe("user");
   });
