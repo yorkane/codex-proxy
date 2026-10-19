@@ -6,9 +6,9 @@
 
 ## 0. 发布坐标与身份
 
-- 本轮 GitLab tag：`wdev-proxy-v2.87.0-managed.1`（project 22 `yorkane/codex-proxy`，绑 `codex/wdev-manager-integration` 最终 feature commit，不 merge main）。
+- 本轮 GitLab tag：`wdev-proxy-v2.87.0-managed.3`（project 22 `yorkane/codex-proxy`，绑定默认 API 登录 commit `b8f3e0f5d2`）。
   下载入口：Release assets links 与 Generic Package Registry
-  `https://gitlab.ai-t.wtvdev.com/api/v4/projects/22/packages/generic/wdev-managed/2026.10.19-managed.1/<file>`。
+  `https://gitlab.ai-t.wtvdev.com/api/v4/projects/22/packages/generic/wdev-managed/2026.10.19-managed.3/<file>`。
   **资产名与哈希以 Release 附带的 `manifest.json`（schema 2，逐产物 key/file/sha256）为唯一权威**，本文不写死文件名、不虚构 latest。
 - 发布物两种形态：
   - **portable 离线包** `wdev-proxy_<ver>-wdev.<shortsha>_linux-amd64.tar.gz`（`<ver>`/`<shortsha>` 取 Release manifest.json 实值，短 sha 随最终 feature commit 变化）：
@@ -115,6 +115,8 @@ npm 全局树通道（旧 prod 形态，235 现网在用）：`npm install -g --
   "wdevManager": { "enabled": true, "brand": "wdev-proxy" }
 }
 ```
+
+fresh 安装默认 provider 为 `openai-apikey`，API key 从 `OPENAI_APIKEY_API_KEY` 环境变量读取；未设置 key 时代理仍可启动，但上游请求返回 401。已有 `~/.opencodex/config.json` 的 `defaultProvider` 会原样保留，不会把账户池配置静默切换。
 
 - 影子拦截只在 `POST /v1/responses` 生效（`/v1/chat/completions` 不测影子）；斜杠来源条目必须配斜杠 id，最长前缀优先。
 - `undeclaredToolAllowlist`（provider 级）已删除，残留该键会让 provider PUT 报 400。
