@@ -2533,6 +2533,5 @@
   "undeclared-tool-phantom-allowlist.test.ts": "responses",
   "namespace-leak-feedback.test.ts": "responses",
   "openai-chat-output-ceiling.test.ts": "adapters/openai",
-  "exec-envelope-repair-patch-envelope.test.ts": "responses",
-  "opencode-free-provider.test.ts": "providers"
+  "exec-envelope-repair-patch-envelope.test.ts": "responses"
 }
