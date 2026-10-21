@@ -181,6 +181,20 @@ describe("an authoritative refusal before any output becomes a replayable gatewa
     const restored = restoreCodexWsPreOutputRefusal(projection);
     expect(restored.headers.get("x-codex-primary-used-percent")).toBe("10");
   });
+
+  test("过载投影在缺失建议时补 Retry-After，帧体自带值不被覆盖（幂等）", async () => {
+    const projection = await exchange(opened(CREATED, OVERLOADED));
+    expect(projection.status).toBe(503);
+    expect(projection.headers.get("retry-after")).toBe("2");
+    const withAdvice = { ...OVERLOADED, headers: { "retry-after": "30" } };
+    const carried = await exchange(opened(CREATED, withAdvice));
+    expect(carried.status).toBe(503);
+    expect(carried.headers.get("retry-after")).toBe("30");
+    // 非过载的 502 投影不带建议
+    const gateway = await exchange(opened(CREATED, SERVER_ERROR));
+    expect(gateway.status).toBe(502);
+    expect(gateway.headers.get("retry-after")).toBeNull();
+  });
 });
 
 describe("everything else keeps today's settle", () => {

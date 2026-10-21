@@ -741,7 +741,11 @@ describe("bare upstream rate-limit/overload EOF diagnostics (#6740)", () => {
         : relaySseEagerBounded(src, new AbortController(), parityHooks));
       const payload = out.split("event: response.failed\ndata: ")[1]!.split("\n")[0]!;
       const terminal = JSON.parse(payload).response;
-      expect(terminal.error).toEqual({ type: expectedType, code: expectedCode, message });
+      // 过载类 EOF 终态现在携带帧内 retry-after 建议：codex-rs 的 response.failed 路径只认
+      // error.headers，缺建议时零重试终结，所以代理合成的过载尾帧必须自带。
+      expect(terminal.error).toEqual(status === 503
+        ? { type: expectedType, code: expectedCode, message, headers: { "retry-after": "2" } }
+        : { type: expectedType, code: expectedCode, message });
       expect(terminal.last_error).toEqual(terminal.error);
       expect(terminalEvents(out)).toEqual(["response.failed"]);
       expect(doneEvents(out)).toHaveLength(1);

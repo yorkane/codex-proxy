@@ -4,6 +4,7 @@ import { markNativeControlResponse } from "./native-response-control";
 import type { NativeResponseControl } from "./native-response-control";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { isSafeResponseHeader } from "../safe-response-headers";
+import { isOverloadRetryCode, overloadRetryAfterHeader } from "../../lib/overload-retry-advice";
 import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
@@ -307,6 +308,13 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const source = payload.type === "error"
         ? payload.error
         : record(payload.response) ? payload.response.error : undefined;
+      // 过载投影补 Retry-After：投影是网关状态 + JSON 体，客户端在 HTTP 路径读响应头。帧体
+      // 自带建议时 rejectionHeaders 已把顶层 headers 的 retry-after 投影进来（安全头白名单允许），
+      // 这里只在缺失时补齐，幂等。只加在发往客户端的投影上，不回写上游 Response。
+      if (status === 503 && !headers.has("retry-after")
+        && record(source) && isOverloadRetryCode(source.code)) {
+        headers.set("retry-after", overloadRetryAfterHeader());
+      }
       const projection = new Response(JSON.stringify({ error: refusalErrorBody(source) }), { status, headers });
       markCodexWsPreludeProjection(projection);
       markCodexWsStage(projection, stage);

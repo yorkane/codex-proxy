@@ -10,6 +10,10 @@ import {
   resolveClientRetryAfter,
   validateClientRetryAfterHeader,
 } from "../../lib/retry-after";
+import {
+  overloadCodeFromJsonBody,
+  overloadRetryAfterHeader,
+} from "../../lib/overload-retry-advice";
 
 function isCyberPolicyBody(body: string): boolean {
   if (isCyberPolicyMessage(body)) return true;
@@ -107,11 +111,24 @@ export function formatPassthroughUpstreamError(
       upstreamRetryAfter,
       now,
     });
+  // 过载 503 补齐 Retry-After（HTTP 非流式路径）：resolveClientRetryAfter 的合成默认值只覆盖
+  // 可重试 429（429-only 门禁），503 在这里拿不到任何建议，客户端 ServerOverloaded 会零重试
+  // 终结。只认响应体的结构化过载码，不凭文案猜类别；refusal/cyber_policy/replay 拒绝全部
+  // 走 suppress 分支，永远进不到这里；上游合法建议已由 resolveClientRetryAfter 原样保留，
+  // 注入条件里的 undefined 判断保证幂等 —— 双层部署叠加时绝不缩短上游给的值。
+  const overloadAdvice = resolved === undefined && status === 503 && !suppressRetryAfter
+    && overloadCodeFromJsonBody(trimmed) !== undefined
+    ? overloadRetryAfterHeader()
+    : undefined;
+  // 过载注入与 resolveClientRetryAfter 的判定合并成一个出站值：有建议就 set，没有才按
+  // 原规则 delete/透传。声明在 if 之外：空体分支在块外也要读它（空体永远不携带过载码，
+  // overloadAdvice 在那条路径上就是 undefined，语义不变）。
+  const clientAdvice = resolved ?? overloadAdvice;
 
   if (trimmed) {
-    const needsSet = resolved !== undefined && upstreamRetryAfter !== resolved;
+    const needsSet = clientAdvice !== undefined && upstreamRetryAfter !== clientAdvice;
     const needsDelete = (suppressRetryAfter && upstreamRetryAfter !== undefined)
-      || (resolved === undefined
+      || (clientAdvice === undefined
         && upstreamRetryAfter !== undefined
         && originalValid === undefined);
 
@@ -128,7 +145,7 @@ export function formatPassthroughUpstreamError(
     const headers = options?.headers
       ? new Headers(options.headers)
       : new Headers({ "Content-Type": "application/json" });
-    if (needsSet) headers.set("Retry-After", resolved!);
+    if (needsSet) headers.set("Retry-After", clientAdvice!);
     else headers.delete("Retry-After");
     if (replayRefusal) applyReplayRefusalClientHeaders(headers);
     const rewritten = new Response(bodyText, {
@@ -148,11 +165,11 @@ export function formatPassthroughUpstreamError(
     // the response, so an unreadable refusal reaches the client as the same refusal.
     replayRefusal
       ? { code: UPSTREAM_RESET_REPLAY_REFUSED_CODE }
-      : resolved !== undefined ? { retryAfter: resolved } : undefined,
+      : clientAdvice !== undefined ? { retryAfter: clientAdvice } : undefined,
   );
   const headers = new Headers(response.headers);
   headers.set("Content-Type", "application/json");
-  if (resolved !== undefined) headers.set("Retry-After", resolved);
+  if (clientAdvice !== undefined) headers.set("Retry-After", clientAdvice);
   if (replayRefusal) applyReplayRefusalClientHeaders(headers);
   const wrapped = new Response(response.body, { status: response.status, headers });
   return replayRefusal ? retainReplayRefusal(wrapped) : wrapped;

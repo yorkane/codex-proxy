@@ -1,6 +1,7 @@
 import { wasPermanentAccountRefusal } from "../../oauth/account-auto-pause";
 import { isNativeControlResponse } from "./native-response-control";
 import { createOutboundCredentialMask, createTerminalErrorRedactionBlockRewrite } from "./terminal-error-redaction";
+import { createOverloadRetryAdviceBlockRewrite } from "./overload-retry-advice-block-rewrite";
 import type { ResponsesRequestContext, ResponsesAdmissionState } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -892,6 +893,10 @@ export async function deliverPassthroughResponse(
           )
           : undefined,
         createTerminalErrorRedactionBlockRewrite(nativeExchange.request.headers, maskCredential),
+        // 终态脱敏之后的最出站一环：给逐字透传的上游过载终态补 retry-after 帧内建议。
+        // 放在链尾是因为它必须看到已脱敏的终态帧；加进本链即覆盖三条流式分支（直通、
+        // eager、buffered —— 后者的 failBufferedTurn presentation 从重写后的 transcript 重建）。
+        createOverloadRetryAdviceBlockRewrite(),
         rememberPlaintextBlock,
         // Display-only projection must follow every continuation-cache observer.
         isLocalCodexImageClient(req.headers, options.admission?.kind, options.inboundWire)

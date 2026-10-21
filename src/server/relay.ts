@@ -12,6 +12,7 @@ import {
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
+import { hasFrameRetryAdvice, isOverloadRetryCode, overloadRetryAfterHeader } from "../lib/overload-retry-advice";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { carryReplayRefusal, isReplayRefusalResponse } from "../lib/upstream-retry";
 import { isUsageDebugEnabled } from "../usage/debug";
@@ -179,20 +180,36 @@ export function upstreamErrorTailFrame(
   maskCredential?: (text: string) => string,
   errorType?: string,
   errorCode?: string,
+  /** 上游裸 error 事件帧内已带 retry-after 时跳过注入（幂等：绝不缩短上游给的值）。 */
+  frameRetryAdvice?: boolean,
 ): Uint8Array {
   return encoder.encode(
-    `event: response.failed\ndata: ${upstreamErrorFailedPayload(message, refusalCode, maskCredential, errorType, errorCode)}\n\n`,
+    `event: response.failed\ndata: ${upstreamErrorFailedPayload(message, refusalCode, maskCredential, errorType, errorCode, frameRetryAdvice)}\n\n`,
   );
 }
 
-function upstreamErrorFailedPayload(message: string, refusalCode?: string, maskCredential?: (text: string) => string, errorType?: string, errorCode?: string): string {
+function upstreamErrorFailedPayload(
+  message: string,
+  refusalCode?: string,
+  maskCredential?: (text: string) => string,
+  errorType?: string,
+  errorCode?: string,
+  frameRetryAdvice?: boolean,
+): string {
   const diagnostic = redactSecretString(message);
   const recognized = recognizedUpstreamError({ type: errorType, code: errorCode });
-  const error = {
+  const error: Record<string, unknown> = {
     type: refusalCode === undefined ? (recognized?.type ?? "upstream_error") : "invalid_request_error",
     code: refusalCode === undefined ? (recognized?.code ?? "upstream_server_error") : (maskCredential?.(refusalCode) ?? refusalCode),
     message: (maskCredential?.(diagnostic) ?? diagnostic).slice(0, MAX_TAIL_ERROR_MESSAGE_CHARS),
   };
+  // 过载终态补帧内 retry-after：refusal 终态（retryable:false）禁止重试，不注入；
+  // 上游裸事件自带建议时 frameRetryAdvice 为 true，注入会叠加成更短的值，原样保留；
+  // 429 类不注入，避免把 resolveClientRetryAfter 的 429-only 默认语义搬进流内。
+  if (refusalCode === undefined && frameRetryAdvice !== true
+    && recognized !== undefined && isOverloadRetryCode(recognized.code)) {
+    error.headers = { "retry-after": overloadRetryAfterHeader() };
+  }
   return JSON.stringify({
     type: "response.failed",
     response: {
@@ -252,6 +269,8 @@ function boundedBareUpstreamError(payload: unknown): {
   refusalCode: string | undefined;
   errorType: string | undefined;
   errorCode: string | undefined;
+  /** 事件顶层 headers 已携带 retry-after（客户端读裸事件建议的位置）。 */
+  frameRetryAdvice: boolean;
 } | undefined {
   const root = asJsonRecord(payload);
   if (!root || root.type !== "error") return undefined;
@@ -277,13 +296,16 @@ function boundedBareUpstreamError(payload: unknown): {
   const refusalCode = code !== undefined
     ? (isTerminalRefusalCode(code) ? code : undefined)
     : message === undefined ? undefined : safetyRefusalCodeFromMessage(message);
-  if (message !== undefined) return { message, refusalCode, errorType, errorCode: code };
+  // 幂等判据：客户端读裸事件建议只看顶层 headers，同位检测。
+  const frameRetryAdvice = hasFrameRetryAdvice(root.headers);
+  if (message !== undefined) return { message, refusalCode, errorType, errorCode: code, frameRetryAdvice };
   if (refusalCode === undefined) return undefined;
   return {
     message: terminalRefusalFallbackMessage(refusalCode),
     refusalCode,
     errorType,
     errorCode: code,
+    frameRetryAdvice,
   };
 }
 
@@ -296,6 +318,8 @@ export type SseTerminalOutputBoundary = {
   upstreamRefusalCode(): string | undefined;
   upstreamErrorType(): string | undefined;
   upstreamErrorCode(): string | undefined;
+  /** 裸 error 事件帧内已带 retry-after（尾帧注入的幂等判据）。 */
+  upstreamFrameRetryAdvice(): boolean;
   dispose(): void;
 };
 
@@ -352,6 +376,7 @@ export function createSseTerminalOutputBoundary(
   let upstreamRefusalCode: string | undefined;
   let upstreamErrorType: string | undefined;
   let upstreamErrorCode: string | undefined;
+  let upstreamFrameRetryAdvice = false;
   let inputBytes = 0;
   let outputBytes = 0;
   let framesSeen = 0;
@@ -388,6 +413,7 @@ export function createSseTerminalOutputBoundary(
         upstreamRefusalCode = bare.refusalCode;
         upstreamErrorType = bare.errorType;
         upstreamErrorCode = bare.errorCode;
+        upstreamFrameRetryAdvice = bare.frameRetryAdvice;
       }
       const safetyBuffering = dropSafetyBuffering && parsed !== undefined
         ? codexSafetyBufferingBlockAction(parsed) : "keep";
@@ -477,6 +503,7 @@ export function createSseTerminalOutputBoundary(
     upstreamRefusalCode: () => upstreamRefusalCode,
     upstreamErrorType: () => upstreamErrorType,
     upstreamErrorCode: () => upstreamErrorCode,
+    upstreamFrameRetryAdvice: () => upstreamFrameRetryAdvice,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -555,6 +582,7 @@ export function relaySseWithFailedTail(
                   opts?.maskCredential,
                   terminalBoundary.upstreamErrorType(),
                   terminalBoundary.upstreamErrorCode(),
+                  terminalBoundary.upstreamFrameRetryAdvice(),
                 ));
               controller.enqueue(doneFrame(encoder));
             }

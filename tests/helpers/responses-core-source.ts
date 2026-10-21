@@ -65,6 +65,8 @@ export const RESPONSES_CORE_MODULES = [
   "passthrough-delivery.ts",
   "buffered-sse-json.ts",
   "terminal-error-redaction.ts",
+  // Reached from passthrough-delivery.ts: overload terminals carry a client retry directive.
+  "overload-retry-advice-block-rewrite.ts",
   "non-replayable-error.ts",
   "sidecar-execution.ts",
   "sidecar-send-budget.ts",

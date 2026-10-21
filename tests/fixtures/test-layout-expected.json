@@ -2391,6 +2391,7 @@
   "ws-ambiguous-resend.test.ts": "responses",
   "ws-pre-output-refusal.test.ts": "responses",
   "responses-pool-overload-failover.test.ts": "responses",
+  "responses-overload-retry-advice.test.ts": "responses",
   "compact-transient-alternate.test.ts": "responses",
   "ws-capacity-reclamation.test.ts": "responses",
   "ws-capacity-tool-ownership.test.ts": "responses",
