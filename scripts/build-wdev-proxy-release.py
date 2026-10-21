@@ -105,7 +105,6 @@ def main():
     ap.add_argument("--bun-runtime", default="/home/aigc/.nvm/versions/node/v24.20.0/lib/node_modules/@bitkyc08/opencodex/node_modules/bun/bin/bun.exe")
     ap.add_argument("--npm-cli", default="/home/aigc/.nvm/versions/node/v24.20.0/lib/node_modules/npm/bin/npm-cli.js")
     ap.add_argument("--node", default="/usr/bin/node", help="跑 npm-cli 的 node")
-    ap.add_argument("--manager", default="/home/aigc/ChatGPT/wdev/wdev-app/script/wdev-manager")
     ap.add_argument("--validated-on", default=None)
     ap.add_argument("--prod", default="", help="复用已有 prod 安装树（含 node_modules/），跳过 pack/install")
     ap.add_argument("--skip-pack", action="store_true", help="跳过 prepare+npm pack（配合 --prod）")
@@ -242,13 +241,14 @@ def main():
     tmp = os.path.join(work, "contract-extract")
     mkdirs(tmp)
     code = ";".join([
-        "import sys, os",
-        "sys.path.insert(0, %r)" % args.manager,
-        "from wdev_manager import install as I",
-        "from wdev_manager.install import find_engine_root",
+        "import sys, os, tarfile",
         "tmp=%r" % tmp,
-        "I.safe_extract_tgz(%r, tmp)" % tar_path,
-        "root=find_engine_root(tmp)",
+        "tf=tarfile.open(%r,'r:gz')",
+        "members=tf.getmembers()",
+        "assert all(m.isreg() or m.isdir() for m in members), 'non-REG/DIR member'",
+        "tf.extractall(tmp)",
+        "root=os.path.realpath(tmp)",
+        "assert os.path.isfile(os.path.join(root,'package.json')) and os.path.isfile(os.path.join(root,'bin','ocx.mjs')), root",
         "assert os.path.isfile(os.path.join(root,'package.json')) and os.path.isfile(os.path.join(root,'bin','ocx.mjs')), root",
         "node=os.path.realpath(os.path.join(root,'gateway','node','bin','node'))",
         "assert os.path.isabs(node) and os.access(node, os.X_OK), node",
