@@ -4,7 +4,6 @@ import Dashboard from "./pages/Dashboard";
 import Providers from "./pages/Providers";
 import Models from "./pages/Models";
 import Shadow from "./pages/Shadow";
-import Wdev from "./pages/Wdev";
 import Advisor from "./pages/Advisor";
 import Subagents from "./pages/Subagents";
 import Logs from "./pages/Logs";
@@ -51,7 +50,6 @@ const PAGE_TKEY: Record<Page, TKey> = {
   providers: "nav.providers",
   models: "nav.models",
   shadow: "nav.shadow",
-  wdev: "nav.wdev",
   subagents: "nav.subagents",
   advisor: "nav.advisor",
   logs: "nav.logs",
@@ -619,7 +617,6 @@ export default function App() {
                 {page === "providers" && <Providers apiBase={sharedBase} />}
                 {page === "models" && <Models key={sharedBase} apiBase={sharedBase} restartEpoch={codexRestartEpoch} connected={targets.connected} catalogSyncedAt={targets.catalogSyncedAt} reportRestart={report} />}
                 {page === "shadow" && <Shadow key={sharedBase} apiBase={sharedBase} />}
-                {page === "wdev" && <Wdev key={sharedBase} apiBase={sharedBase} />}
                 {page === "subagents" && <Subagents key={sharedBase} apiBase={sharedBase} />}
                 {page === "advisor" && <Advisor key={sharedBase} apiBase={sharedBase} />}
                 {page === "logs" && <Logs apiBase={sharedBase} />}

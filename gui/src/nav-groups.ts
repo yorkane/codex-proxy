@@ -24,8 +24,6 @@ export type NavGroupId =
   | "providers"
   | "models"
   | "shadow"
-  // Wdev is the fork's manager row, placed directly after Shadow.
-  | "wdev"
   | "subagents"
   | "usage-logs"
   | "remote";
@@ -45,7 +43,6 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   { id: "providers", tkey: "nav.providers", Icon: IconServer, pages: ["providers"] },
   { id: "models", tkey: "nav.models", Icon: IconBoxes, pages: ["models"] },
   { id: "shadow", tkey: "nav.shadow", Icon: IconBot, pages: ["shadow"] },
-  { id: "wdev", tkey: "nav.wdev", Icon: IconServer, pages: ["wdev"] },
   // Advisor is another way a worker reaches a second model, so it sits beside Subagents
   // in the switcher instead of taking a sidebar row of its own.
   { id: "subagents", tkey: "nav.subagents", Icon: IconBot, pages: ["subagents", "advisor"] },

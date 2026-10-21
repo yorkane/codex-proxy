@@ -4090,7 +4090,6 @@ export const en = {
   "cws.plan.description": "Asks the proxy how each target would carry a request with every feature the client API can express, and which features all targets keep. Nothing is sent upstream.",
   "cws.plan.run": "Show candidate paths",
   "cws.plan.savedOnly": "Shows the saved combo. Save your changes to preview them.",
-  "nav.wdev": "Wdev",
   "wdev.title": "Wdev services",
   "wdev.subtitle": "Inventory of the components the wdev manager supervises, and the operations submitted to it. Progress is read from the manager's ledger, not from the submit response.",
   "wdev.components": "Components",

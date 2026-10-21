@@ -4048,7 +4048,6 @@ export const vi: Record<TKey, string> = {
   "cws.plan.description": "Hỏi proxy xem mỗi đích sẽ chuyển một request có mọi tính năng mà API phía client biểu diễn được như thế nào, và tính năng nào được mọi đích giữ lại. Không gửi gì lên upstream.",
   "cws.plan.run": "Hiển thị đường đi",
   "cws.plan.savedOnly": "Đang hiển thị combo đã lưu. Hãy lưu thay đổi để xem trước chúng.",
-  "nav.wdev": "Wdev",
   "wdev.title": "Dịch vụ Wdev",
   "wdev.subtitle": "Danh mục các thành phần do trình quản lý wdev giám sát và các thao tác đã gửi tới nó. Tiến độ được đọc từ sổ của trình quản lý, không từ phản hồi gửi.",
   "wdev.components": "Thành phần",

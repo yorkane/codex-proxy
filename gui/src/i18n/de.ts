@@ -4056,7 +4056,6 @@ export const de: Record<TKey, string> = {
   "cws.plan.description": "Fragt den Proxy, wie jedes Ziel eine Anfrage mit allen Funktionen der Client-API übertragen würde und welche Funktionen alle Ziele erhalten. Es wird nichts an den Anbieter gesendet.",
   "cws.plan.run": "Pfade anzeigen",
   "cws.plan.savedOnly": "Zeigt die gespeicherte Kombination. Speichern Sie Ihre Änderungen, um sie in der Vorschau zu sehen.",
-  "nav.wdev": "Wdev",
   "wdev.title": "Wdev-Dienste",
   "wdev.subtitle": "Inventar der vom Wdev-Manager überwachten Komponenten und die an ihn übermittelten Operationen. Der Fortschritt wird aus dem Ledger des Managers gelesen, nicht aus der Antwort auf die Übermittlung.",
   "wdev.components": "Komponenten",

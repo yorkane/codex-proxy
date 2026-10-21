@@ -4079,7 +4079,6 @@ export const tr: Record<TKey, string> = {
   "cws.plan.description": "Proxy'ye her hedefin, istemci API'sinin ifade edebildiği tüm özellikleri içeren bir isteği nasıl taşıyacağını ve hangi özellikleri tüm hedeflerin koruduğunu sorar. Yukarı akışa hiçbir şey gönderilmez.",
   "cws.plan.run": "Yolları göster",
   "cws.plan.savedOnly": "Kaydedilmiş kombo gösteriliyor. Değişikliklerinizi önizlemek için kaydedin.",
-  "nav.wdev": "Wdev",
   "wdev.title": "Wdev hizmetleri",
   "wdev.subtitle": "Wdev yöneticisinin denetlediği bileşenlerin dökümü ve yöneticiye gönderilen işlemler. İlerleme, gönderim yanıtından değil yöneticinin defterinden okunur.",
   "wdev.components": "Bileşenler",

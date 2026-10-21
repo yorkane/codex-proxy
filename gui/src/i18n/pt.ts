@@ -4051,7 +4051,6 @@ export const pt: Record<TKey, string> = {
   "cws.plan.description": "Pergunta ao proxy como cada destino carregaria uma requisição com todos os recursos que a API do cliente consegue expressar, e quais recursos todos os destinos preservam. Nada é enviado ao upstream.",
   "cws.plan.run": "Mostrar caminhos candidatos",
   "cws.plan.savedOnly": "Mostra o combo salvo. Salve suas alterações para visualizá-las.",
-  "nav.wdev": "Wdev",
   "wdev.title": "Serviços Wdev",
   "wdev.subtitle": "Inventário dos componentes supervisionados pelo gerenciador Wdev e das operações enviadas a ele. O progresso é lido no registro do gerenciador, não na resposta do envio.",
   "wdev.components": "Componentes",

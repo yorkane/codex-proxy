@@ -1004,20 +1004,6 @@
       "documents": [
         "src/server/"
       ]
-    },
-    {
-      "path": "wdev-manager.md",
-      "tier": 6,
-      "title": "Wdev manager surface (fork opt-in)",
-      "scope": "Opt-in registration of this proxy as a wdev-managed component: the deploy-time env trust contract, the manager CLI verbs, the /api/wdev routes, and the supervisor maintenance fence on the request path.",
-      "documents": [
-        "src/wdev/",
-        "src/server/management/",
-        "src/server/index/",
-        "src/server/",
-        "src/config/",
-        "src/types/"
-      ]
     }
   ],
   "contracts": {

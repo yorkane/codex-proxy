@@ -17,9 +17,7 @@ export type Page =
   | "remote-workspace"
   | "codex-set"
   | "integrations"
-  | "claude"
-  // Wdev is the fork's manager surface (#wdev); Startup stays the only page outside the sidebar.
-  | "wdev";
+  | "claude";
 
 export const VALID_PAGES = new Set<Page>([
   "dashboard",
@@ -37,7 +35,6 @@ export const VALID_PAGES = new Set<Page>([
   "codex-set",
   "integrations",
   "claude",
-  "wdev",
 ]);
 
 export function readPageFromHash(hash?: string): Page {

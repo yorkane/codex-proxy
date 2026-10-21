@@ -4042,7 +4042,6 @@ export const zhTW: Record<TKey, string> = {
   "cws.plan.description": "詢問代理每個目標會如何傳遞帶有用戶端 API 所有可表達功能的請求，以及哪些功能所有目標都保留。不會向上游傳送任何內容。",
   "cws.plan.run": "顯示路徑",
   "cws.plan.savedOnly": "顯示的是已儲存的組合。請先儲存變更再預覽。",
-  "nav.wdev": "Wdev 服務",
   "wdev.title": "Wdev 服務",
   "wdev.subtitle": "列出 wdev 管理器託管的元件與提交給它的手續。進度以管理器帳單為準，而不是提交介面的應答。",
   "wdev.components": "元件",

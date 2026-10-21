@@ -2508,8 +2508,5 @@
   "advisor-evidence.test.ts": "advisor",
   "advisor-budget.test.ts": "advisor",
   "advisor-adaptive.test.ts": "advisor",
-  "wdev-routes.test.ts": "server",
-  "wdev-fence.test.ts": "server",
-  "wdev-core-boundary.test.ts": "server",
   "opencode-free-provider.test.ts": "providers"
 }

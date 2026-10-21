@@ -4077,7 +4077,6 @@ export const zh: Record<TKey, string> = {
   "cws.plan.description": "询问代理每个目标会如何传递带有客户端 API 所有可表达功能的请求，以及哪些功能所有目标都保留。不会向上游发送任何内容。",
   "cws.plan.run": "显示路径",
   "cws.plan.savedOnly": "显示的是已保存的组合。请先保存更改再预览。",
-  "nav.wdev": "Wdev 服务",
   "wdev.title": "Wdev 服务",
   "wdev.subtitle": "列出 wdev 管理器托管的组件与提交给它的手续。进度以管理器台账为准，而不是提交接口的应答。",
   "wdev.components": "组件",

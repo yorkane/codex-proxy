@@ -4078,7 +4078,6 @@ export const ja: Record<TKey, string> = {
   "cws.plan.description": "クライアント API が表現できるすべての機能を含むリクエストを各ターゲットがどう運ぶか、すべてのターゲットで保たれる機能は何かをプロキシに問い合わせます。上流には何も送信しません。",
   "cws.plan.run": "経路を表示",
   "cws.plan.savedOnly": "保存済みのコンボを表示しています。変更をプレビューするには保存してください。",
-  "nav.wdev": "Wdev",
   "wdev.title": "Wdev サービス",
   "wdev.subtitle": "wdev マネージャーが監視するコンポーネントの一覧と、マネージャーへ提出した操作です。進捗は提出応答ではなくマネージャーの台帳から読み取ります。",
   "wdev.components": "コンポーネント",

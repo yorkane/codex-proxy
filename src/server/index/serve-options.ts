@@ -29,7 +29,6 @@ import {
 import { remoteWorkspaceEnabled } from "../../remote-control/workspace-activation";
 import { isClaudeInterceptedPath } from "../../claude/intercept/listener";
 import { markActivity } from "../../lib/sidecar-tracker";
-import { wdevFenceGateResponse, wdevFenceHealthPair } from "../../wdev/gate";
 import { knownModelIdsForProvider } from "../../router";
 import {
   buildWarmupCompletionFrames,
@@ -386,17 +385,6 @@ export function createServeOptions(ctx: ServeOptionsContext) {
       const url = requestUrl;
       const admissionOptions = { linkIngress: policy.linkIngress?.allowedKeyIds };
       markActivity(`${req.method} ${url.pathname}`);
-      // Wdev maintenance fence (env-gated: no WDEV_MAINTENANCE_FILE, no work beyond one
-      // property read). Refuses NEW generation turns with a retryable 503 while the
-      // supervisor drains this proxy for restart/upgrade, and lets continuations of
-      // pre-fence turns through so a tool round trip never deadlocks the drain. Health,
-      // readiness, management, and GET /v1/models stay answerable while fenced.
-      // A Request return is an admitted draining continuation whose body the gate read
-      // (bounded): the prefix it consumed is the whole body, so route the replacement.
-      const wdevFenceVerdict = await wdevFenceGateResponse(req, url.pathname);
-      if (wdevFenceVerdict instanceof Response) return withCors(wdevFenceVerdict, req, policy);
-      if (wdevFenceVerdict !== null) req = wdevFenceVerdict;
-
       // Readiness is exact-GET on the literal /readyz path. Compare the DECODED
       // pathname so an encoded variant like /readyz%2F (which decodes to
       // /readyz/) cannot bypass the exact-path rejection and reach the GUI
@@ -644,10 +632,6 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           providerReloadCapability: LOCAL_PROVIDER_RELOAD_CAPABILITY_VERSION,
           asideSyncCapability: LOCAL_ASIDE_SYNC_CAPABILITY_VERSION,
           guiPairCapability: GUI_PAIR_CAPABILITY_VERSION,
-          // Supervisor drain handshake: {active,operationId,phase,fenceEpoch,ack:true}
-          // while fenced; absent (field not present) when unfenced, so the response bytes
-          // are unchanged for every install that did not wire the fence.
-          ...wdevFenceHealthPair(),
         }, 200, req, policy);
         const challenge = req.headers.get(LOCAL_ATTESTATION_CHALLENGE_HEADER);
         if (challenge) {

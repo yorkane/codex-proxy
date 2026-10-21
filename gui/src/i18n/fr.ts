@@ -4045,7 +4045,6 @@ export const fr: Record<TKey, string> = {
   "cws.plan.description": "Demande au proxy comment chaque cible transporterait une requête utilisant toutes les fonctionnalités de l'API cliente, et lesquelles toutes les cibles conservent. Rien n'est envoyé en amont.",
   "cws.plan.run": "Afficher les chemins",
   "cws.plan.savedOnly": "Affiche le combo enregistré. Enregistrez vos modifications pour les prévisualiser.",
-  "nav.wdev": "Wdev",
   "wdev.title": "Services Wdev",
   "wdev.subtitle": "Inventaire des composants supervisés par le gestionnaire Wdev et des opérations soumises à celui-ci. La progression se lit dans le registre du gestionnaire, pas dans la réponse de soumission.",
   "wdev.components": "Composants",
