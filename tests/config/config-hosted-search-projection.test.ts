@@ -7,7 +7,7 @@ import { providerConfigSeed } from "../../src/providers/derive";
 import type { OcxProviderConfig } from "../../src/types";
 
 const provider: OcxProviderConfig = { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex" };
-const candidate = (value: unknown) => ({ ...getDefaultConfig(), providers: { openai: value } });
+const candidate = (value: unknown) => ({ ...getDefaultConfig(), providers: { ...getDefaultConfig().providers, openai: value } });
 
 test("ordinary Lite hosted-search projection is absent from defaults and the canonical provider seed", () => {
   expect(getDefaultConfig().providers.openai?.projectResponsesLiteHostedSearchHistory).not.toBe(true);
@@ -29,7 +29,7 @@ test.each(["true", "false", 1, 0, null, {}, []].map(value => ({ value })))("prov
 
 test.each([true, false])("canonical config load and management editor preserve hosted projection opt-in %s", enabled => {
   const seed = { ...providerConfigSeed(getProviderRegistryEntry("openai")!), codexAccountMode: "direct" as const, projectResponsesLiteHostedSearchHistory: enabled };
-  const config = { ...getDefaultConfig(), providers: { openai: seed } };
+  const config = { ...getDefaultConfig(), providers: { ...getDefaultConfig().providers, openai: seed } };
   const loaded = configDiagnosticsFromRaw(JSON.stringify(config));
   expect(loaded.source).toBe("file");
   expect(loaded.config.providers.openai?.projectResponsesLiteHostedSearchHistory).toBe(enabled);

@@ -33,9 +33,13 @@ export function runtimeRole(config: Pick<OcxConfig, "runtimeRole">): OcxRuntimeR
 }
 
 export function getDefaultConfig(): OcxConfig {
-  // Fresh-install default: works out of the box with Codex's ChatGPT OAuth (no API key).
-  // gpt-* requests forward the caller's incoming OAuth headers to the ChatGPT backend.
-  // Adding extra providers (e.g. opencode-go) and switching defaultProvider is a user/runtime choice.
+  // Fresh-install default: API-key login, no ChatGPT account. The default provider is the
+  // OpenAI platform API route (`openai-apikey`), whose credential is an environment reference
+  // (${OPENAI_APIKEY_API_KEY}, the id-derived name ocx prints for key providers) rather than a
+  // secret value: startup never fails on an unset key, and requests made before one is
+  // exported fail upstream with 401 — the state `ocx status` reports as "no API key".
+  // The canonical ChatGPT forward row (`openai`) is kept byte-identical so account-pool
+  // operators can flip defaultProvider back without re-adding it; it is simply not the default.
   return {
     port: 10100,
     emptyCompletionRetry: false,
@@ -54,8 +58,13 @@ export function getDefaultConfig(): OcxConfig {
         authMode: "forward",
         codexAccountMode: "pool",
       },
+      "openai-apikey": {
+        adapter: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "${OPENAI_APIKEY_API_KEY}",
+      },
     },
-    defaultProvider: "openai",
+    defaultProvider: "openai-apikey",
     subagentModels: [...DEFAULT_SUBAGENT_MODELS],
     subagentModelsVersion: SUBAGENT_MODELS_VERSION,
     // v1 is the shipped surface while a v2 native-to-routed task is undeliverable

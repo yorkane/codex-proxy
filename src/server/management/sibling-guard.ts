@@ -43,6 +43,9 @@ export const SIBLING_REFUSED_MANAGEMENT_PATHS: readonly { readonly path: string;
   { path: "/api/startup-action", children: false },
   { path: "/api/windows-tray", children: false },
   { path: "/api/update/run", children: false },
+  // A sibling proxy must not drive the shared machine's wdev manager: two proxies on one
+  // deployment own one manager, and the owner's operations queue is not for clones.
+  { path: "/api/wdev/operations", children: true },
   { path: "/api/v2", children: false },
   { path: "/api/codex-auth/features", children: true },
   { path: "/api/storage/codex-logs", children: true },

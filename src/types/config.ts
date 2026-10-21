@@ -928,6 +928,25 @@ export interface OcxConfig {
   phantomToolFeedbackMax?: number;
   };
   /**
+   * Wdev 服务管理面（fork opt-in，2026-10-18）。整块缺失 = 关闭：路由 404、
+   * 不动态 import manager 模块、不 spawn 任何进程、不装任何 timer。
+   *
+   * 只登记「本代理愿意被 wdev manager 管理」这一事实。路径与解释器全部来自
+   * 部署时固定的环境变量（WDEV_MANAGER_HOME / WDEV_DEPLOY_HOME /
+   * WDEV_MANAGER_PYTHON / WDEV_MANIFEST_ROOT / WDEV_MAINTENANCE_FILE），
+   * 请求体永远不能覆盖它们 —— 所以这里没有任何路径字段。
+   *
+   * brand 是展示用外观名（如 "wdev-proxy"），仅薄壳页面 title/header 使用；
+   * 内部身份字段（/healthz 的 service:"opencodex"、x-opencodex-api-key、
+   * npm 包名、provider namespace）不受此块影响，永不改名。
+   */
+  wdevManager?: {
+    /** 总开关。缺省与非 true 值一律关闭。 */
+    enabled?: boolean;
+    /** 外观品牌名（展示用；空/缺省 = 用页面 i18n 标题）。 */
+    brand?: string;
+  };
+  /**
    * Global auto-review (approval reviewer) selector for every catalog row, written by the
    * Models settings panel. During catalog sync OpenCodex stamps it as
    * `auto_review_model_override` on rows that carry no provider-scoped stamp, so an enabled block

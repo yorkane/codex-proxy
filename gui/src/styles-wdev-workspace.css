@@ -1,0 +1,26 @@
+/* Wdev Services — management page (fork-owned, #wdev).
+   Base rows reuse the shared .panel / .tbl / .badge / .dot grammar; the rules
+   here only carry the page's own layout, so the shared sheets stay at zero diff. */
+
+.wdev-head-actions { display: flex; align-items: center; gap: 10px; }
+.wdev-head-feedback { color: var(--muted); font-size: var(--text-label); }
+
+.wdev-table th, .wdev-table td { vertical-align: top; }
+.wdev-cell-id { font-family: var(--font-code); font-weight: var(--weight-semibold); }
+.wdev-cell-meta { color: var(--muted); font-size: var(--text-label); word-break: break-all; }
+.wdev-status { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.wdev-state-row { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wdev-actions-cell { display: flex; gap: 6px; flex-wrap: wrap; }
+.wdev-manifest-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.wdev-manifest-list li { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--raised); }
+.wdev-manifest-list code { font-size: var(--text-label); color: var(--muted); word-break: break-all; }
+
+/* Failure tone for the ledger badge, matching .badge-green/.badge-amber in the
+   shared set; the token pair (--red/--red-soft) is already in the foundation. */
+.wdev-badge-red { background: var(--red-soft); color: var(--red); }
+
+.wdev-form-row { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.wdev-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 720px) {
+  .wdev-grid-2 { grid-template-columns: 1fr; }
+}

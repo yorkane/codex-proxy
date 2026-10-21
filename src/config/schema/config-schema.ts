@@ -254,6 +254,15 @@ export const configSchema = z.object({
   // historical single replay. The accepted range mirrors EMPTY_COMPLETION_RETRY_MAX_LIMIT: an
   // out-of-range hand edit is not a hard failure either, it clamps at read time.
   emptyCompletionRetryMax: z.number().int().min(0).max(EMPTY_COMPLETION_RETRY_MAX_LIMIT).optional().catch(undefined),
+  // Wdev 服务管理面 opt-in（fork）。声明为已知键，整块缺失=关闭：路由 404、不 import
+  // spawn 层、不装 timer。畸形块（手写坏了）降级为“未配置”而不是拒绝整份 config ——
+  // 与 emptyCompletionRetry 同一族失败方向：坏值只关功能，不炸 providers。
+  // enabled 之外的路径/解释器一律来自部署时 env（src/wdev/activation.ts），配置里
+  // 永远不出现可执行路径，所以请求与配置文件都注入不了任何执行面。
+  wdevManager: z.object({
+    enabled: z.boolean().optional(),
+    brand: z.string().max(64).optional().catch(undefined),
+  }).strict().optional().catch(undefined),
   // Header suppression changes what Codex sees, so absence and malformed edits stay off.
   dropCodexSafetyBuffering: z.boolean().optional().catch(false),
   // A malformed hand edit must not silently stop opening the browser: fall back

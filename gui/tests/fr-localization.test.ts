@@ -27,6 +27,13 @@ function carriesTranslatableWords(value: string): boolean {
 const INTENTIONAL_ENGLISH = new Set<TKey>([
   "nav.claude", // Product name.
   "nav.codexSet", // Product name: the sidebar row reads "Codex" in every locale.
+  // The fork's manager surface is named by its product, like nav.shadow above.
+  "nav.wdev",
+  // "URL" is the acronym French uses for the same field; translating it invents a difference.
+  "wdev.url",
+  // "Actions" is the accepted French UI plural for an operations column (actions exists
+  // in French with the same spelling); translating it would invent a non-word.
+  "wdev.actions",
   // The vendor name, and the Pool 2 label that de and pt also keep: "pool" is the French UI term here.
   "sidecar.poolA",
   "sidecar.poolB",

@@ -122,6 +122,7 @@ import {
 import type { OcxClaudeCodeConfig, OcxConfig, OcxCustomModel, OcxProviderConfig } from "../../types";
 import { shadowCallModelMapErrors, shadowCallTargetError } from "./shadow-call-validation";
 import { handleShadowCallRoutes } from "./shadow-call-routes";
+import { wdevManagerEnabled } from "../../wdev/activation";
 import { handleShadowDiagnosticsRoutes } from "./shadow-diagnostics-routes";
 import { autoReviewOverrideConfigError } from "../../config/provider-validation";
 import { ConfigWritePublishedError } from "../../config/persist-unlocked";
@@ -922,6 +923,17 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
   }
 
   if (url.pathname === "/api/update/run" && req.method === "POST") {
+    // wdev mode owns this install's package lifecycle: the wdev manager installs and
+    // restarts the proxy from its own verified release ledger. The upstream npm
+    // self-update entry is disabled here so a dashboard click can never install an
+    // upstream (non-fork, non-wdev-branded) package over a wdev-managed tree.
+    // activation.ts is pure env reads - this guard spawns nothing and imports no manager code.
+    if (wdevManagerEnabled(config)) {
+      return jsonResponse({
+        error: "wdev mode manages package updates; run the wdev manager upgrade instead",
+        code: "wdev_mode_update_disabled",
+      }, 409);
+    }
     const { normalizeUpdateChannel, startUpdateJob, UpdateJobError, spawnGuiUpdateWorker } = await import("../../update/job");
     let body: { tag?: unknown; restart?: unknown };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }

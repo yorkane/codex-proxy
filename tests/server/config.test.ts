@@ -51,6 +51,7 @@ import { migrateStartupZaiResponses } from "../../src/server/zai-responses-start
 import * as configStore from "../../src/config";
 import { runRetiredCodexModelMigration, RETIRED_MODEL_MIGRATION_CUTOFF } from "../../src/codex/retired-model-migration";
 import { providerManagementConfigError } from "../../src/server/auth-cors";
+import { resolveProviderApiKey } from "../../src/providers/api-key-resolve";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 let testDir = "";
 const previousHome = process.env.OPENCODEX_HOME;
@@ -166,6 +167,9 @@ describe("sub-agent surface default and advisory", () => {
     writeConfig(stored);
 
     const loaded = loadConfig();
+    // The repair path fills the key from the schema's zod default (`openai`), not from
+    // getDefaultConfig()'s fresh-install provider — the API-key default lives in the
+    // factory, and a repair must not invent a provider row the disk config lacks.
     expect(loaded.defaultProvider).toBe("openai");
     expect(loaded.multiAgentMode).toBeUndefined();
     expect(resolveMultiAgentMode(loaded)).toBe("default");
@@ -449,6 +453,41 @@ describe("opencodex config defaults", () => {
         error: expect.stringContaining("runtimeRole"),
       });
     }
+  });
+
+  test("fresh defaults ship API-key login: defaultProvider openai-apikey with an env-reference credential", () => {
+    const defaults = getDefaultConfig();
+    expect(defaults.defaultProvider).toBe("openai-apikey");
+    const apikey = defaults.providers["openai-apikey"];
+    expect(apikey).toBeDefined();
+    expect(apikey!.adapter).toBe("openai-responses");
+    expect(apikey!.baseUrl).toBe("https://api.openai.com/v1");
+    // The credential is an environment reference, never a secret value: the factory must
+    // not embed a key, and an unset env var resolves to "no credential" rather than throwing.
+    expect(apikey!.apiKey).toBe("${OPENAI_APIKEY_API_KEY}");
+    expect(resolveProviderApiKey(apikey!.apiKey)).toBeUndefined();
+    // The canonical ChatGPT forward row is retained unchanged for account-pool operators.
+    expect(defaults.providers.openai).toEqual({
+      adapter: "openai-responses",
+      baseUrl: "https://chatgpt.com/backend-api/codex",
+      authMode: "forward",
+      codexAccountMode: "pool",
+    });
+    // The candidate validates: the schema requires defaultProvider to exist in providers,
+    // and codexAccountMode stays confined to the canonical openai row.
+    expect(validateConfigCandidate(defaults).ok).toBe(true);
+    // No secret material appears anywhere in the serialized fresh config.
+    const serialized = JSON.stringify(defaults);
+    expect(serialized).not.toContain("sk-");
+    expect(serialized).toContain("OPENAI_APIKEY_API_KEY");
+  });
+
+  test("a fresh default config round-trips through saveConfig/loadConfig unchanged", () => {
+    const defaults = getDefaultConfig();
+    writeConfig(defaults);
+    const before = readFileSync(getConfigPath(), "utf8");
+    expect(loadConfig()).toEqual(defaults);
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(before);
   });
 
   test("a malformed persisted runtime role preserves providers and API keys", () => {
@@ -1792,7 +1831,7 @@ describe("opencodex config defaults", () => {
 
       // Merge should fill in missing providers and defaultProvider from defaults
       expect(loaded.port).toBe(10100);
-      expect(loaded.defaultProvider).toBe("openai");
+      expect(loaded.defaultProvider).toBe("openai-apikey");
       expect(loaded.providers).toBeDefined();
       // No backup created — config was repaired, not rejected
       const backups = backupNames();

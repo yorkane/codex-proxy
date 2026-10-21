@@ -1,359 +1,200 @@
-# deploy.md — opencodex fork 安装与配置指南
+# opencodex fork 代理部署合同（managed 发布线）
 
-本 fork 与上游的定位不同：**仓库只做定时上游同步**（`.github/workflows/sync-upstream.yml`，
-每天 07:00 UTC 把 lidge-jun/opencodex 合入补丁分支，冲突/测试失败自动开 issue）与
-**发布安装包**（`.github/workflows/fork-release.yml`，补丁分支每次非文档 push 自动重建）。
-本地产物仅供调试，对外正式分发走 GitHub Release；**内网固定发布主路径是
-`/data/share/deb/`（2026-10-13 起）**：每轮先 241.t 验收，通过后产物（npm tgz + prefix tar.gz，
-扩展名保持原样，不是 deb）连同 `.sha256` sidecar 发布到该目录，`codex-proxy-latest.json` 是
-机器可读 latest manifest。日常升级一条命令：
-`bash /home/aigc/ChatGPT/codex-proxy/script/upgrade-codex-proxy.sh`（默认后台，读该 manifest，
-只装已验证产物，`--dry-run`/`--status` 见脚本 usage）。旧的 `codex-proxy/build/` 归档目录
-转为 legacy 归档，历史产物保留。详见 `../doc/2026-10-13-fixed-release-deb-dir.md`。
+> **本文坐标**：managed 发布线的代理组件（`wdev-proxy.service`）。**当前已验证坐标 = managed.4**：
+> GitLab tag `wdev-proxy-v2.87.0-managed.4`（project 22 `yorkane/codex-proxy`，sourceCommit `7c90afda`），
+> portable tar.gz sha256 `3c30b15a5e02cd4151d618b0df55a87ea6c4e43bf51d3f659ced2a63de759254`
+> （197,644,140 B），npm.tgz sha256 `361f6b78a9e84f12a62945682f8dee40566d1b2aa8b06b102de78fc7ac8e6ecf`，
+> 配对 web tag `v2026.10.19-managed.4`。**managed.5 正在构建（坐标未定）**：下文以 `<managed.N>` 占位，
+> **资产名与哈希一律以对应 Release 的 `manifest.json` / `SHA256SUMS` 为唯一权威**，不写死文件名、不虚构 latest。
+> managed.3 首包已标 **SUPERSEDED**，禁止在任何步骤指向它取包。
+> 升级合同见 [upgrade.md](upgrade.md)；共享事务合同在 wdev-app 仓库 [upgrade.md](https://gitlab.ai-t.wtvdev.com/yorkane/wdev-app)；
+> 开发规范见仓内 [AGENTS.md](AGENTS.md)；托管面结构 [structure/wdev-manager.md](structure/wdev-manager.md)。
 
-当前基线：上游 v2.78.0，补丁分支 `codex/shadow-call-per-source-modelmap`。
+## 1. 身份与边界
 
-## 下载与安装
+- 外部品牌 wdev 只落薄壳：单元名 `wdev-proxy.service`、CLI `wdev-proxy`（组件 id 固定 `llm-proxy`）、authz label。
+- 内部身份**不改**：npm 包名 `@bitkyc08/opencodex`、bin `ocx`/`opencodex`、数据目录 `~/.opencodex`、
+  `/healthz` 的 `service:"opencodex"`、注入头 `x-opencodex-api-key`、provider namespace、`OPENCODEX_*`/`OCX_*` env 前缀。
+- 默认端口 **10100**、默认绑 `127.0.0.1`；**端口是装配期实例特定值**（241 装配为 10101），验收命令按 inventory 实值。
+- 数据边界：`~/.opencodex`（config/history/spend-ledger/state-lock）、`~/.codex`、官方 userData（含旧
+  `/var/lib/codex-desktop/*`）**原位不迁不删不改属主**；无 purge 路径。
+- 235.t 旧生产（`opencodex-proxy.service`，npm 全局树 2.86.0）只列现状（§7），不作为新部署默认路径。
 
-安装包挂在 Rolling release 上（每次补丁分支更新自动重发，tag 固定，**文件名里的版本号与短 sha
-随构建变化**，所以别写死 URL）：
+## 2. 发布物与校验
 
-```bash
-# 1) 下载最新安装包（无需认证）
-gh release download rolling-fork-build --repo yorkane/codex-proxy --pattern '*.tgz' --dir /tmp
-
-# 没有 gh 时：先查真实资产名，再拼 URL（别照抄历史里的旧文件名）
-curl -s https://api.github.com/repos/yorkane/codex-proxy/releases/tags/rolling-fork-build \
-  | grep browser_download_url | grep tgz
-curl -sL -o /tmp/opencodex-fork.tgz "<上一条输出的 URL>"
-
-# 2) 安装（--allow-scripts=bun 必须带，否则捆绑的 bun 运行时不落盘、服务起不来）
-npm install -g --allow-scripts=bun /tmp/bitkyc08-opencodex-*.tgz
-
-# 3) 前台起服务验证
-ocx start --port 10100
-curl -s http://127.0.0.1:10100/healthz   # 期望 {"status":"ok","version":"2.78.0",...}
-```
-
-要求：Node ≥ 18（推荐 20/24）。GUI 管理界面：浏览器打开 `http://127.0.0.1:10100/`。
-
-## 配置（`~/.opencodex/config.json`）
-
-首次运行自动生成。本 fork 的定制能力全部可选，默认关闭、不影响上游行为：
-
-```jsonc
-{
-  "defaultProvider": "my-llm",
-  "providers": {
-    "my-llm": {
-      "baseUrl": "https://your-openai-compatible-host/v1",
-      "apiKey": "***",
-      "models": ["qwen3-next"],
-      // 该模型真实输出上限；调用方的 max_tokens 与之取 min 封顶，防止越界被上游拒
-      "defaultMaxOutputTokens": 32768,
-      "modelMaxOutputTokens": { "qwen3-next": 131072 }
-    }
-  },
-  // 影子调用拦截：按 Codex 请求里的来源模型精确替换为第三方模型
-  "shadowCallIntercept": {
-    "enabled": true,
-    // 逐来源映射：luna/sol/terra/5.5/5.4-mini 可以各走不同模型
-    "modelMap": { "gpt-5.6-terra": "my-llm/qwen3-next", "gpt-5.5": "my-llm/qwen3-next" },
-    "model": "my-llm/qwen3-next",              // modelMap 未覆盖的来源走这条兜底；不需要就删掉
-    "sourceModels": ["gpt-5.6-terra", "gpt-5.5"],  // 自定义来源 id 必须同时登记在这里
-    "phantomToolAllowlistEnabled": true,       // 幻影工具 kill switch（默认 true）
-    "phantomToolAllowlist": ["update_plan", "web__run"],  // 不写=内置 9 项默认；显式 []=全 fail-closed
-    "phantomToolFeedbackMax": 2                // 0-10；未声明调用的指令纠错预算，0=只丢弃不回喂
-  },
-  // 空完成重放：上游回了空 completion 时按预算重放，避免回合无输出静默结束
-  "emptyCompletionRetry": true,
-  "emptyCompletionRetryMax": 1,
-  // 外部反代场景：放行反代 origin（供浏览器 gui-session 使用；脚本仍显式带 x-opencodex-api-key）
-  "corsAllowOrigins": ["https://your-proxy.example.com"]
-}
-```
-
-改完执行 `sudo systemctl restart opencodex-proxy.service`（或前台重跑 `ocx start`）。
-
-**已删除字段，别再写**：`providers.*.undeclaredToolAllowlist` 已从 provider 类型与字段策略中移除，
-容忍名单改由 `shadowCallIntercept.phantomToolAllowlist` 统一管（幻影名属于**替换模型**，不属于 provider）。
-config.json 里残留该字段会让 `PUT /api/providers` 报 non-editable field 400。
-
-## 管理面认证：x-opencodex-api-key 与 authz 免认证
-
-管理 API（`/api/*`）与数据面（`/v1/*`）是两道独立的门，`/healthz` 则完全公开。搞混这两道门是
-"网页能开、脚本 401" 这类问题的全部来源。
-
-### 门 1：opencodex 自己的管理令牌（无法绕过）
-
-`requireManagementAuth` 没有 loopback 免凭据分支——**本机裸调 `/api/*` 一样 401**，本机实测：
-
-| 请求 | 结果 |
+| 形态 | 说明 |
 |---|---|
-| `GET http://127.0.0.1:10100/healthz` | 200（公开探针） |
-| `GET http://127.0.0.1:10100/api/config` | **401** `opencodex admin token required` |
-| 同上，带 `x-opencodex-api-key: <token>` | 200 |
-| 同上，带 `Authorization: Bearer <token>` | 200 |
+| portable 离线包 `wdev-proxy_<ver>-wdev.<shortsha>_linux-amd64.tar.gz` | 包根=安装树平铺：`bin/ocx.mjs`（Node shim，0755）+ `node_modules/`（依赖整树物化，含真 ELF `node_modules/bun/bin/bun.exe`）+ payload node 固定槽 `gateway/node/bin/node`；全树仅 regular+dir 无 symlink（对齐 manager safe_extract_tar 合同）。**托管安装用这个** |
+| npm 源包 `wdev-proxy-<ver>-fork-<shortsha>.npm.tgz` | `npm pack` 形态（解包后 package/ 即 @bitkyc08/opencodex），只服务旧 prod npm 全局链（§7） |
+| runtime manifest `<flat 包名>.manifest.json` | 引擎侧发布清单（payload node sha、bun.exe sha/size、runtimeFileCount 等） |
 
-令牌来源优先级：环境变量 `OPENCODEX_ADMIN_AUTH_TOKEN` > `~/.opencodex/admin-api-token` 文件。
-env 优先，且**只有 env 能承载任意明文令牌**——文件形态强制 `ocx_admin_` 前缀的生成格式，
-手写进去会判非法、管理 API 直接 503。
-
-**部署默认值**：除非用户显式指定环境变量，一律配置 `OPENCODEX_ADMIN_AUTH_TOKEN=Wdev-142857`，
-服务端口默认 **10100**。authz 绑定注入（见「authz 免登录形态」一节）用同一个值，两处必须一致。
-
-浏览器不需要手动带令牌：GUI 首次访问由 `issueGuiSession` 签一个 `ocx_session_*` 会话凭据，
-之后按 gui-session principal 放行。会话 TTL：回环签发 5 分钟（到期后由页面下次加载重新签发），
-远程签发 12 小时并按活动滑动续期；跨 origin 必须匹配签发时的 serverOrigin / browserOrigin，
-写操作额外校验 `x-opencodex-csrf-token`。**脚本走不了这条路**，一律显式带 `x-opencodex-api-key`：
+下载与校验（Generic Package Registry；GitLab 是 provenance/下载入口）：
 
 ```bash
-TOKEN=$(sudo sed -n 's/^OPENCODEX_ADMIN_AUTH_TOKEN=//p' /etc/opencodex-proxy.env)
-curl -s -H "x-opencodex-api-key: $TOKEN" http://127.0.0.1:10100/api/shadow-call-settings
+mkdir -p /data/tmp/wdev-release-pull
+curl -sfL --header "PRIVATE-TOKEN: $GLPAT" -o /data/tmp/wdev-release-pull/<file> \
+  "https://gitlab.ai-t.wtvdev.com/api/v4/projects/22/packages/generic/wdev-managed/<tag>/<file>"
+curl -sfL --header "PRIVATE-TOKEN: $GLPAT" -o /data/tmp/wdev-release-pull/SHA256SUMS \
+  "https://gitlab.ai-t.wtvdev.com/api/v4/projects/22/packages/generic/wdev-managed/<tag>/SHA256SUMS"
+cd /data/tmp/wdev-release-pull && sha256sum -c SHA256SUMS     # 全 OK 才继续；服务端 file_sha256 同步对账
+tar -tzf wdev-proxy_<ver>-wdev.<shortsha>_linux-amd64.tar.gz | head   # 应见 bin/ocx.mjs、node_modules/bun/bin/bun.exe、gateway/node/bin/node
 ```
 
-`hostname` 是非回环绑定（如 `0.0.0.0`）时，数据面另外要求一个独立凭据
-（`OPENCODEX_API_AUTH_TOKEN` 或 `config.apiKeys`），且不能与管理令牌同值；数据面凭据只用
-`x-opencodex-api-key` 提交，绝不进 `Authorization`（后者是转发给上游的槽位）。
+向 wdev manager 提交升级时 `manifest.url` 的 host 白名单**只有** `file-235.ai-t.wtvdev.com`
+（wdev-app `wdev_manager/artifacts.py` 的 `URL_ALLOWLIST`）；**GitLab 域名直接拒收**。正确序列 = 下载 → sha256
+对账 → 放 trusted roots（`~/wdev/manifests` 或 `/data/share/deb` 链路）→ 以 `path` 字段提交。包验收后镜像到
+`/data/share/deb/`，匿名 HTTPS `https://file-235.ai-t.wtvdev.com/share/deb/<file>`。
 
-> 本机 10100 的 token 在 **EnvironmentFile**（`/etc/opencodex-proxy.env`）里，单元的 `Environment=` 行没有它；
-> `~/.opencodex/admin-api-token` 里的值早已失效，不要拿它去试。token 值不得进日志、回复或提交物。
+安装门（先门后装）：fleet 根 CA 三条同时成立（导入公钥 + `update-ca-certificates` → 按 SHA-256 指纹锚定位 +
+`openssl verify` → 无 `-k` 实探测 22700 落 200/401/403 且 `ssl_verify=0`）。完整命令与指纹见 wdev-app
+[deploy.md](https://gitlab.ai-t.wtvdev.com/yorkane/wdev-app) §3.1；235 生产零接触。
 
-### 门 2：authz 网关托管注入（让调用方免带令牌）
+## 3. 安装（托管通道 = wdev 安装器一次 apply）
 
-235.t 上的 authz 网关（OpenResty，HTTP 6080 / HTTPS 6443）把 `cc` 前缀绑定到 127.0.0.1:10100，
-并在**绑定的"改写请求"（`request_rewrite`）里托管注入** `x-opencodex-api-key`。效果：走 `cc-235.*`
-入口的请求不需要自己带 opencodex 令牌，网关在转发前替它补上，管理面（含 Shadow 页）直接可读写。
-
-```
-浏览器/脚本 ──HTTPS──> authz 入口 cc-235.<zone>
-                          │
-                          ├─ 门 2：Casbin 鉴权（authz 会话 Cookie 或 x-api-key）
-                          │        匿名 → 302 /_authz/login?next=...
-                          │
-                          └─ 转发前 proxy.prepare 按 request_rewrite 注入
-                                    x-opencodex-api-key: <token>
-                                     │
-                                     └─ 门 1：opencodex requireManagementAuth
-                                               命中托管值 → 200
-```
-
-两条关键语义（均已实测）：
-
-- **注入是覆盖，不是追加。** `request_rewrite.headers` 走 `ngx.req.set_header`，客户端自带的同名头
-  会被替换成托管值——外部即使伪造 `x-opencodex-api-key: 错的` 仍然 200（上游只认托管那个），
-  也伪造不出别人的凭据。要追加得用 `append_headers`，但**注入鉴权头绝不要用 append**，
-  否则上游可能读到客户端自己填的那一行。
-- **注入发生在授权之后，绕不过门 2。** 改写由 `proxy.prepare` 执行，位置在 Casbin 判定之后，
-  它只解决 opencodex 那一道门。匿名请求 `cc-235.*` 依然 302 到 authz 登录页。
-
-### 走入口的两条免登录路径（按需选）
-
-1. **脚本 / Agent：带 authz 的机器 Key。** 请求加 `x-api-key: <AUTHZ_API_KEY>` 即可，authz 直接放行、
-   不签会话 Cookie；opencodex 那侧由托管注入兜住，调用方全程不需要知道 opencodex 的 token。
-   实例级环境变量 Key 只对 `AUTHZ_API_KEY_ALLOWED_IPS` 白名单内的来源生效（本机现值 `127.0.0.1`，
-   即只允许从网关所在机器发起），默认 admin 角色，想收窄就用库里发的 Key 配 `api` 之类的角色。
-2. **浏览器：authz 会话。** 正常登录 authz 后打开 `https://cc-235.<zone>/` 就是 Shadow/Dashboard，
-   什么都不用配。
-
-要让某个路径对**匿名**彻底开放（不带 authz 凭据也能访问），配置面是 Casbin 策略，不是绑定上的开关：
+代理作为 wdev 托管组件安装，就是 wdev-app deploy.md §4.3 的同一次 apply（`--engine-tgz` 传 portable 包）：
 
 ```bash
-# 只放开健康探针（授权对象是「/<端口><路径>」，同端口的绑定共用策略）
-curl -X POST "http://127.0.0.1:6080/_authz/api/policies" \
-  -H "x-api-key: $AK" -H 'Content-Type: application/json' \
-  -d '{"ptype":"p","v0":"role:guest","v1":"/10100/healthz","v2":"GET","eft":"allow"}'
+EX=/data/tmp/wdev-extract/opt/codex-desktop/wdev-deploy     # deb 只读提取（dpkg-deb --extract，零 maintainer）
+bash $EX/script/wdev-manager/install.sh \
+  --with-bin \
+  --deb <发布物目录>/wdev_<ver>_amd64.deb \
+  --engine-tgz /data/tmp/wdev-release-pull/wdev-proxy_<ver>-wdev.<shortsha>_linux-amd64.tar.gz \
+  --gateway-env-source ~/.wdev/gateway.env \
+  --proxy-env-source ~/.wdev/proxy.env \
+  --apply apply
 ```
 
-默认 fail-closed，`role:guest` 没有策略就是 302。谨慎给 `/10100/*`——那等于把管理面公开到该入口。
+合同要点（细节以 wdev-app deploy.md §4 为准）：
 
-### 改与查这条注入
+- 全局 `--apply` 必须**前置**于 `apply` 子命令；`--engine-tgz` 不收 npm 源包形态。
+- fresh 机必须**先**生成 `~/.wdev/{gateway.env,proxy.env}` 再显式传两个 `--*-env-source`：缺省源是旧 prod
+  机器路径 `/etc/codex-desktop/gateway.env`、`/etc/opencodex-proxy.env`（`OLD_ENV_SOURCES`），fresh 缺文件时
+  生成 `PORT=0/DISPLAY=:97` 占位（`minimal-generated`），服务必起不来。
+- apply 之后：`sudo ~/wdev/units-install.sh`（cp+daemon-reload，绝不 start）→
+  `sudo bash ~/wdev/root-integration/install-root-integration.sh`（特权 helper，**manager 树任何改动后必重跑**，
+  否则 dispatch rc=2）→ `sudo systemctl start wdev-xvfb.service wdev.service wdev-proxy.service`。
+- 在跑旧 proxy 的机器不走 fresh start 序列：切换是独立排空 cutover job（`WDEV_CUTOVER_AUTHORIZED=1` 门 +
+  root 脚本；停管清单与本机现役单元名逐条核对，241 现役名是 `ocx-stack-proxy.service`）。
+- 引擎落树 = `~/wdev/proxy/releases/<id>/`（一次写入不可变），由 manager 拉起：`bin/ocx.mjs` Node shim 按
+  包内布局解析捆绑 bun（override→bundled→PATH）后 exec；`{node}` 由 supervisor 解析 payload node 固定槽
+  （regular+X_OK+ELF+`--version`≥22 四重验，缺省不回退系统 ABI，`node-unresolved-fail-closed`）。
 
-绑定 id 7（`domain=cc`、`port=10100`、`simulate_local=1`）的现值与读回方式：
+旧 prod npm 全局通道（仅 235 现网形态，新装机不走）：`npm install -g --allow-scripts=bun <npm.tgz>`——
+`--allow-scripts=bun` 必带，否则捆绑 bun 不落盘（`bin/ocx.mjs` 只剩占位 stub）、systemd 起服即败。
+
+## 4. 默认登录：API key，无账户
+
+fresh 出厂默认（`getDefaultConfig`，src/config/proxy-env.ts）：`defaultProvider: "openai-apikey"`，provider
+`openai-apikey` 的 `apiKey` 是环境变量引用 `${OPENAI_APIKEY_API_KEY}`（id 派生名），**不存密钥字面值**。
+
+- 凭据注入：`~/.wdev/proxy.env` 写 `OPENAI_APIKEY_API_KEY=<key>`（0600，systemd EnvironmentFile 读取）。
+- **未设置该键时服务仍能正常启动**（启动不因缺 key 失败），API 请求由上游返回 401（`ocx status` 报
+  "no API key" 态）。不要为 fresh 安装做账户登录。
+- 官方 ChatGPT forward 行（provider `openai`）byte-identical 保留：账户池运维可把 `defaultProvider` 翻回
+  `openai`，该能力不删。已有机器 `~/.opencodex/config.json` 的 `defaultProvider` 原样保留，升级不静默切换。
+- 桌面免账户注入开关 `codexDesktopAuthless` 只在 wdev 出厂配置层显式设置，不进通用默认工厂、不迁移官方数据。
+
+## 5. 配置与管理面认证
+
+`~/.opencodex/config.json` 首次运行自动生成；fork 定制全部可选、默认关闭（契约速查 AGENTS.md 与
+`structure/config-proxy.md` 等）。要点：`providers` 是 record(id→对象) 非数组；provider 必填 `adapter`+`baseUrl`；
+`models` 字符串数组；私网 baseUrl 该 provider 加 `allowPrivateNetwork:true`；`shadowCallIntercept` 只在
+`POST /v1/responses` 生效（斜杠来源条目配斜杠 id，最长前缀优先，自定义来源必须登记 `sourceModels`）；
+`undeclaredToolAllowlist` 键已删除（残留会让 provider PUT 400）；管理面 PUT/PATCH 支持字段热载不重启，
+结构变更后的重启走托管事务（§6），不手工 systemctl。托管 opt-in：`wdevManager:{enabled:true, brand:"wdev-proxy"}`
+（读-改-写保留其它键；属生产 mutation，cutover 由 root job 执行）。
+
+两道认证门：
+
+1. **进程内**：`/api/*` 一律要凭据，无 loopback 免认证分支。令牌优先级 env `OPENCODEX_ADMIN_AUTH_TOKEN` >
+   文件 `~/.opencodex/admin-api-token`（文件态强制 `ocx_admin_` 前缀生成值，手写明文判非法→503）。令牌为部署时
+   本地强随机（例 `openssl rand -hex 24`），只落该实例 env 与 authz 注入配置；文档/报告不携带值。
+   非 loopback 绑定时数据面另需独立凭据（`OPENCODEX_API_AUTH_TOKEN` 或 `config.apiKeys`，不得与管理令牌同值；
+   只用 `x-opencodex-api-key` 头提交）。
+2. **authz 边缘注入**：`cc` 前缀域名绑定回源本机 proxy（235 绑定 id 7，`simulate_local=1`），
+   `request_rewrite.headers` 覆盖式注入 `x-opencodex-api-key`——走 `cc-*` 入口免带令牌（覆盖发生在授权之后，
+   绕不过门 1）。轮换 admin token 后必须同步绑定注入值，否则外部入口整体 401 而 127.0.0.1 正常。
+   `simulate_local` 入口的 `/opencodex-session` 自铸会话有管理配置读面，按需把 `/api/*`、`/opencodex-session`
+   排除出绑定（只放行 `/v1/*`、`/healthz`）。
 
 ```bash
-AK=$(docker exec authz printenv AUTHZ_API_KEY)
-# 读回必须用 /api/authorization —— GET /api/applications 的 SQL 不 select 改写两列，看不到 request_rewrite
-curl -s -H "x-api-key: $AK" http://127.0.0.1:6080/_authz/api/authorization \
-  | python3 -c "import json,sys; d=json.load(sys.stdin)['data']['bindings']; \
-    print([b for b in d if b.get('port')==10100 and 'request_rewrite' in b][0]['request_rewrite'])"
+TOKEN=$(sed -n 's/^OPENCODEX_ADMIN_AUTH_TOKEN=//p' ~/.wdev/proxy.env)
+P=http://127.0.0.1:10100      # 端口按 inventory 实值（241=10101）
+curl -s -H "x-opencodex-api-key: $TOKEN" $P/api/shadow-call-settings
 ```
 
-写入用 PATCH（机器 Key 免 CSRF；控制面同样只允许白名单来源 IP）：
+## 6. wdev 托管合同（fence 与管理端点）
+
+`wdev-proxy.service`：Type=notify，继承现网收敛语义 Restart=always+5s / KillMode=mixed / TimeoutStopSec=75 /
+StartLimit 600x20 / WatchdogSec=120；token 不进单元。可执行坐标全部来自部署 env（请求体永远不能指定
+二进制/目录/单元）：installer 追加 `WDEV_MANAGER_HOME`（root，消费方拼 `manager/wdev.py`）、`WDEV_DEPLOY_HOME`、
+`WDEV_MANIFEST_ROOT`；`WDEV_MANAGER_PYTHON`（缺省 `/usr/bin/python3`）与 `WDEV_MAINTENANCE_FILE`（fence 文件，
+布局派生）由 supervisor 注入。整块 `wdevManager` 缺失=关闭（路由 404 `wdev_disabled`、零 spawn、零 timer）。
+
+- 端点：`GET /api/wdev/components`、`POST /api/wdev/operations`（202=**durable queued**，非成功）、
+  `GET /api/wdev/operations[/{id}]`。三动作白名单 `restart/upgrade/configure`；`request-json` 字段白名单
+  `{manifestPath, configPatch, expectedRevision, idempotencyKey, maxWait}`（route 预校验：configure 必带
+  configPatch、restart 不带载荷、`expectedRevision` 非负整数、maxWait 钳 0-600s）。
+- 幂等：同 key+同请求 → `replayed:true` 重放；同 key+异请求 → 409 `wdev_idempotency_conflict` 零副作用；
+  202 之后永不补 409。GUI 在 dashboard `#wdev` 页。
+- wdev 模式下 `POST /api/update/run` 恒 409（禁 npm 自更新覆盖托管树）；`SIBLING_REFUSED_MANAGEMENT_PATHS`
+  禁止兄弟实例驱动本机 manager。
+- **维护 fence**：supervisor 写 `WDEV_MAINTENANCE_FILE`（phase=draining/quiesced/expired）；生效期新生成请求
+  503 `wdev_maintenance`（`Retry-After: 5`），draining 只放行带 lane 锚定的 tool 续传，quiesced/expired 全拒；
+  `/healthz` 带 `maintenance:{active,operationId,phase,strict,fenceEpoch,ack:true}` 回执。fence **只由
+  supervisor 经控制面确认释放，永不超时自解**；畸形/过期/不可读文件一律按围栏处理（fail-closed）。
+  读面（`GET /v1/models`、`/healthz`、`/readyz`、`/api/*`、`count_tokens`）围栏期保持可答。
+- liveness/readiness 分离：`/healthz status:"ok"` 只答进程活着；`/readyz` 在启动后 catalog/config 同步
+  settle 且 `ok=true` 才 `status:"ready"`（降级 warning 关门不开）。wdev 事务的 ready 判据取 supervisor
+  控制面 `ready:true && state=="ready"`（ipcReady/toolsReady 同源）。
+
+## 7. 235.t 旧生产现状（只读参考，非新部署路径）
+
+`opencodex-proxy.service`（systemd，enabled/active）：npm 全局树（`@bitkyc08/opencodex` 2.86.0，prefix nvm
+node v24），`EnvironmentFile=/etc/opencodex-proxy.env`（仅 `OPENCODEX_ADMIN_AUTH_TOKEN` 一键），
+`ExecStart=… bin/ocx start --port 10100`，Restart=always/5s、KillMode=mixed、TimeoutStopSec=75，仅绑
+127.0.0.1。该通道日常升级走机器运维层脚本 `codex-proxy/script/upgrade-codex-proxy.sh`（不在 GitLab 源码
+release；见 upgrade.md §2）。**235 生产面在托管验收窗口全程只读**：不重启、不停止、不杀。托管三件套上
+235 的切换条件与边界见 wdev-app deploy.md §11（activate-235 `--apply` 恒拒绝；不存在一键切换）。
+
+## 8. 验收（managed 安装后逐条跑）
 
 ```bash
-curl -s -X PATCH http://127.0.0.1:6080/_authz/api/applications/7 \
-  -H "x-api-key: $AK" -H 'Content-Type: application/json' \
-  -d '{"request_rewrite":{"enabled":true,"headers":{"x-opencodex-api-key":"<token>"}}}'
+systemctl is-active wdev-proxy.service
+wdev-proxy doctor
+P=http://127.0.0.1:10100; TOKEN=$(sed -n 's/^OPENCODEX_ADMIN_AUTH_TOKEN=//p' ~/.wdev/proxy.env)   # 端口按 inventory 实值
+curl -s --noproxy '*' $P/healthz | head -c 400                  # status:"ok"（liveness）；fence 期带 maintenance.ack 回执
+curl -s --noproxy '*' $P/readyz                                 # status:"ready"（readiness）
+curl -s -o /dev/null -w '%{http_code}\n' $P/api/config          # 401（认证生效）
+curl -s -o /dev/null -w '%{http_code}\n' -H "x-opencodex-api-key: $TOKEN" $P/api/config    # 200
+curl -s -H "x-opencodex-api-key: $TOKEN" $P/api/wdev/components # 200 + components 结构
+python3 ~/wdev/manager/wdev.py --home /home/aigc operation <uuid>   # 托管事务终态 succeeded
 ```
 
-几个容易踩的点：
+- 变更门族（241 已通过，可写为经验）：G5 components、G6 web restart、G6b 幂等重放/409、G7r configure
+  CAS/白名单 502、G6p proxy restart（跨组件排空链 + 子 PID/MainPID 代际 + NRestarts=0）、G99 health/PID/
+  NRestarts。harness = wdev-app `script/wdev-manager/accept-release-241.py`（235 拒跑；241 上 systemctl 变更
+  一律走 manager 受管面）。**G80（云端 durable 三 agent）= BLOCKED**：需用户交互官方 ChatGPT 登录，禁止伪造。
+- `/healthz` version 同号换树不构成升级证据；换树证据 = 逐文件 sha256 + 树内契约串 grep（见 upgrade.md）。
+- ready 正向判据按目标机集成配置判定：`clientIntegrations.codex:false` 隔离 fixture 下 ready 已实证通过，
+  不要求真实登录 websession 作 ready 前置；不宣称超出配置范围的 ready 结论。
+- 已知测试基线：opencodex 全量测试有 15 个既有失败（browser-api 1、browser-hub 2、webtop-gateway-wiring 3、
+  codex-browser-viewer 9；干净 worktree `c6c9d58a` 可复现），与本次改动无关——验收不记全绿、不计本轮红。
 
-- body 里只要出现任一代理字段（`upstream_host`/`simulate_local`/`request_rewrite`/…），网关会把
-  这 13 个代理字段**整批重写**，未提交的从库里补值——只传 `request_rewrite` 是安全的，
-  但要清楚这是整批覆盖而非字段级增量。body 无任何可更新字段时报 422「没有可更新字段」。
-- 禁止注入的头名固定：分帧与 hop-by-hop 头（`content-length`、`transfer-encoding`、`connection`、
-  `upgrade`、`te`、`trailer`）、网关凭据头（`x-authz-key`、`x-api-key`、`x-role-key`），以及
-  `X-Authz-*` 前缀（只放行 `x-authz-user/source/identity` 三个断言头）与 `Proxy-*` 前缀，
-  塞进去保存即 422。`host`/`cookie`/`origin`/`x-forwarded-*`/`x-real-ip` 属于网关托管头，
-  改写走变量覆盖、优先生效；执行顺序是 remove → append → set。
-- `simulate_local=1` 只伪造 `X-Real-IP`/`X-Forwarded-For`/`Host` 这些请求头，不改 TCP 来源；
-  opencodex 的管理面认证不看这些头，**不会**因为"看起来像回环"就免凭据。
-- 改写配置有缓存（`AUTHZ_DB_CACHE_TTL`，默认 30s），改完立刻测可能还是旧值。
-
-**轮换 opencodex 的 admin token 后必须同步这条注入**（写回绑定 7 的 `request_rewrite`）并跑 authz 回归，
-否则 `cc-235.*` 入口整体 401 而 127.0.0.1 仍正常——很容易误判成服务挂了。
-
-### authz 免登录形态（跨机使用，2026-10-12 在 241.t 实测）
-
-目标：调用方（浏览器 / codex CLI / 脚本）跨机使用实例时**不带任何 opencodex 凭据**，
-认证责任全部收敛到 authz 网关。前提：实例 loopback 绑定（默认 `127.0.0.1:10100`），
-authz 绑定同时开启「模拟本机访问」（`simulate_local=1`）。
-
-模拟本机访问的转写行为（authz c6a9a59 起为纯 loopback 形态）：上游实收
-`Host: 127.0.0.1:<端口>`；请求带 `Origin` 时被**重写**为目标 origin（`http://127.0.0.1:<端口>`）、
-不带则不发送；`X-Forwarded-*` / `X-Real-IP` 一律移除。opencodex 的数据面准入只看
-`config.hostname`（loopback 即放行、不读任何请求头），来源判定看 Host/Origin——两者都被
-网关转写成本机形态，于是**数据面 `/v1/*` 对过了 authz 门的调用方完全免 ocx 凭据**；
-管理面 `/api/*` 与注入与否无关地按门 1 判定，靠绑定 `request_rewrite` 注入 admin token 解决。
-
-实测行为矩阵（authz 门已过、ocx 侧不带任何凭据，写操作用非法 body 探权限）：
-
-| 请求（经网关入口） | 结果 | 判定 |
-|---|---|---|
-| `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses` | 200 | 数据面免认证达成，SSE 逐块透传不缓冲 |
-| `GET /api/sidecar-settings` 等管理面读 | **401**（`opencodex admin token required`） | 注入未生效/未配置 |
-| 同上，绑定注入 `x-opencodex-api-key: <token>` 后 | 200 | 门 1 命中托管值 |
-| `GET /`（dashboard） | 200，HTML 内自带 session meta | 浏览器场景零配置可用 |
-| `GET /opencodex-session` | 200 | loopback 会话自铸（见下方风险提示） |
-
-agent 排障速判（都是"以为服务挂了"的假故障）：
-
-| 症状 | 原因 | 处置 |
-|---|---|---|
-| 302 → `/_authz/login` | authz 层匿名被拦（该路由未给 guest 放行） | 登录 authz 拿会话，或带 `x-api-key` |
-| 401 `invalid_api_key`（openresty 风格 body） | authz env key 不对，或来源 IP 不在 `AUTHZ_API_KEY_ALLOWED_IPS`（默认只有 `127.0.0.1`） | 换 key / 把调用方 IP 加进白名单，等 30s 配置缓存过期 |
-| 401 `opencodex admin token required` | ocx 管理面注入缺失或 token 不匹配 | 核对绑定 `request_rewrite` 注入值与实例 env 一致 |
-| PUT/PATCH `/api/providers` 带会话+CSRF 仍 401 | 2.79+ 上游对配置写入加了 write-intent 二次门，loopback 会话过不了 | 属预期，写操作必须走 admin token（网关注入即达成） |
-
-风险提示（部署前须知）：`simulate_local=1` 的入口对过了 authz 门的调用方开放
-`GET /opencodex-session` 自铸管理会话，实测该会话可只读 `/api/config`、`/api/providers`
-（含 baseUrl/hasApiKey 元数据）。写操作被二次门挡住，但读面已经泄漏。若不希望网关调用方看到管理配置，
-在 authz 路由上把 `/api/*`、`/opencodex-session` 排除出该绑定（只放行 `/v1/*` 与 `/healthz`）；
-需要完整远程管理的场景（如本 fork 的 cc 入口）则接受这个读面开放，换取全链路免登录。
-数字前缀入口（`<端口>-<域名>`）默认就按模拟本机处理，规则同上。
-
-## systemd 部署（可选）
-
-```ini
-# /etc/systemd/system/opencodex-proxy.service
-[Unit]
-Description=opencodex fork proxy
-After=network-online.target
-
-[Service]
-User=<你的用户>
-Environment=HOME=/home/<你的用户>
-Environment=OCX_SERVICE=1
-EnvironmentFile=/etc/opencodex-proxy.env   # 只放 OPENCODEX_ADMIN_AUTH_TOKEN=<强随机>
-ExecStart=<node或nvm的bin目录>/ocx start --port 10100
-Restart=always
-RestartSec=5
-KillMode=mixed
-TimeoutStopSec=75
-
-[Install]
-WantedBy=multi-user.target
-```
-
-注意：`stop → 换包 → start` 必须一次性做完——`Restart=always` 会在中途拉起孤儿进程占住端口，
-导致后续 start 失败。`KillMode=mixed` 下自重启时看到成批 `SIGKILL` 属正常（按设计清扫接班进程），
-中间约 5 秒不可用也不是故障。
-
-## headless wdev 桌面与 ocx 联动（部署规范与验收项）
-
-headless 部署（wdev bundle 桌面网关 + ocx 代理）里「同步无效：没有正在运行的 Codex app-server」
-有两层独立根因，部署时一次性对齐，验收项跑完才算装好：
-
-- **uid 隔离**：ocx 枚举 app-server 只数同 uid 进程（`src/codex/app-server-processes.ts` 的
-  `listUnixProcSnapshots` 按 `process.getuid()` 过滤；这是 SIGTERM 安全边界，上游设计，不拆）。
-  ocx 跑 aigc、桌面网关跑专用账号（codex-desktop 等）→ 枚举恒 0，同步/状态按钮对桌面失效。
-- **CODEX_HOME 错位**：ocx 与桌面 gateway 各用各的 codexhome → 同步写 A 处、桌面读 B 处，
-  列表永远旧。桌面 catalog 的 mtime 是判据，不是界面的 toast。
-
-**部署规范（fleet 标准，2026-10-12 在 coding-170 全绿落地）**：
-
-1. 桌面网关与 ocx **同一服务账号**（fleet 口径统一 aigc）：单元 drop-in 只加
-   `/etc/systemd/system/codex-desktop-gateway.service.d/10-user-aigc.conf`：
-   `[Service]` + `User=aigc` + `Group=aigc`，不动包内单元文件本体。
-2. `/etc/codex-desktop/gateway.env` 五键对齐到同一数据树：`CODEX_HOME` 直接指向 ocx 的
-   codexhome（两进程共读写同一个 opencodex-catalog.json）；`CODEX_WEB_RUNTIME_DIR` /
-   `REPORTS_DIR` / `OFFICIAL_BUNDLE_DIR` / `OFFICIAL_USER_DATA_DIR` 从旧账号树迁到新 HOME 下
-   （`install -o <账号>` 迁移）；`GATEWAY_SERVICE_USER/GROUP` 同步取消注释改 aigc。
-   漏改任一数据目录 → 首启必 EACCES（旧 uid 的 0700 树）。
-3. 迁移前**停服冷备份**整棵旧状态树（热 tar 会被 0700 目录卡出 exit=2）；旧树整棵保留不删，
-   gateway.env 带时间戳 .bak。已知噪音：旧账号遗留的 `/tmp/codex-browser-use`（内含陈旧
-   socket）会阻塞 aigc 首启建监听，移开即恢复。xvfb 单元无 User 时不需要 drop-in。
-4. 迁移后 `daemon-reload` + 重启 xvfb/gateway 两个单元（单独执行、is-active 复核）。
-
-**验收项（全过才算装好，任一红 → 回滚 drop-in 与 env 后重启两单元）**：
-
-- [ ] `systemctl is-active` gateway 与 xvfb 均 active；`/health`（3737）200；
-- [ ] 桌面侧全部进程（Electron 主/renderer/app-server）属主 = 服务账号，专用账号进程数 = 0；
-- [ ] `GET /api/system/codex-app-server`（带 admin token）→ `state` 为 fresh/stale 且
-      `runningCount >= 1`（不是 not_running/0，核心判据）；
-- [ ] `POST /api/sync` → `status=applied`、`ok=true`，响应无「没有正在运行」语义；
-- [ ] 桌面与 ocx 的 catalog 是同一文件（同 inode），mtime 随点同步前进；
-- [ ] gateway 日志无 EACCES/ECONNREFUSED 红字（对旧数据目录的引用全部清零）。
-
-轻量替代（不能动单元时）：root 桥脚本 + `systemd path` 监视 ocx 侧 catalog 落盘，自动
-`install -o <桌面账号>` 投递到桌面 codexhome 并重启 gateway（`ocx-desktop-sync` 模式，241.t 在用）。
-它只解决列表新鲜度，不解决按钮的 runningCount——界面「没有正在运行的 app-server」在跨账号形态下
-是预期噪音。桌面内「重启 App」按钮依赖官方 deb 布局（`/usr/bin/chatgpt`），wdev bundle 上恒
-`package_discovery_failed`，桌面重启用 `systemctl restart codex-desktop-gateway.service`。
-
-## 交给 agent 的 Prompt（复制即用）
-
-把下面整段发给目标机上的编码 agent，它会完成下载、安装、配置、验证：
+## 9. 交给 agent 的 Prompt（复制即用）
 
 ```text
-安装 opencodex fork 代理（本 fork 提供 Codex 的第三方模型代理与影子调用拦截）：
-
-1. 下载：gh release download rolling-fork-build --repo yorkane/codex-proxy --pattern '*.tgz' --dir /tmp
-   （没有 gh 时先查 releases/tags/rolling-fork-build 的真实资产名再拼 URL，别写死旧文件名）
-2. 安装：npm install -g --allow-scripts=bun /tmp/bitkyc08-opencodex-*.tgz
-3. 写 ~/.opencodex/config.json：defaultProvider 与 providers 用我提供的 baseUrl/apiKey/models，
-   并按模型真实上限填 defaultMaxOutputTokens / modelMaxOutputTokens；
-   如需 Codex 原生模型改道，配置 shadowCallIntercept.modelMap（来源模型 → provider/model），
-   自定义来源模型 id 要同时写进 sourceModels；幻影工具名单用 shadowCallIntercept.phantomToolAllowlist
-   （别再写已删除的 provider.undeclaredToolAllowlist）；需要空完成重放就置 emptyCompletionRetry；
-   经外部反代访问把 origin 写进 corsAllowOrigins。
-4. 管理面凭据：除非用户显式指定环境变量，一律 Environment=OPENCODEX_ADMIN_AUTH_TOKEN=Wdev-142857
-   （env 优先，文件形态只接受 ocx_admin_ 前缀的生成值）；本机裸调 /api/* 也要凭据，没有 loopback 免认证分支；
-   如果这台机前面有 authz 网关，给对应绑定开 simulate_local（模拟本机访问）并把同一个 token 写进
-   request_rewrite 的 headers ["x-opencodex-api-key"]：数据面连注入都不需要，注入只服务管理面读写，
-   两处一致后走入口即全链路免登录；轮换 token 后记得同步那里。
-5. 启动并验证：ocx start --port 10100 &（或复用已有 systemd 单元，停→换→起一步做完）；
-   curl -s http://127.0.0.1:10100/healthz 应返回 status ok；
-   无凭据 GET /api/config 应 401（证明认证生效）、带 x-opencodex-api-key 应 200；
-   再 POST /v1/responses 发一个带 tools 声明的最小请求（影子拦截只在 /v1/responses 生效，
-   /v1/chat/completions 不测影子），确认工具往返正常、无 502。
-6. 报告：healthz 输出、版本号、认证四态（/healthz 200、裸 /api/config 401、带凭据 200）、
-   （若本机有 headless wdev 桌面网关，跑「headless wdev 桌面与 ocx 联动」一节的验收项全部 6 条）
-   以及影子映射是否生效（响应里模型是否被替换）。
+部署 opencodex fork 代理（managed 发布线，Linux amd64，非生产验证包）：
+1. 读 GitLab project 22 对应 managed Release（当前已验证坐标 managed.4；以最新 managed.N 的
+   manifest.json/SHA256SUMS 为唯一权威，不写死文件名、不拼 latest、不用 SUPERSEDED 包），
+   经 Generic Package Registry 下载到 /data/tmp 并 sha256sum -c 对账。
+2. 过 CA 安装门（三条同时成立，禁 -k），按 wdev-app deploy.md 只读提取 + install.sh --apply apply
+   （--engine-tgz 传 portable 离线包；fresh 先写自有 env 再显式传 --*-env-source），root 集成脚本先于 start；
+   禁 dpkg -i 覆盖在跑生产；禁动 235 生产承载面（只读）。
+3. 配置 ~/.wdev/proxy.env 注入 OPENAI_APIKEY_API_KEY（默认 API-key 登录，无 key 能起、上游 401）；
+   需要改道配 shadowCallIntercept.modelMap+sourceModels；反代配 corsAllowOrigins；加 wdevManager:{enabled:true}；
+   管理令牌本地强随机、authz 注入同步，两处一致；token 值不进报告。
+4. 验收 §8 全跑 + 变更门族（G5/G6/G6b/G7r/G6p/G99；G80 BLOCKED 如实记）；无账号环境不宣称 ready passed。
+5. 报告：版本、认证四态、fence/幂等证据；未跑项写未跑。
 ```
 
-## fork 定制能力速查
-
-| 能力 | 配置键 | 说明 |
-|---|---|---|
-| 影子调用拦截 | `shadowCallIntercept.{enabled,model,modelMap,sourceModels}` | 按来源模型把 Codex 原生模型（luna/sol/terra/5.5/5.4-mini 及自定义）换成任意已配置 provider/model；`modelMap` 逐来源映射、`model` 兜底；斜杠来源条目要配斜杠 id，最长前缀优先 |
-| 幻影工具容忍 | `shadowCallIntercept.{phantomToolAllowlistEnabled,phantomToolAllowlist}` | 替换模型幻觉出的未声明工具名：命中名单整条剥除、回合继续；未命中仍 502 fail-closed。不写=内置 9 项，显式 `[]=`全 fail-closed。只对**被影子替换过**的请求生效，直连路由恒 fail-closed |
-| 未声明调用指令纠错 | `shadowCallIntercept.phantomToolFeedbackMax` | 默认 2（0-10，0=退回只丢弃）：被拒的调用回喂一条纠错指令让模型改名重试；仅影子请求且声明了 exec 时分配 |
-| 统一工具名修复 | （无需配置） | 内置 emitted-call-guard：`tools__` / `tools.` / `tools=` / `tools/` 四种前缀与裸名自动改写为声明名、命名空间误调回喂纠错、纯幻影按名单丢弃 |
-| exec 信封泄漏修复 | （无需配置） | bridge 的 sse 与 response-json 两条路径修复泄漏进正文的 exec 信封 |
-| 输出上限封顶 | `providers.*.{defaultMaxOutputTokens,modelMaxOutputTokens}` | 调用方 max_tokens 与配置值取 min，越界不再被上游 400 |
-| 空完成重放 | `emptyCompletionRetry` / `emptyCompletionRetryMax` | 默认关；env `OCX_EMPTY_COMPLETION_RETRY=0` / `OCX_EMPTY_COMPLETION_RETRY_MAX` 可强关/改预算 |
-| 反代 origin 白名单 | `corsAllowOrigins`（上游原生） | 放行反代 origin 让浏览器 gui-session 可用；**不是**管理 API 的免认证开关，schema 里的 zod 防护条目不可删 |
-
-管理面凭据与 authz 免认证见上一节。更细的设计与运维手册见 fork 运维层仓库根目录的 AGENTS.md / design.md。
