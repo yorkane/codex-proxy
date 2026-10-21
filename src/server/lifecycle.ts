@@ -507,9 +507,20 @@ export function trackStreamLifetime(
   let pendingRead = false;
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  // Upstream 2.90 drain fix subsumes the fork's graceMs>0 abort listener: a drain
+  // must stop the tracked stream itself, so onAbort cancels the reader, errors the
+  // controller and settles the turn on ANY abort, watchdog enabled or not.
+  const onAbort = () => {
+    if (closed) return;
+    // Stop the stream before the caller's onDone runs, so a throwing callback cannot leave it open.
+    reader.cancel(ac.signal.reason).catch(() => {});
+    try { streamController?.error(ac.signal.reason); } catch { /* already closed */ }
+    finish();
+  };
   const finish = () => {
     if (closed) return;
     closed = true;
+    ac.signal.removeEventListener("abort", onAbort);
     if (idleTimer !== undefined) {
       clearTimeout(idleTimer);
       idleTimer = undefined;
@@ -517,16 +528,6 @@ export function trackStreamLifetime(
     unregisterTurn(ac);
     onDone?.();
   };
-  if (graceMs > 0) {
-    // An external abort (client_cancel, WS teardown) must settle the turn even
-    // when no one is left to cancel the tracked stream: without this listener
-    // the release still depended on Bun driving pull()/cancel() to completion.
-    ac.signal.addEventListener("abort", () => {
-      if (closed) return;
-      finish();
-      reader.cancel(ac.signal.reason).catch(() => {});
-    }, { once: true });
-  }
   const evaluateQuiescence = () => {
     if (closed || graceMs <= 0) return;
     const quiescent = !pendingPull && !pendingRead;
@@ -544,7 +545,8 @@ export function trackStreamLifetime(
       idleTimer = undefined;
     }
   };
-  return new ReadableStream<Uint8Array>({
+  const tracked = new ReadableStream<Uint8Array>({
+    start(controller) { streamController = controller; },
     async pull(controller) {
       streamController = controller;
       pendingPull = true;
@@ -575,6 +577,10 @@ export function trackStreamLifetime(
       reader.cancel(reason).catch(() => {});
     },
   });
+  // After registerTurn, so the lease's own abort listener (release the turn) runs first. A
+  // controller registerTurn already aborted (a settled lease) keeps its previous behaviour.
+  ac.signal.addEventListener("abort", onAbort, { once: true });
+  return tracked;
 }
 
 /**

@@ -53,6 +53,7 @@ export type {
   OcxToolResultMessage,
   OcxTextContent,
   OcxImageContent,
+  OcxAudioContent,
   OcxDocumentContent,
   OcxContentPart,
   OcxThinkingContent,
