@@ -68,6 +68,35 @@ interface Journal {
    */
   replacedRootWebSearch?: string | null;
   /**
+   * The retry-budget pair this injection wrote into `[model_providers.opencodex]`
+   * (request_max_retries / stream_max_retries), as integers, when it wrote the table.
+   *
+   * Same evidence role as {@link injectedOpenaiBaseUrl}: the marker comment is not durable
+   * against a Codex app reserialize, and the provider table is wholesale-stripped and
+   * rebuilt on every sync. The recorded pair is what lets the NEXT pass tell its own lines
+   * apart from a value the user hand-edited — equal means the injector still owns the line,
+   * different means the user claimed it and the value gets carried across the rewrite.
+   */
+  injectedRequestMaxRetries?: number | null;
+  injectedStreamMaxRetries?: number | null;
+  /**
+   * Per key, whether the pair above came from the environment (fork addition). It separates
+   * "the injector wrote this line as its own choice" (a file line matching it is the
+   * injector's line — the user reset theirs) from "the injector wrote this line under an env
+   * order" (the user's claim underneath survives the order being taken away).
+   */
+  injectedRequestMaxRetriesFromEnv?: boolean | null;
+  injectedStreamMaxRetriesFromEnv?: boolean | null;
+  /**
+   * The retry-budget keys the USER claimed (fork addition), keyed by the camelCase names the
+   * injector uses: a key is claimed when the config's line differs from the pair recorded
+   * above. Claiming is durable — a re-injection that carries the value journals it again, so
+   * a hand-edited budget survives every later sync, and taking the env override away returns
+   * the user's value rather than the default. `ocx restore` clears the whole journal, which
+   * is what un-claims it.
+   */
+  userRetryBudget?: { requestMaxRetries?: number | null; streamMaxRetries?: number | null } | null;
+  /**
    * The catalog path this injection actually wrote to.
    *
    * #1798: restore re-resolves the catalog from the CURRENT config, so a Codex app rewrite
@@ -203,6 +232,24 @@ export interface InjectedJournalOwnership {
   injectedRootWebSearch?: string | null;
   /** Omitted by callers that removed no user `web_search` line. */
   replacedRootWebSearch?: string | null;
+  /** The whole provider-table retry record this pass (fork addition). */
+  retryBudget?: JournalRetryOwnership;
+}
+
+/**
+ * The provider-table retry record one injection writes (fork addition): the pair written,
+ * per key whether the environment forced it, and the user's claim per key. The Journal's
+ * flat `injected*MaxRetries` / `userRetryBudget` fields carry the same shape; the plan
+ * derives it from `resolveCodexRetryKey`, and `journaledInjectedRetryState` reads it back
+ * as one bundle for the next injection's precedence call.
+ */
+export interface JournalRetryOwnership {
+  injectedRequestMaxRetries?: number | null;
+  injectedStreamMaxRetries?: number | null;
+  injectedRequestMaxRetriesFromEnv?: boolean | null;
+  injectedStreamMaxRetriesFromEnv?: boolean | null;
+  userRequestMaxRetries?: number | null;
+  userStreamMaxRetries?: number | null;
 }
 
 export function markJournalInjectedState(
@@ -230,6 +277,14 @@ export function markJournalInjectedState(
   journal.injectedRealtimeWsBaseUrl = ownership.injectedRealtimeWsBaseUrl;
   journal.injectedRootWebSearch = ownership.injectedRootWebSearch ?? null;
   journal.replacedRootWebSearch = ownership.replacedRootWebSearch ?? null;
+  journal.injectedRequestMaxRetries = ownership.retryBudget?.injectedRequestMaxRetries ?? null;
+  journal.injectedStreamMaxRetries = ownership.retryBudget?.injectedStreamMaxRetries ?? null;
+  journal.injectedRequestMaxRetriesFromEnv = ownership.retryBudget?.injectedRequestMaxRetriesFromEnv ?? null;
+  journal.injectedStreamMaxRetriesFromEnv = ownership.retryBudget?.injectedStreamMaxRetriesFromEnv ?? null;
+  journal.userRetryBudget = {
+    requestMaxRetries: ownership.retryBudget?.userRequestMaxRetries ?? null,
+    streamMaxRetries: ownership.retryBudget?.userStreamMaxRetries ?? null,
+  };
   journal.injectedCatalogPath = ownership.injectedCatalogPath;
   journal.opencodexHome = opencodexHomeForInjection(journal.opencodexHome);
   atomicWriteFile(JOURNAL_PATH, JSON.stringify(journal), undefined, hooks);
@@ -260,6 +315,42 @@ export function journaledInjectedRootWebSearch(options: { readOnly?: boolean } =
 /** The user-owned root `web_search` line the last injection removed, or null when there was none. */
 export function journaledReplacedRootWebSearch(options: { readOnly?: boolean } = {}): string | null {
   return readJournal(options.readOnly !== true)?.replacedRootWebSearch ?? null;
+}
+
+/**
+ * The retry-budget pair the last injection wrote, keyed by the TOML names, missing when it
+ * wrote none (fork addition). Consumers merge this with the table text to tell their own
+ * lines from user-claimed ones.
+ */
+/**
+ * Everything the last injection recorded about the provider-table retry budget (fork
+ * addition): the pair it wrote, per key whether env forced that pair, and the pair the user
+ * claimed. The plan merges all three with the file's own lines; keep the shape additive.
+ */
+export interface JournalRetryState {
+  injected: { request_max_retries?: number; stream_max_retries?: number };
+  fromEnv: { request: boolean; stream: boolean };
+  user: { requestMaxRetries?: number; streamMaxRetries?: number };
+}
+
+export function journaledInjectedRetryState(
+  options: { readOnly?: boolean } = {},
+): JournalRetryState {
+  const journal = readJournal(options.readOnly !== true);
+  const injected: JournalRetryState["injected"] = {};
+  if (typeof journal?.injectedRequestMaxRetries === "number") injected.request_max_retries = journal.injectedRequestMaxRetries;
+  if (typeof journal?.injectedStreamMaxRetries === "number") injected.stream_max_retries = journal.injectedStreamMaxRetries;
+  const user: JournalRetryState["user"] = {};
+  if (typeof journal?.userRetryBudget?.requestMaxRetries === "number") user.requestMaxRetries = journal.userRetryBudget.requestMaxRetries;
+  if (typeof journal?.userRetryBudget?.streamMaxRetries === "number") user.streamMaxRetries = journal.userRetryBudget.streamMaxRetries;
+  return {
+    injected,
+    fromEnv: {
+      request: journal?.injectedRequestMaxRetriesFromEnv === true,
+      stream: journal?.injectedStreamMaxRetriesFromEnv === true,
+    },
+    user,
+  };
 }
 
 /** The catalog path the last injection wrote to, or null when none was recorded. */

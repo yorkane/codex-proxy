@@ -11,6 +11,13 @@
  */
 import { websocketsEnabled } from "../../config";
 import {
+  codexRetryBudgetFromEnv,
+  DEFAULT_CODEX_REQUEST_MAX_RETRIES,
+  DEFAULT_CODEX_STREAM_MAX_RETRIES,
+  resolveCodexRetryKey,
+  type CodexRetryBudget,
+} from "../../lib/codex-retry-budget";
+import {
   HISTORY_RELABEL_STANDS_DOWN,
   preflightCodexHistoryInjection,
 } from "../history-provider";
@@ -18,6 +25,7 @@ import {
   journaledInjectedOpenaiBaseUrl,
   journaledInjectedRealtimeWsBaseUrl,
   journaledInjectedRootWebSearch,
+  journaledInjectedRetryState,
   journaledReplacedRootWebSearch,
 } from "../journal";
 import { stripJournaledOpenaiBaseUrl } from "../injected-marker";
@@ -44,7 +52,7 @@ import {
   stripOpencodexCatalogPath,
   stripRootContextWindowOverrides,
 } from "./config-toml";
-import { hasOcxProviderTable, removeOcxSection } from "./remove";
+import { hasOcxProviderTable, readRetryBudgetFromProviderTable, removeOcxSection } from "./remove";
 import {
   configuredManagedSubagentDefaults,
   usesProviderTable,
@@ -81,6 +89,17 @@ export interface CodexInjectionPlanOk {
   injectedRootWebSearch: string | null;
   /** The user-owned root `web_search` line this plan removed, for the journal to carry. */
   replacedRootWebSearch: string | null;
+  /** The retry-budget pair written into the provider table (fork addition; the journal records
+   * it as ours so the next pass can tell our lines from a user-claimed value). */
+  injectedRequestMaxRetries: number;
+  injectedStreamMaxRetries: number;
+  /** Per key, whether the pair above was forced by the environment (fork addition). */
+  injectedRequestMaxRetriesFromEnv: boolean;
+  injectedStreamMaxRetriesFromEnv: boolean;
+  /** The retry-budget keys the user owns after this plan (fork addition; null when the injector
+   * wrote the line). Durable in the journal: the claim outlives the file round-trip. */
+  userRequestMaxRetries: number | null;
+  userStreamMaxRetries: number | null;
   nativeSubagentDefaultsWarning: string | undefined;
   managedDefaultsMessage: string;
   /**
@@ -181,6 +200,35 @@ export function deriveCodexInjectionPlan(
   // Whether this home already published the provider id that its thread rows may reference.
   // Design B strips the table below; it may only stay stripped if those rows can be relabeled.
   const hadOcxProviderTableOnDisk = hasOcxProviderTable(content);
+  /*
+   * 重试预算（fork 新增）：优先级 env > 用户认领值 > 默认 10，逐键独立，裁决在
+   * resolveCodexRetryKey。表马上要被整表剥离重写（removeOcxSection → 重建），手写的
+   * request/stream_max_retries 会随剥离消失，所以在剥离之前把文件里的值读出来，连 journal
+   * 的上一轮记录（注入值、是否 env 强制、认领值）一起裁决，结果带进重建的表并回写 journal。
+   */
+  const retryState = journaledInjectedRetryState({ readOnly: ctx.journalReadOnly });
+  const fileRetry = readRetryBudgetFromProviderTable(content);
+  const envRetries = codexRetryBudgetFromEnv();
+  const requestRetry = resolveCodexRetryKey({
+    fileValue: fileRetry.request_max_retries,
+    lastWritten: retryState.injected.request_max_retries,
+    lastFromEnv: retryState.fromEnv.request,
+    userClaim: retryState.user.requestMaxRetries,
+    envValue: envRetries.requestMaxRetries,
+    fallback: DEFAULT_CODEX_REQUEST_MAX_RETRIES,
+  });
+  const streamRetry = resolveCodexRetryKey({
+    fileValue: fileRetry.stream_max_retries,
+    lastWritten: retryState.injected.stream_max_retries,
+    lastFromEnv: retryState.fromEnv.stream,
+    userClaim: retryState.user.streamMaxRetries,
+    envValue: envRetries.streamMaxRetries,
+    fallback: DEFAULT_CODEX_STREAM_MAX_RETRIES,
+  });
+  const userRetryBudget: CodexRetryBudget = {
+    requestMaxRetries: requestRetry.written,
+    streamMaxRetries: streamRetry.written,
+  };
   if (hadOcxProviderTableOnDisk) {
     content = removeOcxSection(content);
   }
@@ -253,7 +301,7 @@ export function deriveCodexInjectionPlan(
     content =
       content.trimEnd() +
       "\n" +
-      buildProviderTableBlockForTarget(routingTarget, websocketsForRoutingTarget(config, routingTarget), config?.codexProviderDisplayName);
+      buildProviderTableBlockForTarget(routingTarget, websocketsForRoutingTarget(config, routingTarget), config?.codexProviderDisplayName, userRetryBudget);
     // 3) Keep existing `openai`-tagged threads reaching the proxy (see above). Ownership rules
     // are the Design B ones: a user's own root line is never replaced.
     if (keepRootOverrideAlongsideTable) {
@@ -371,7 +419,7 @@ export function deriveCodexInjectionPlan(
    */
   if (hadOcxProviderTableOnDisk && !providerTableMode) {
     content = applyEol(
-      content.trimEnd() + "\n" + buildProviderTableBlockForTarget(routingTarget, websocketsForRoutingTarget(config, routingTarget), config?.codexProviderDisplayName),
+      content.trimEnd() + "\n" + buildProviderTableBlockForTarget(routingTarget, websocketsForRoutingTarget(config, routingTarget), config?.codexProviderDisplayName, userRetryBudget),
       eol,
     );
   }
@@ -388,6 +436,12 @@ export function deriveCodexInjectionPlan(
     keptUserRealtimeWsBaseUrl,
     injectedRootWebSearch: webSearch.wroteValue,
     replacedRootWebSearch: webSearch.replacedUserLine,
+    injectedRequestMaxRetries: requestRetry.written,
+    injectedStreamMaxRetries: streamRetry.written,
+    injectedRequestMaxRetriesFromEnv: requestRetry.fromEnv,
+    injectedStreamMaxRetriesFromEnv: streamRetry.fromEnv,
+    userRequestMaxRetries: requestRetry.claim,
+    userStreamMaxRetries: streamRetry.claim,
     nativeSubagentDefaultsWarning,
     managedDefaultsMessage,
     historyRelabelRefusal: observedHistoryRefusal,

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { OCX_ROUTING_MARKER_LINE, OCX_SECTION_MARKER } from "../injected-marker";
-import { splitSourceLines, type SourceLine } from "../toml-source-lines";
+import { rootAssignmentKey, splitSourceLines, type SourceLine } from "../toml-source-lines";
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -108,4 +108,40 @@ export function appendOcxProviderTableBlock(content: string, block: string): str
     return content;
   }
   return `${content}${content.endsWith("\n") ? "\n" : "\n\n"}${block}${block.endsWith("\n") ? "" : "\n"}`;
+}
+
+/*
+ * 重试预算键的跨剥离搬运（fork 新增）。
+ *
+ * 注入流水线每轮 sync 对 marker 拥有的 [model_providers.opencodex] 表是整表剥离重写
+ * （plan.ts 先 removeOcxSection，再 buildProviderTableBlockForTarget 重建），所以用户在这张表里
+ * 手写的 request_max_retries / stream_max_retries 活不过下一次注入。plan.ts 在剥离之前用它读出
+ * 文件里的原始值，交给 src/lib/codex-retry-budget.ts 的 resolveCodexRetryKey 与 journal 记录
+ * 一起做优先级裁决——与 web_search 的 journal 搬运同一方向：剥离是机制，所有权证据跟着值走。
+ *
+ * 只认标量整数键行：数组、内联表、多行值和解析失败的行都当作「没有该键」。这里不做所有权
+ * 判断，所有权在裁决方（文件值 vs journal 注入值）判定。
+ */
+const RETRY_BUDGET_KEYS = ["request_max_retries", "stream_max_retries"] as const;
+export type CodexRetryBudgetKey = (typeof RETRY_BUDGET_KEYS)[number];
+
+/** 从 provider 表文本里读出重试预算键的原始标量值（整数；无键时缺项）。 */
+export function readRetryBudgetFromProviderTable(
+  content: string,
+): Partial<Record<CodexRetryBudgetKey, number>> {
+  const result: Partial<Record<CodexRetryBudgetKey, number>> = {};
+  const { lines, owned } = providerLines(content);
+  for (let index = 0; index < lines.length; index++) {
+    if (!owned.has(index)) continue;
+    const line = lines[index]!;
+    if (!line.structural) continue;
+    const key = RETRY_BUDGET_KEYS.find(name => rootAssignmentKey(line.text) === name);
+    if (!key) continue;
+    try {
+      const parsed = Bun.TOML.parse(line.text) as Record<string, unknown>;
+      const value = parsed[key];
+      if (typeof value === "number" && Number.isFinite(value)) result[key] = value;
+    } catch { /* 多行/畸形值不是可搬运的标量证据。 */ }
+  }
+  return result;
 }

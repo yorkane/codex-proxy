@@ -31,8 +31,8 @@ import {
   stripRootRoutedModel,
 } from "./config-toml";
 
-import { appendOcxProviderTableBlock, extractOcxProviderTableBlock, hasOcxProviderTable, removeOcxSection } from "./provider-table";
-export { appendOcxProviderTableBlock, extractOcxProviderTableBlock, hasOcxProviderTable, removeOcxSection } from "./provider-table";
+import { appendOcxProviderTableBlock, extractOcxProviderTableBlock, hasOcxProviderTable, readRetryBudgetFromProviderTable, removeOcxSection } from "./provider-table";
+export { appendOcxProviderTableBlock, extractOcxProviderTableBlock, hasOcxProviderTable, readRetryBudgetFromProviderTable, removeOcxSection } from "./provider-table";
 
 /** Read the provider table straight off disk, before anything has transformed it. */
 export function readOcxProviderTableBlock(): string | null {

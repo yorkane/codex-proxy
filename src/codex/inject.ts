@@ -512,6 +512,15 @@ async function injectCodexConfigImpl(
       // not durable) and the line we removed (so re-enabling the sidecar can return it).
       injectedRootWebSearch: plan.injectedRootWebSearch,
       replacedRootWebSearch: plan.replacedRootWebSearch,
+      // Provider-table retry budget: pair written, env-forced flags, user claim (codex-retry-budget).
+      retryBudget: {
+        injectedRequestMaxRetries: plan.injectedRequestMaxRetries,
+        injectedStreamMaxRetries: plan.injectedStreamMaxRetries,
+        injectedRequestMaxRetriesFromEnv: plan.injectedRequestMaxRetriesFromEnv,
+        injectedStreamMaxRetriesFromEnv: plan.injectedStreamMaxRetriesFromEnv,
+        userRequestMaxRetries: plan.userRequestMaxRetries,
+        userStreamMaxRetries: plan.userStreamMaxRetries,
+      },
       // This is the catalog artifact selected for this injection, even when config.toml
       // already points at that path and therefore needs no textual rewrite.
       injectedCatalogPath: plan.catalogPath,

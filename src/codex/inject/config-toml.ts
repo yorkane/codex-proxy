@@ -20,6 +20,7 @@ import {
 } from "../paths";
 import { normalizeStructuralWhitespace, rootAssignmentKey, rootSourceLines, sourceAssignment, sourceAssignmentSpan, sourceText, type SourceLine } from "../toml-source-lines";
 import { readBoundedCodexConfig } from "./bounded-config-reader";
+import { codexRetryBudget, type CodexRetryBudget } from "../../lib/codex-retry-budget";
 import {
   type CodexRoutingTarget,
   providerBaseHost,
@@ -153,6 +154,7 @@ export function buildProviderTableBlockForTarget(
   target: CodexRoutingTarget,
   supportsWebsockets = false,
   displayName?: string,
+  retryBudget: CodexRetryBudget = codexRetryBudget(),
 ): string {
   const lines = [
     "",
@@ -163,6 +165,12 @@ export function buildProviderTableBlockForTarget(
     'wire_api = "responses"',
     // false only in the authless Desktop opt-in (#1107); true keeps the App/TUI account gate.
     `requires_openai_auth = ${target.desktopAuthless === true ? "false" : "true"}`,
+    // 客户端重试预算（fork 新增）：codex-rs 的 request_max_retries / stream_max_retries 只能来自
+    // config.toml，没有 env 覆盖，所以由注入器代写。值来自 `src/lib/codex-retry-budget.ts`
+    // （env OCX_CODEX_REQUEST_MAX_RETRIES / OCX_CODEX_STREAM_MAX_RETRIES，默认 10，钳到 100）。
+    // 用户在表里手写的同名键由 plan.ts 在剥离前读出并覆盖这里（用户值优先）。
+    `request_max_retries = ${retryBudget.requestMaxRetries}`,
+    `stream_max_retries = ${retryBudget.streamMaxRetries}`,
   ];
   if (target.requiresAdmissionToken) {
     // codex-cli 0.146+ contract (#2073): env_key sends Authorization: Bearer $VAR and
