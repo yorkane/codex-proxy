@@ -243,7 +243,7 @@ def main():
     code = ";".join([
         "import sys, os, tarfile",
         "tmp=%r" % tmp,
-        "tf=tarfile.open(%r,'r:gz')",
+        "tf=tarfile.open(%r,'r:gz')" % tar_path,
         "members=tf.getmembers()",
         "assert all(m.isreg() or m.isdir() for m in members), 'non-REG/DIR member'",
         "tf.extractall(tmp)",
