@@ -14,7 +14,8 @@
     "gui/src/i18n/zh.ts",
     "scripts/model-metadata.source.json",
     "scripts/test-layout/layout.json",
-    "src/adapters/cursor/gen/agent_pb.ts"
+    "src/adapters/cursor/gen/agent_pb.ts",
+    "tests/fixtures/test-layout-expected.json"
   ],
   "files": {
     ".github/scripts/issue-quality.test.cjs": 2143,
@@ -57,7 +58,7 @@
     "tests/responses/responses-undeclared-tool-guard.test.ts": 2371,
     "tests/responses/ws-upstream.test.ts": 2002,
     "tests/routing/subagent-fallback-handle-responses.test.ts": 2274,
-    "tests/server/config.test.ts": 3692,
+    "tests/server/config.test.ts": 3731,
     "tests/server/management-provider-validation.test.ts": 5480,
     "tests/server/server-auth.test.ts": 4437,
     "tests/server/server-combo-failover-e2e.test.ts": 4160,
