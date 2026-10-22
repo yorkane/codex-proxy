@@ -69,6 +69,6 @@
     "tests/usage/usage-summary.test.ts": 2069,
     "tests/web-search/web-search.test.ts": 2823,
     "tests/windows/windows-secret-acl.test.ts": 2310,
-    "tests/fixtures/test-layout-expected.json": 2537
+    "tests/fixtures/test-layout-expected.json": 2569
   }
 }
