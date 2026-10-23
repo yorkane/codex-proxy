@@ -415,10 +415,18 @@ describe("Zed inference send accounting", () => {
         return ++completions === 1 ? new Response("expired", { status: 401 }) : new Response("ok");
       }) as typeof globalThis.fetch,
     });
-    if (limit === 1) await expect(result).rejects.toBeInstanceOf(SendBudgetExhaustedError);
-    else expect(await (await result).text()).toBe("ok");
+    // Zed 真预算门（root 2026-10-23）：401 重放经 options.shouldReplay 以账本剩余门控。
+    // L=1 时剩余 0：不取消首发 401、不刷第二张 token，原样交还真实上游答案（401 "expired"），
+    // 不再合成 SendBudgetExhaustedError——预算拒绝不得洗白真实上游态。
+    const response = await result;
+    if (limit === 1) {
+      expect(response.status).toBe(401);
+      expect(await response.text()).toBe("expired");
+    } else expect(await response.text()).toBe("ok");
     expect(completions).toBe(limit);
-    expect(calls.filter(url => new URL(url).pathname === "/client/llm_tokens")).toHaveLength(1);
+    // L=1：剩余 0 时 401 重放整体放弃——首发不取消、token 缓存不刷新（llm_tokens 0 次），
+    // 交还原 401。L=2：预算付得起一次刷新+重放，llm_tokens 恰好 1 次。
+    expect(calls.filter(url => new URL(url).pathname === "/client/llm_tokens")).toHaveLength(limit === 1 ? 0 : 1);
     expect(physical).toEqual(limit === 1 ? [{ ordinal: 1 }] : [{ ordinal: 1 }, { ordinal: 2, recovery: "oauth-401" }]);
     expect(budget.used).toBe(limit);
     expect(budget.physicalStarted).toBe(limit);

@@ -51,7 +51,6 @@ import {
   applyReplayRefusalClientHeaders,
   applyUpstreamRecoveryInit,
   SendBudgetExhaustedError,
-  fetchWithResetRetry,
   fetchWithTransientRetry,
   isNonReplayableResponse,
   isReplayRefusalResponse,
@@ -63,6 +62,8 @@ import {
   type UpstreamSendRecovery,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
 } from "../lib/upstream-retry";
+import { nativeModelAuthorityAttempts, nativeModelSendsRemaining } from "./native-model-retry";
+import { runModelRetryScope } from "../lib/model-retry-scope";
 import { distributedKeyPhysicalFetch, distributedKeyResponseOwner, recordDistributedResponseFailure } from "../providers/api-key-response-ownership";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../providers/api-key-selection";
 import { RequestPacingQueueOverloadError } from "../providers/request-pacing";
@@ -318,6 +319,14 @@ async function prepareNativeBody(body: Rec, signal: AbortSignal): Promise<void> 
  * log row, and answers in the Messages wire (SSE or JSON per the caller's own `stream`).
  */
 export async function handleNativeMessages(options: HandleNativeMessagesOptions): Promise<Response> {
+  // Unified model lane (fork): the whole recovery loop (key/OAuth rotation, 429 replay,
+  // auto-pause moves, alternate-account failover) runs inside one model-retry scope, so an
+  // auto-pause verdict mid-loop defers its commit to the outermost exit and cannot truncate
+  // the send allowance this request still owns. Explicit user pauses stay eager.
+  return runModelRetryScope(() => runNativeMessagesAttempt(options));
+}
+
+async function runNativeMessagesAttempt(options: HandleNativeMessagesOptions): Promise<Response> {
   const { req, config, logCtx, logIds, route, body, requestedModel, translatorBudget } = options;
   const nativeInstance = configuredAnthropicInstance(config, route.providerName);
   const requestedStream = body.stream === true;
@@ -459,7 +468,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   stampApiKeyAccountLabel(logCtx, route.providerName, activeProvider);
   if (oauthBinding) logCtx.provider = formatAnthropicProviderForLog(route.providerName, oauthBinding.snapshot.accountId, config);
   const spendTracker = attachRequestSpendTracker(req, logCtx);
-  const physicalBudget = createInferenceSendBudget(req, logCtx);
+  const physicalBudget = createInferenceSendBudget(req, logCtx, config.modelRequestMaxRetries);
   // Observe-only spend is already booked by the tracker; count billing sends without booking again.
   let physicalSendsUsed = 0;
   let activeRequest: AnthropicMessagesPassthroughRequest;
@@ -519,12 +528,14 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
     return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
-  // One inbound request owns one transient send allowance, captured before any key rotation.
+  // One inbound request owns ONE unified model-request send allowance (fork): real upstream
+  // HTTP 4xx/5xx all retry inside one shared budget (>= 10 retries = 11 sends; env
+  // OCX_MODEL_REQUEST_MAX_RETRIES > config > default), captured before any key rotation.
+  // A provider-configured attempts value may only RAISE the floor, never lower it.
   const requestTransientPolicy = transientRetryPolicyFor(activeProvider);
   let transientSendsUsed = 0;
-  const remainingTransientSends = (): number => requestTransientPolicy
-    ? Math.max(0, requestTransientPolicy.attempts - transientSendsUsed)
-    : Number.POSITIVE_INFINITY;
+  const remainingTransientSends = (): number =>
+    nativeModelSendsRemaining(physicalBudget, transientSendsUsed, requestTransientPolicy?.attempts);
   const transientSendAvailable = (): boolean => remainingTransientSends() > 0;
   const selector: NativeMessagesSelector = options.selector ?? {};
   const nativeOAuthRouteIsCurrent = (binding: NativeOAuthBinding): boolean => {
@@ -546,15 +557,14 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
     pendingDistributedFailure = undefined;
     record?.();
   };
-  /** Send the native Messages request under the transient retry policy, re-validating the selected OAuth account or API key at the dispatch boundary. */
+  /** Send the native Messages request under the unified model-retry budget, re-validating the selected OAuth account or API key at the dispatch boundary. */
   const send = async (recovery?: "rate-limit-429" | "oauth-401" | "oauth-account-403" | "key-429" | "key-401"): Promise<Response> => {
+    // Unified model lane (fork): every native Messages send runs the shared 4xx/5xx retry
+    // budget through fetchWithTransientRetry(modelRetryMode); no reset-only branch left.
     const remaining = remainingTransientSends();
-    if (requestTransientPolicy && remaining <= 0) {
-      throw new Error("native Messages transient send budget exhausted before recovery dispatch");
-    }
-    const fetchWithPolicy = requestTransientPolicy ? fetchWithTransientRetry : fetchWithResetRetry;
+    if (remaining <= 0) throw new SendBudgetExhaustedError(safeHostLabel(activeRequest.url));
     const request = activeRequest;
-    return await fetchWithPolicy(
+    return await fetchWithTransientRetry(
       (transportRecovery?: UpstreamSendRecovery) => fetchWithHeaderTimeout(
         request.url,
         applyUpstreamRecoveryInit({ method: "POST", headers: request.headers, body: request.body }, transportRecovery),
@@ -682,12 +692,9 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
       {
         abortSignal: upstream.signal,
         label: safeHostLabel(request.url),
-        ...(requestTransientPolicy
-          ? {
-            attempts: remaining,
-            onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); },
-          }
-          : {}),
+        modelRetryMode: true,
+        attempts: remaining,
+        onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); },
       },
     );
   };

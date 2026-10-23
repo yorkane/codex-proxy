@@ -507,8 +507,16 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             },
             // Cursor's retry ladder re-sends the WHOLE turn, so each attempt is a physical send
             // the enclosing request pays for. A meta without a budget -- every adapter unit test,
-            // and any caller predating this -- keeps the adapter's own three attempts (#4546).
-            incoming.sendBudget ? { sendBudget: incoming.sendBudget } : {},
+            // and any caller predating this -- keeps the transport's own unified-leaf budget
+            // (#4546). 统一模型请求 lane（fork 2026-10-23）：整轮重放的循环上限直接取统一
+            // 预算（有 sendBudget 时是它的精确 policy 总量，0 是硬拒；context-free 落
+            // env>config>地板 10 的 leaf），且每一发的记账、recovery 观测与 withheld
+            // 上报都转发到请求的共享通道——ladder 只有一条，绝不相乘。
+            {
+              ...(incoming.sendBudget ? { sendBudget: incoming.sendBudget } : {}),
+              ...(incoming.onPhysicalSend ? { onPhysicalSend: incoming.onPhysicalSend } : {}),
+              ...(incoming.onRecoveryWithheld ? { onRecoveryWithheld: incoming.onRecoveryWithheld } : {}),
+            },
           );
         };
 

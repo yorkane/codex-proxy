@@ -3027,6 +3027,7 @@ export const zhTW: Record<TKey, string> = {
   "logs.detail.protocol.none": "此請求沒有記錄路徑資料。",
   "logs.detail.source.user": "供應商設定的價格覆蓋",
   "logs.detail.attempt.recovery.transient5xx": "暫時性 5xx",
+  "logs.detail.attempt.recovery.modelErrorRetry": "模型錯誤重試 (4xx/5xx)",
   "logs.detail.attempt.recovery.connectionReset": "連線重設",
   "logs.detail.attempt.recovery.oauth401": "OAuth 重新驗證",
   "logs.detail.attempt.recovery.key429": "金鑰被限流 (429)",

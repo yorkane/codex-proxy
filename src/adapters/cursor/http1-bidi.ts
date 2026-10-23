@@ -105,10 +105,39 @@ export function encodeCursorBidiAppendRequest(
   return output;
 }
 
-function cursorHttp1Error(operation: "RunSSE" | "BidiAppend", status: number): Error {
-  return new Error(`Cursor HTTP/1.1 ${operation} failed with HTTP ${status || "unknown"}`);
+/**
+ * Attach the response evidence a retry layer is allowed to see to a Cursor HTTP/1 failure.
+ *
+ * `status` keeps the message-readable HTTP receipt (the unified lane's status regex stays
+ * compatible) and doubles as the structured field `upstreamHttpErrorStatus` reads first.
+ * `headers` is deliberately reduced to a sanitized `retry-after` only: the instruction is
+ * what the Retry-After lower-bound contract consumes, while authorization material and the
+ * rest of the upstream header set must never ride an error object into logs, diagnostics
+ * or the raw client. No header -> no field.
+ */
+function cursorHttp1Error(operation: "RunSSE" | "BidiAppend", status: number, headers?: Headers): Error {
+  const message = `Cursor HTTP/1.1 ${operation} failed with HTTP ${status || "unknown"}`;
+  // The status receipt is structured evidence on every failure, instruction or not: the
+  // unified lane reads the numeric field first, and attaching it only alongside a valid
+  // Retry-After would degrade the plain 503/429 case to message-regex recovery.
+  const error = Object.assign(new Error(message), { status }) as Error & {
+    status: number;
+    headers?: Headers;
+  };
+  const raw = headers?.get("retry-after")?.trim();
+  // 128 is the same client-facing header cap the shared validators apply; a longer
+  // value is not an instruction worth forwarding.
+  if (!raw || raw.length > 128) return error;
+  const seconds = Number(raw);
+  // Verbatim, lower-bound-preserving (root 2026-10-23): no floor - 1.5 stays 1.5s,
+  // never 1s sent 500ms early - and no local ceiling. A seven-day instruction belongs
+  // to the provider, not to us: callers honour it or end with the receipt intact, and
+  // dropping it here would hand the lane a default-2s early send.
+  const safe = Number.isFinite(seconds) && seconds >= 0 ? String(seconds)
+    : Number.isFinite(Date.parse(raw)) ? raw : undefined;
+  if (safe !== undefined) error.headers = new Headers({ "retry-after": safe });
+  return error;
 }
-
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -259,7 +288,7 @@ export class CursorHttp1BidiConnection {
     }));
     if (response.status !== 200) {
       void response.body?.cancel().catch(() => undefined);
-      throw cursorHttp1Error("RunSSE", response.status);
+      throw cursorHttp1Error("RunSSE", response.status, response.headers);
     }
     if (!response.body) throw new Error("Cursor HTTP/1.1 RunSSE returned no response body");
     // Cursor has accepted the request id once RunSSE returns successful headers. Do not race the
@@ -324,7 +353,7 @@ export class CursorHttp1BidiConnection {
       this.markCommitted();
       if (response.status !== 200) {
         void response.body?.cancel().catch(() => undefined);
-        throw cursorHttp1Error("BidiAppend", response.status);
+        throw cursorHttp1Error("BidiAppend", response.status, response.headers);
       }
       const result = await readBoundedResponseBytes(response, {
         maxBytes: CURSOR_HTTP1_APPEND_RESPONSE_MAX_BYTES,

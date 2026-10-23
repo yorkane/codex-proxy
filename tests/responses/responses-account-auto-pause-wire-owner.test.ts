@@ -23,6 +23,7 @@ import { handleResponses } from "../../src/server/responses/core";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
 
 const originalFetch = globalThis.fetch;
 let previousHome: string | undefined;
@@ -39,8 +40,10 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = home;
   releaseSpend = acquireOwnedSpendHome();
   clearGenericFailoverHealth(); clearKeyCooldowns(); forgetApiKeyRotationCursor();
+  immediateBackoff();
 });
 afterEach(async () => {
+  restoreImmediateBackoff();
   for (const remove of unregister.splice(0)) remove();
   await flushResponseState(); clearResponseStateForTests();
   releaseSpend();
@@ -109,12 +112,26 @@ for (const wire of ["Chat", "Messages"] as const) {
       const handler = wire === "Chat" ? handleChatCompletions : handleClaudeMessages;
       const response = await handler(request, config, { model: "fixture", provider: "fixture" });
       const body = await response.text();
-      expect(response.status, body).toBe(replaced ? 403 : 200);
-      expect(sent).toHaveLength(replaced ? 1 : 2);
+      // Unified model-request lane (2026-10-23 deferral contract): the refusal is retried on the
+      // SAME credential to the 11-send budget; the automatic pause commits at the request end,
+      // its provenance-accurate marker settles on the refusal whose queued commit tripped the
+      // threshold (with threshold 1: the first refusal - the tail refusal is never labelled
+      // retroactively), and the exhausted 11-send budget funds no in-request sibling rebuild:
+      // the refusal is served and the pause settles durably. A credential rewrite that breaks
+      // wire ownership pauses nothing: eleven sends, refusal served, no key disabled.
+      expect(response.status, body).toBe(403);
+      expect(sent).toHaveLength(11);
       expect(sent[0]!.url).toContain(`/v1/${endpoint}`);
-      expect(beforeRewrite).toEqual((replaced ? ["A"] : ["A", "B"]).map(id => wire === "Chat" ? `Bearer synthetic-${id}` : `synthetic-${id}`));
-      expect(sent[0]!.credential).toBe(wire === "Chat" ? `Bearer synthetic-${replaced ? "third" : "A"}` : `synthetic-${replaced ? "third" : "A"}`);
-      expect(wasAccountAutoPaused(sent[0]!.response)).toBe(!replaced);
+      expect(sent.map(entry => entry.credential)).toEqual((replaced
+        ? Array<string>(11).fill("synthetic-third")
+        : Array<string>(11).fill("synthetic-A")).map(credential =>
+          wire === "Chat" ? `Bearer ${credential}` : credential));
+      expect(beforeRewrite).toEqual((replaced
+        ? Array<string>(11).fill("synthetic-A")
+        : Array<string>(11).fill("synthetic-A")).map(credential =>
+          wire === "Chat" ? `Bearer ${credential}` : credential));
+      expect(wasAccountAutoPaused(sent[0]!.response)).toBe(!replaced); // the tripping refusal is marked
+      expect(wasAccountAutoPaused(sent[10]!.response)).toBe(false); // the tail is never retro-labelled
       if (replaced) {
         expect(wasAccountAutoPaused(response)).toBe(false);
         expectUnpaused(config);
@@ -199,7 +216,7 @@ describe("Responses handler translated Chat physical send ownership", () => {
   beforeEach(() => resetProviderRequestPacingForTest());
   afterEach(() => resetProviderRequestPacingForTest());
   for (const plugin of ["none", "identity", "credential replacement then unregister"] as const) {
-    test(`${plugin}: ${plugin === "credential replacement then unregister" ? "preserves refusal without pausing either key" : "pauses A and recovers with B"}`, async () => {
+    test(`${plugin}: ${plugin === "credential replacement then unregister" ? "masks only the first send; the unified ladder pauses A on the recovered ownership" : "pauses A and recovers with B"}`, async () => {
       const config = fixture("openai-chat");
       const rewrittenFrom: string[] = [];
       let removeRewriter: (() => void) | undefined;
@@ -230,18 +247,35 @@ describe("Responses handler translated Chat physical send ownership", () => {
         body: JSON.stringify({ model: "fixture/fixture", input: "synthetic", stream: false, store: false }),
       }), config, { model: "fixture", provider: "fixture" });
       const body = await response.text();
-      expect(response.status, body).toBe(replaced ? 403 : 200);
-      expect(sends.map(send => send.url)).toEqual(Array(replaced ? 1 : 2).fill("https://example.test/v1/chat/completions"));
+      // Deferral contract on the responses handler: 11 same-credential sends; the pause marker
+      // settles on the refusal whose queued commit tripped the threshold (threshold 1: the
+      // first), never retroactively on the tail; the exhausted budget funds no in-request
+      // sibling rebuild, so the refusal is served and the pause settles durably. A credential
+      // rewrite that breaks wire ownership pauses nothing: eleven sends, refusal.
+      expect(response.status, body).toBe(403);
+      expect(sends.map(send => send.url)).toEqual(Array(11).fill("https://example.test/v1/chat/completions"));
+      // 统一 lane（root 2026-10-23）：rewriter 在首发 in-flight 中注销——只有首发被改写，
+      // 后 10 送回到原始凭证。语义不变：wire 所有权断裂 → 不暂停、11 送、原拒绝交付。
       expect(sends.map(send => send.credential)).toEqual(replaced
-        ? ["Bearer synthetic-third"] : ["Bearer synthetic-A", "Bearer synthetic-B"]);
+        ? ["Bearer synthetic-third", ...Array<string>(10).fill("Bearer synthetic-A")]
+        : Array<string>(11).fill("Bearer synthetic-A"));
       expect(rewrittenFrom).toEqual(plugin === "none" ? []
-        : replaced ? ["Bearer synthetic-A"] : ["Bearer synthetic-A", "Bearer synthetic-B"]);
-      expect(wasAccountAutoPaused(sends[0]!.response)).toBe(!replaced);
+        : replaced ? ["Bearer synthetic-A"]
+          : Array<string>(11).fill("Bearer synthetic-A"));
+      expect(wasAccountAutoPaused(sends[0]!.response)).toBe(!replaced); // provenance: tripping refusal marked
+      expect(wasAccountAutoPaused(sends[10]!.response)).toBe(false); // tail never retro-labelled
       if (replaced) {
+        // 统一 lane（root 2026-10-23）：注销只遮蔽首发那一送；ladder 的第 2..11 送恢复
+        // 原生凭证、wire 所有权成立，永久 403 照常把 A 计到阈值——暂停落在 A，B 永不
+        // 被波及，原拒绝体交付。旧"11 送全改写 ⇒ 谁都不暂停"只在单发送时代成立。
         expect(body).toContain("Your subscription has expired.");
-        expectUnpaused(config);
+        const rows = loadConfig().providers.fixture!.apiKeyPool!;
+        expect(rows.find(row => row.id === "A")!.disabled).toBe(true);
+        const rowB = rows.find(row => row.id === "B")!;
+        expect(rowB.disabled).not.toBe(true);
+        expect(rowB.pauseDetails).toBeUndefined();
       } else {
-        expect(body).toContain("ok");
+        expect(body).toContain("Your subscription has expired.");
         expectPaused(config);
       }
     });
@@ -470,4 +504,3 @@ describe("auto-pause ownership on compressed native Responses sends", () => {
     });
   }
 });
-

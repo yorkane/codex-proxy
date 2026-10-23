@@ -215,6 +215,9 @@ const RECOVERY_KIND_CAUSE = {
   // The retried status set mixes 503, which declined, with 500, which may already have run the
   // turn. One kind cannot say both, so it says the weaker thing.
   "transient-5xx": "upstream-fault",
+  // 统一模型请求 lane（fork 2026-10-23）：预输出上游 4xx/5xx 的同目标重放。状态族从 400
+  // （origin 明确拒绝）跨到 5xx（可能已执行回合），与 transient-5xx 同理说较弱的话。
+  "model-error-retry": "upstream-fault",
   "connection-reset": "transport-ambiguous",
   "oauth-401": "credential-rejected",
   "oauth-account-403": "credential-rejected",

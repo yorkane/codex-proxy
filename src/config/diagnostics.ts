@@ -18,6 +18,7 @@ import { configReasoningPinsConfigError } from "./provider-validation";
 import { loopbackCompanionAllowed } from "../codex/loopback-target";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "../codex/upstream-host-health";
 import { EMPTY_COMPLETION_RETRY_MAX_LIMIT } from "../lib/empty-completion-budget";
+import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT } from "../lib/model-request-retry";
 import { MAX_APP_OWNED_MEMORY_BUDGET_MB, MIN_APP_OWNED_MEMORY_BUDGET_MB } from "../lib/app-owned-memory";
 import { isMissingPathError } from "./atomic-write";
 import { getConfigDir, getConfigPath } from "./paths";
@@ -535,6 +536,28 @@ function dropCodexSafetyBufferingError(value: unknown): string | null {
   return "schema_invalid: dropCodexSafetyBuffering: must be a boolean or omitted";
 }
 
+/**
+ * The unified model-request retry budget, validated as an integer in the accepted range.
+ *
+ * The requirement is a floor: every model request retries at least 10 times on a 4xx/5xx, so
+ * the persisted field only means anything inside 10-100. A hand edit with the wrong shape (a
+ * "25" string, a 1.5, a 0, a 999) must not load as a config the pipeline quietly widens: the
+ * operator believes they configured 0 and they get 10. It is rejected on write and degraded to
+ * absent on load (which the leaf resolves to the floor), so the field either means what it
+ * says or says nothing at all — the same pair as `emptyCompletionRetryMax`.
+ */
+function modelRequestMaxRetriesError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "modelRequestMaxRetries")) return null;
+  const retries = raw.modelRequestMaxRetries;
+  if (retries === undefined) return null;
+  if (typeof retries !== "number" || !Number.isInteger(retries)
+    || retries < DEFAULT_MODEL_REQUEST_MAX_RETRIES || retries > MODEL_REQUEST_MAX_RETRIES_LIMIT) {
+    return `schema_invalid: modelRequestMaxRetries: must be an integer from ${DEFAULT_MODEL_REQUEST_MAX_RETRIES} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}`;
+  }
+  return null;
+}
+
 function showCodexCreditsError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw || !Object.hasOwn(raw, "showCodexCredits")) return null;
@@ -780,6 +803,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? emptyCompletionRetryError(value)
     ?? emptyCompletionRetryMaxError(value)
     ?? dropCodexSafetyBufferingError(value)
+    ?? modelRequestMaxRetriesError(value)
     ?? oauthOpenBrowserError(value)
     ?? showCodexCreditsError(value)
     ?? creditCodexAccountIdsError(value)

@@ -10,22 +10,35 @@ import { clearAccountQuota, setAccountQuotaFromParsed } from "../../src/codex/qu
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexUpstreamHealth } from "../../src/codex/routing";
 import { clearUpstreamHostHealth } from "../../src/codex/upstream-host-health";
 import { handleResponsesCompact } from "../../src/server/responses/compact";
+import { markResponseNonReplayable } from "../../src/lib/upstream-retry";
 import {
   createRequestExecutionBudget,
   CODEX_TEXT_GUARDED_BUDGET_POLICY,
+  type RequestExecutionBudget,
   type RequestSendObserver,
 } from "../../src/lib/request-execution-budget";
 import { clearPoolRecoveryState } from "../../src/routing/probe-lease";
 import type { RequestLogContext } from "../../src/server/request-log";
+import type { RequestSpendTracker } from "../../src/server/responses/request-spend";
 import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
 
 /**
  * #6969 for native compact: a transient 5xx that survives the same-account ladder moves to one
  * alternate Pool account, as the regular Responses path does. Compact used to move only on 429/402.
  * The move is admitted under the alternate's identity, leaves the first answer intact when it is
  * refused, and records the first account once, as a transient failure.
+ *
+ * Unified model lane (fork): the ingress budget funds A's own ladder to the shared 11-send
+ * authority, so a steady overload consumes the whole request there and the alternate is never
+ * reached - that is the new contract, pinned below. The #6969 move shape stays proven through an
+ * EXACT caller budget (the guarded 3+1 profile): the lane respects the funded cap verbatim, A
+ * ladders 3, and B draws the single recovery reserve. A marked non-replayable 503 ends a ladder
+ * after one send, which is how the base-allowance move keeps an early-end mechanism (the model
+ * lane has no 60s Retry-After short-circuit: an instructed 600s is WAITED, cheaply via the
+ * fast-timer helper).
  */
 
 const WORK = "work";
@@ -53,6 +66,7 @@ function clearPoolState(): void {
 }
 
 beforeEach(() => {
+  immediateBackoff();
   savedProxyEnv = Object.fromEntries(PROXY_ENV_KEYS.map(key => [key, process.env[key]]));
   for (const key of PROXY_ENV_KEYS) delete process.env[key];
   previousHomes = HOME_KEYS.map(key => process.env[key]);
@@ -77,6 +91,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  restoreImmediateBackoff();
   releaseSpendHome?.();
   releaseSpendHome = undefined;
   globalThis.fetch = RealFetch;
@@ -107,6 +122,19 @@ const overloaded = (headers: Record<string, string> = {}): Answer => () => Respo
 );
 // A Retry-After past the wait ceiling ends the ladder after one send, leaving base sends for B.
 const overloadedOnce = overloaded({ "retry-after": "600" });
+// A gateway-settled post-send verdict: the model lane retries 400..599, and ONLY the
+// non-replayable marker ends a ladder early (no Retry-After ceiling short-circuit).
+const refusedOverload: Answer = () => {
+  const response = Response.json(
+    { error: { type: "server_error", code: "server_is_overloaded", message: "refused after send" } },
+    { status: 503 },
+  );
+  markResponseNonReplayable(response);
+  return response;
+};
+/** The exact guarded caller profile: A ladders 3, B draws the single reserve. */
+const narrowBudget = (): RequestExecutionBudget =>
+  createRequestExecutionBudget(CODEX_TEXT_GUARDED_BUDGET_POLICY);
 const compacted: Answer = () => Response.json({ id: "cmp_1", object: "response.compaction", output: [] });
 
 function poolConfig(extra: Partial<OcxConfig> = {}): OcxConfig {
@@ -153,18 +181,31 @@ function failures(accountId: string): number {
 }
 
 describe("native compact moves a surviving transient 5xx to one alternate account (#6969)", () => {
-  test("A's ladder, then B from the final recovery reserve, serves the compact", async () => {
-    upstream(overloaded(), overloaded(), overloaded(), compacted);
-    const { response } = await compact();
-    expect(response.status).toBe(200);
-    expect(sends).toEqual(["Bearer work-access", "Bearer work-access", "Bearer work-access", "Bearer other-access"]);
+  test("a steady overload consumes the shared 11-send authority on A and never moves", async () => {
+    // The unified contract: A's own ladder is funded to the request authority, so a pool that
+    // keeps refusing spends all eleven sends on the first account. B is not reached - the
+    // alternate move survives as an early-end shape (below), not as a fourth send.
+    // root 2026-10-23：合同钉"每送都被拒"，脚本必须 11 送全过载，不能第 4 送藏成功。
+    upstream(...Array.from({ length: 11 }, () => overloaded()), compacted);
+    const { response, body } = await compact();
+    expect(response.status).toBe(503);
+    expect(body).toContain("server_is_overloaded");
+    expect(sends).toHaveLength(11);
+    expect(sends.every(auth => auth === "Bearer work-access")).toBe(true);
     expect(failures(WORK)).toBe(1);
     expect(failures(OTHER)).toBe(0);
   });
 
   test("B served from the remaining base allowance when A's ladder ended early", async () => {
-    upstream(overloadedOnce, compacted);
-    const { response } = await compact();
+    // root 2026-10-23 裁决：non-replayable 的网关态永不触发兄弟腿（它是终态契约）。合法
+    // 的"早收场+兄弟接管"形态是显式窄预算：A 的 base 只有 1 送，用完后 B 从 final-recovery
+    // 储备获得第 2 送。上游脚本保持可重放的普通过载。
+    const baseEarlyBudget = (): RequestExecutionBudget => createRequestExecutionBudget({
+      maxTotalModelSends: 2, baseSendAllowance: 1, finalRecoveryAllowance: 1,
+      maxAlternateTargetSends: 1, maxTargetTransitions: 1,
+    });
+    upstream(overloaded(), compacted);
+    const { response } = await compact({ budget: baseEarlyBudget() });
     expect(response.status).toBe(200);
     expect(sends).toEqual(["Bearer work-access", "Bearer other-access"]);
     expect(failures(WORK)).toBe(1);
@@ -172,7 +213,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
 
   test("B failing too returns B's answer and records each account once", async () => {
     upstream(overloaded(), overloaded(), overloaded(), overloaded());
-    const { response, body } = await compact();
+    const { response, body } = await compact({ budget: narrowBudget() });
     expect(response.status).toBe(503);
     expect(body).toContain("server_is_overloaded");
     expect(sends).toHaveLength(4);
@@ -181,15 +222,19 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
   });
 
   test("a pinned account never moves", async () => {
-    upstream(overloaded(), overloaded(), overloaded(), compacted);
+    // 同 steady overload：钉"永不移出的账号独自烧满预算"，11 送必须全被拒。
+    upstream(...Array.from({ length: 11 }, () => overloaded()), compacted);
     const { response } = await compact({ config: poolConfig({ codexAccountNamespaces: { side: WORK } }), model: "side/gpt-5.5" });
     expect(response.status).toBe(503);
+    expect(sends).toHaveLength(11);
     expect(sends.every(auth => auth === "Bearer work-access")).toBe(true);
   });
 
   test("a 5xx whose body confirms quota keeps today's path and does not take the transient move", async () => {
     const quota: Answer = () => Response.json({ error: { message: "You have hit your usage limit." } }, { status: 503 });
     upstream(quota, quota, quota, compacted);
+    // 默认权威预算：quota 证据的 503 走今天的路径——兄弟腿被 quota 门否决，一次 B 发送
+    // 都没有（A 的统一阶梯在脚本第 4 送的成功体上结算）。
     await compact();
     expect(sends).not.toContain("Bearer other-access");
   });
@@ -221,7 +266,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
         return { seed: true } as never;
       },
     };
-    const budget = createRequestExecutionBudget(undefined, undefined, observer);
+    const budget = createRequestExecutionBudget(CODEX_TEXT_GUARDED_BUDGET_POLICY, undefined, observer);
     const { response } = await compact({ budget });
     expect(reserveStarted).toBe(true);
     expect(refunds).toBe(1);
@@ -235,7 +280,13 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
    * first account's own sends consume, so the alternate's send is admitted only if it is charged to
    * the alternate's identity; charged to the first account it would be refused and never sent.
    */
-  async function ledgerCompact(identityCap: number, ...answers: Answer[]) {
+  async function ledgerCompact(
+    identityCap: number,
+    ledgerBudget: RequestExecutionBudget | ((t: RequestSpendTracker) => RequestExecutionBudget) | undefined,
+    ...answers: Answer[]
+  ) {
+    // 调用方可覆盖预算：见下方 base-path 用例（root 2026-10-23：显式窄预算验证兄弟腿的
+    // 自有 identity 准入，不让默认 11 把 A 的第二物理发送先烧在 identity cap 上）。
     const { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } = await import("../../src/lib/spend-reservation-ledger");
     const { createRequestSpendTracker } = await import("../../src/server/responses/request-spend");
     const ledger = createSpendReservationLedger({ salt: "compact-6969", policy: {
@@ -245,7 +296,9 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
     const tracker = createRequestSpendTracker(logCtx, undefined, ledger);
     upstream(...answers);
     const config = poolConfig({ codexAccounts: [{ id: WORK, label: WORK, logLabel: "pa0a0a0" }, { id: OTHER, label: OTHER, logLabel: "pb0b0b0" }] } as Partial<OcxConfig>);
-    const result = await compact({ config, logCtx, budget: createRequestExecutionBudget(undefined, undefined, tracker) });
+    const budget = typeof ledgerBudget === "function" ? ledgerBudget(tracker) : ledgerBudget;
+    const result = await compact({ config, logCtx, budget: budget ?? createRequestExecutionBudget(CODEX_TEXT_GUARDED_BUDGET_POLICY, undefined, tracker) });
+    // compact() 已读干响应体，结算在此时落账；快照读取保持在 body drain 之后。
     const used = (label: string) => {
       const snapshot = ledger.snapshot("identity", label);
       return snapshot ? snapshot.reserved + snapshot.settled + snapshot.unresolved : 0;
@@ -254,7 +307,17 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
   }
 
   test("on the base path the alternate is admitted against its own identity balance", async () => {
-    const result = await ledgerCompact(1, overloadedOnce, compacted);
+    // root 2026-10-23：base-path 兄弟准入用显式窄预算 total2/base1/reserve1——A 只花 1 送
+    // （non-replayable 网关态终结阶梯），兄弟腿从 base 余量获得它的发送；identity cap 1
+    // 钉住"记账落在 B 自己的身份"这一验证点。默认 11 预算下 A 的第二物理发送会先在
+    // identity cap 上被拒，测的不是兄弟准入。
+    const basePathBudget = (t: RequestSpendTracker) => createRequestExecutionBudget({
+      maxTotalModelSends: 2, baseSendAllowance: 1, finalRecoveryAllowance: 1,
+      maxAlternateTargetSends: 1, maxTargetTransitions: 1,
+    }, undefined, t);
+    // A 的阶梯由 base=1 终结（预算余量，非 non-replayable 标记），兄弟腿从 reserve 获得
+    // 它的发送；B 的准入记在 B 自己的 identity 上（cap 1），A 只有 1。
+    const result = await ledgerCompact(1, basePathBudget, overloaded(), compacted);
     expect(result.response.status).toBe(200);
     expect(sends).toEqual(["Bearer work-access", "Bearer other-access"]);
     expect(result.first).toBe(1);
@@ -262,7 +325,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
   });
 
   test("on the reserve path the alternate is admitted against its own identity balance", async () => {
-    const result = await ledgerCompact(3, overloaded(), overloaded(), overloaded(), compacted);
+    const result = await ledgerCompact(3, undefined, overloaded(), overloaded(), overloaded(), compacted);
     expect(result.response.status).toBe(200);
     expect(sends.at(-1)).toBe("Bearer other-access");
     expect(result.first).toBe(3);
@@ -279,7 +342,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
       return original(ctx, ...rest);
     });
     try {
-      const { response, body } = await compact();
+      const { response, body } = await compact({ budget: narrowBudget() });
       expect(response.status).toBe(503);
       expect(body).toContain("server_is_overloaded");
       expect(sends.every(auth => auth === "Bearer work-access")).toBe(true);
@@ -296,7 +359,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
       abort.abort();
       throw new DOMException("The operation was aborted.", "AbortError");
     });
-    const { response } = await compact({ signal: abort.signal });
+    const { response } = await compact({ signal: abort.signal, budget: narrowBudget() });
     expect(response.status).toBe(499);
     expect(failures(WORK)).toBe(1);
   });

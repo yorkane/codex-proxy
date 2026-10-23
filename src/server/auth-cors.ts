@@ -1,4 +1,5 @@
 import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
+import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT, modelRequestMaxRetries } from "../lib/model-request-retry";
 import { contextTierRecordConfigError, modelCapabilitiesConfigError } from "../config/provider-validation";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
@@ -1346,6 +1347,13 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     // historical auto-open behavior.
     oauthOpenBrowser: config.oauthOpenBrowser !== false,
     showCodexCredits: config.showCodexCredits === true,
+    // The unified model-request retry budget: the effective value as this process resolves it
+    // (env > config > the 10-retry floor) beside what is persisted, so a read of the safe config
+    // reports the number the pipeline will use rather than a stale persisted figure.
+    modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
+    modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
+    modelRequestMaxRetriesMin: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+    modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
     providers,
   };
 }

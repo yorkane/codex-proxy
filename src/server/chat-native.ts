@@ -29,7 +29,6 @@ import { redactSecretString } from "../lib/redact";
 import { resolveClientRetryAfter } from "../lib/retry-after";
 import {
   applyUpstreamRecoveryInit,
-  fetchWithResetRetry,
   fetchWithTransientRetry,
   isNonReplayableResponse, isSameTargetRetryHold,
   isReplayRefusalCode,
@@ -39,7 +38,6 @@ import {
   REPLAY_REFUSED_STATUS,
   retainReplayRefusal,
   SendBudgetExhaustedError,
-  TRANSIENT_RETRY_MAX_ATTEMPTS,
   UpstreamRetryEvidenceError,
   type UpstreamSendRecovery,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
@@ -76,6 +74,8 @@ import {
   recordAttemptCredentialSource,
   type RequestLogContext,
 } from "./request-log";
+import { nativeModelAuthorityAttempts, nativeModelSendsRemaining } from "./native-model-retry";
+import { runModelRetryScope } from "../lib/model-retry-scope";
 import { chatResponseHasUndeclaredToolCalls, UNDECLARED_CHAT_TOOL_MESSAGE, jsonCompletionSse, nativeChatSse, structuredError, usageFromChat } from "./chat-native-sse";
 import { beginInferenceAttempt, type InferenceAttempt } from "./inference/attempt";
 import { createFinalRequestLog } from "./inference/final-log";
@@ -277,6 +277,17 @@ export async function runNativeChatAttempt(
   execution: NativeChatExecution,
   attemptHandle: InferenceAttempt,
 ): Promise<Response> {
+  // Unified model lane (fork): the whole logical attempt - ladder, 429 replay, key rotation
+  // and auto-pause moves - runs inside one model-retry scope, so an auto-pause verdict seen
+  // mid-ladder is committed at the outermost exit instead of truncating the send allowance
+  // this request still owns. Combo children inherit the scope (reentrant, flush once).
+  return runModelRetryScope(() => runNativeChatAttemptInner(execution, attemptHandle));
+}
+
+async function runNativeChatAttemptInner(
+  execution: NativeChatExecution,
+  attemptHandle: InferenceAttempt,
+): Promise<Response> {
   const { req, config, logCtx, logIds, route, requestedModel, requestedStream, translatorBudget, finishLog } = execution;
   const { sendBudget } = execution;
   const clientDeclaredEmptyToolCatalog = Array.isArray(execution.chatBody.tools) && execution.chatBody.tools.length === 0;
@@ -337,7 +348,7 @@ export async function runNativeChatAttempt(
   let activeProvider: OcxProviderConfig = resolveMistralTransport(route.provider);
   stampApiKeyAccountLabel(logCtx, route.providerName, activeProvider);
   const spendTracker = sendBudget ? undefined : attachRequestSpendTracker(req, logCtx);
-  const physicalBudget = sendBudget ?? createInferenceSendBudget(req, logCtx);
+  const physicalBudget = sendBudget ?? createInferenceSendBudget(req, logCtx, config.modelRequestMaxRetries);
   let activeAdapter: ProviderAdapter = createOpenAIChatAdapter(activeProvider);
   let activeRequest: AdapterRequest;
   const replayScope = nativeChatReplayScope(req.headers);
@@ -383,14 +394,17 @@ export async function runNativeChatAttempt(
     return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
-  // One inbound request owns one transient send allowance. Capture the policy before any
-  // key rotation so recovery cannot replace the ceiling along with the active credential.
+  // One inbound request owns ONE unified model-request send allowance (fork): real upstream
+  // HTTP 4xx/5xx all retry inside one shared budget (>= 10 retries = 11 sends; env
+  // OCX_MODEL_REQUEST_MAX_RETRIES > config > default). Capture the policy before any key
+  // rotation so recovery cannot replace the ceiling along with the active credential; a
+  // provider-configured attempts value may only RAISE the floor, never lower it.
   const requestTransientPolicy = transientRetryPolicyFor(activeProvider);
   let transientSendsUsed = 0;
   // A Combo child's initial send is prepaid, not exempt from the shared ceiling. Only its
   // owning permit exposes that one booking in addition to the still-unspent allowance, and only
   // until this child's first physical send has started and settled the booking.
-  const sharedSendCap = requestTransientPolicy?.attempts ?? TRANSIENT_RETRY_MAX_ATTEMPTS;
+  const sharedSendCap = nativeModelAuthorityAttempts(physicalBudget);
   let physicalSends = 0;
   let initialSendStarted = false;
   const remainingSharedSends = (): number => {
@@ -399,9 +413,7 @@ export async function runNativeChatAttempt(
     return Math.min(sharedSendCap, remaining + (!initialSendStarted && execution.comboDispatchPermit ? 1 : 0));
   };
   const remainingTransientSends = (): number => Math.min(
-    requestTransientPolicy
-      ? Math.max(0, requestTransientPolicy.attempts - transientSendsUsed)
-      : Number.POSITIVE_INFINITY,
+    nativeModelSendsRemaining(physicalBudget, transientSendsUsed, requestTransientPolicy?.attempts),
     remainingSharedSends(),
   );
   const transientSendAvailable = (): boolean => remainingTransientSends() > 0;
@@ -454,13 +466,10 @@ export async function runNativeChatAttempt(
     singleShot = false,
   ): Promise<Response> => {
     try {
-      // #2643: opted-in key-auth openai-chat providers retry pre-stream transient statuses on
-      // the native chat lane too; everyone else keeps reset-only semantics.
+      // Unified model lane (fork): every native Chat send runs the shared 4xx/5xx retry
+      // budget through fetchWithTransientRetry(modelRetryMode); no reset-only branch left.
       const remaining = remainingTransientSends();
-      if (sendBudget && remaining <= 0) throw new SendBudgetExhaustedError(safeHostLabel(request.url));
-      if (requestTransientPolicy && remaining <= 0) {
-        throw new Error("native Chat transient send budget exhausted before recovery dispatch");
-      }
+      if (remaining <= 0) throw new SendBudgetExhaustedError(safeHostLabel(request.url));
       const dispatch = (transportRecovery?: UpstreamSendRecovery) => {
         const effectiveRecovery = transportRecovery
           ?? (recovery === "connection-reset" ? "connection-reset" : undefined);
@@ -564,18 +573,14 @@ export async function runNativeChatAttempt(
       // helper would let that helper spend sends the operator allowance never granted, which is
       // the duplicated inference the allowance exists to bound.
       if (singleShot) return await dispatch("connection-reset");
-      const fetchWithPolicy = requestTransientPolicy ? fetchWithTransientRetry : fetchWithResetRetry;
-      return await fetchWithPolicy(
+      return await fetchWithTransientRetry(
         dispatch,
         {
           abortSignal: upstream.signal,
           label: safeHostLabel(request.url),
-          ...(requestTransientPolicy
-            ? {
-              attempts: remaining,
-              onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); },
-            }
-            : {}),
+          modelRetryMode: true,
+          attempts: remaining,
+          onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); },
         },
       );
     } finally {

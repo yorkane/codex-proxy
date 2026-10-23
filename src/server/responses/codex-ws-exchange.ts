@@ -4,7 +4,8 @@ import { markNativeControlResponse } from "./native-response-control";
 import type { NativeResponseControl } from "./native-response-control";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { isSafeResponseHeader } from "../safe-response-headers";
-import { isOverloadRetryCode, overloadRetryAfterHeader } from "../../lib/overload-retry-advice";
+import { overloadRetryAfterHeader } from "../../lib/overload-retry-advice";
+import { parseRetryAfterFromMessage } from "../../lib/retry-delay";
 import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
@@ -30,10 +31,18 @@ interface ExchangeOptions {
   /** Bun version string the caller gated on; stamped onto the stage record. */
   bunVersion?: string;
   /**
-   * Opt-in (#6969): how long empty lifecycle frames may be held so an authoritative upstream
-   * refusal that follows them, before any output, can settle as a replayable gateway status instead
-   * of a committed 200. Absent or zero keeps the exchange exactly as it was. Ignored on native
-   * control exchanges and on transports without the metadata channel.
+   * Opt-in (#6969, extended by the 2026-10-23 unified model-request lane): how long empty
+   * lifecycle frames may be held so an authoritative upstream refusal that follows them, before
+   * any output, can settle as a replayable gateway status instead of a committed 200. The gate is
+   * every structured 400..599 refusal, quota identities included. Absent or zero keeps the
+   * exchange exactly as it was. Ignored on native control exchanges and on transports without the
+   * metadata channel. Native-control boundary (root ruling 2026-10-23, deliberate): a steering or
+   * injection channel owns a multi-response session whose attach/continuation state mutates
+   * before this gate is consulted, so a mid-turn refusal after `response.created` cannot be
+   * replayed as one whole turn without breaking channel ownership - it keeps today's in-body
+   * terminal. The pre-commit refused-create 4xx projection is unaffected and still runs under
+   * native control. Extending the hold to native-control turns needs a protocol redesign, not
+   * this flag.
    */
   preOutputRefusalHold?: CodexWsPreOutputRefusalHold;
 }
@@ -85,8 +94,10 @@ function rejectionHeaders(source: Record<string, unknown>, prelude: Headers): He
  * responses_websocket.rs accepts status/status_code and scalar header values;
  * unlike its native client, this relay converts only precommit 4xx. Returning a
  * post-send 5xx or fetch rejection could cause the outer retry wrapper to resend.
- * The one 5xx exception is the opt-in pre-output refusal below (#6969): a structured upstream
- * refusal with nothing relayed but empty lifecycle frames, which the caller may replay.
+ * The exception is the opt-in pre-output refusal below (#6969, extended by the 2026-10-23
+ * unified model-request lane to every structured 400..599 refusal, 5xx and 4xx alike): a
+ * structured upstream refusal with nothing relayed but empty lifecycle frames, which the caller
+ * may replay.
  */
 function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Headers): Response | null {
   if (payload.type !== "error" || payload.stream_id !== undefined) return null;
@@ -102,6 +113,22 @@ function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Hea
   return new Response(JSON.stringify({
     error: error ?? { type: "upstream_error", message: "Upstream rejected the request" },
   }), { status, headers });
+}
+
+/**
+ * `Retry-After` 候选的秒数下界（标量 string/number 都收）：数字形态（含小数，向上取整）
+ * 先按 delta-seconds 解析——小数串绝不能进 `Date.parse`（'1.5' 会被解释成一个过去的日期，
+ * 把 1.5s 的下界截成 0 再抬成 1s，缩短上游指令）；数字解析失败才试 HTTP-date，date 形态
+ * 向上取整到秒；负数与两者皆解析不出的形态返回 undefined（视为未声明）。
+ */
+function retryAfterSeconds(value: unknown): number | undefined {
+  const raw = typeof value === "string" ? value.trim()
+    : typeof value === "number" && Number.isFinite(value) ? String(value) : undefined;
+  if (raw === undefined || raw === "") return undefined;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) return numeric >= 0 ? Math.ceil(numeric) : undefined;
+  const dateMs = Date.parse(raw);
+  return Number.isFinite(dateMs) ? Math.max(0, Math.ceil((dateMs - Date.now()) / 1000)) : undefined;
 }
 
 /** The client-facing error of a pre-output refusal projection, from the refusal's own error object. */
@@ -308,13 +335,32 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const source = payload.type === "error"
         ? payload.error
         : record(payload.response) ? payload.response.error : undefined;
-      // 过载投影补 Retry-After：投影是网关状态 + JSON 体，客户端在 HTTP 路径读响应头。帧体
-      // 自带建议时 rejectionHeaders 已把顶层 headers 的 retry-after 投影进来（安全头白名单允许），
-      // 这里只在缺失时补齐，幂等。只加在发往客户端的投影上，不回写上游 Response。
-      if (status === 503 && !headers.has("retry-after")
-        && record(source) && isOverloadRetryCode(source.code)) {
-        headers.set("retry-after", overloadRetryAfterHeader());
+      // 投影统一携带 Retry-After 下界（2026-10-23 统一模型请求 lane，与 SSE helper 同口径）：
+      // 所有合法候选都收进 max，完整下界永不缩短、不被 60s 默认截断——帧顶层 headers 的
+      // retry-after 经 rejectionHeaders 投影后会**覆盖** prelude 里更长的那个（顶层 2 压掉
+      // prelude 60），所以 prelude 原值必须单独收一次；终态 error 对象自带 headers.retry-after
+      // （response.failed.error.headers 是常见落点，rejectionHeaders 不读嵌套层）也在这里补齐；
+      // 文案里的显式时长（try again in Ns / retry-after: N / resets in N）同样是候选。
+      // 全缺失时用 OCX_OVERLOAD_RETRY_AFTER_SEC（默认 2s）补齐，让下游重试阶梯总能读到
+      // 可执行的等待指令。只加在发往客户端的投影上，不回写上游 Response。
+      const advice: number[] = [];
+      for (const candidate of [prelude.get("retry-after"), headers.get("retry-after")]) {
+        const seconds = retryAfterSeconds(candidate);
+        if (seconds !== undefined) advice.push(seconds);
       }
+      if (record(source) && record(source.headers)) {
+        for (const [name, value] of Object.entries(source.headers)) {
+          if (name.toLowerCase() !== "retry-after") continue;
+          const seconds = retryAfterSeconds(value);
+          if (seconds !== undefined) advice.push(seconds);
+        }
+      }
+      const hint = record(source) && typeof source.message === "string"
+        ? parseRetryAfterFromMessage(source.message) : undefined;
+      if (hint !== undefined) advice.push(hint);
+      headers.set("retry-after", advice.length > 0
+        ? String(Math.max(1, ...advice))
+        : overloadRetryAfterHeader());
       const projection = new Response(JSON.stringify({ error: refusalErrorBody(source) }), { status, headers });
       markCodexWsPreludeProjection(projection);
       markCodexWsStage(projection, stage);
@@ -630,8 +676,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         // Correlation must run first: a reused socket's foreign-stream error settles as a
         // non-replayable 502 above, never as the refused-create 4xx projection below, which
         // is the one status family that could authorize an account replay.
-        // Only before anything was held: after an empty preamble a 4xx frame keeps today's
-        // in-body delivery, so a held 429 can never become a quota rotation it was not before.
+        // Only before anything was held, so the first Responses event keeps the exact
+        // refused-create shape. After an empty preamble a 4xx frame projects through the
+        // refusal gate below (2026-10-23 unified model-request lane: quota identities no longer
+        // veto), and a frame that gate rejects keeps today's in-body delivery.
         if (metadata && sent && !responseCommitted && !deferredCommit && type === "error") {
           let rejection: Response | null;
           try { rejection = wrappedRejectionResponse(normalized.payload, metadata.snapshot()); }

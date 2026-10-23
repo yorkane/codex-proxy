@@ -16,6 +16,7 @@ import { setCodexAccountPaused } from "../../src/codex/account-pause";
 import { configSchema } from "../../src/config/schema/config-schema";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
 
 const orgMessage = "OAuth authentication is currently not allowed for this organization";
 const payload = (message = orgMessage, type = "permission_error") => ({ error: { type, message } });
@@ -258,12 +259,22 @@ test("Antigravity normalization retains permanent refusal and auto-pause ownersh
   const provider = routedProviderConfig("fixture", config.providers.fixture!);
   const headers = { authorization: `Bearer ${provider.apiKey}` };
   const observe = captureAccountAutoPauseAttempt("fixture", provider, { config }, new Headers(headers))!;
+  const delays: number[] = [];
+  immediateBackoff(delays);
+  const refusals: Response[] = [];
+  // The Google adapter runs its own unified-lane ladder (no deferral scope at this seam):
+  // the immediate pause settles on the first refusal, the ladder keeps retrying the real 403
+  // to the 11-send budget, and the normalized terminal inherits the permanent-refusal marker.
   const response = await fetchGoogleWithRetry("Antigravity", { url: "https://example.test", method: "POST", headers, body: "{}" }, {
-    executor: (async () => observe(refusal())) as typeof fetch,
-  });
+    executor: (async () => { const r = await observe(refusal()); refusals.push(r); return r; }) as typeof fetch,
+  }, );
   expect(response.status).toBe(403);
-  expect(wasAccountAutoPaused(response)).toBe(true);
+  expect(refusals.length).toBe(11);
+  expect(wasAccountAutoPaused(refusals[0]!)).toBe(true);
   expect(wasPermanentAccountRefusal(response)).toBe(true);
+  // The unified lane scheduled a real backoff per round; the seam spy recorded ten of them.
+  expect(delays.length).toBe(10);
+  restoreImmediateBackoff();
 });
 
 test("a stale pre-resume response cannot erase the resumed account's refusal streak", async () => {

@@ -5,6 +5,7 @@ import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
 import type { ResponsesSidecarAuth } from "./request-sidecar-auth";
 import type { ResponsesSendBudget } from "./request-send-budget";
+import { transientSendCapFor } from "./request-send-budget";
 import type { AdapterExchange } from "./adapter-dispatch";
 import type { OcxParsedRequest, AdapterEvent } from "../../types";
 import type { AttemptRecoveryKind } from "../../usage/log";
@@ -26,7 +27,6 @@ import {
 } from "../../providers/key-failover";
 import {
   fetchWithTransientRetry,
-  fetchWithResetRetry,
   applyUpstreamRecoveryInit,
   isNonReplayableResponse, isSameTargetRetryHold,
   prepareSameTarget429Wait,
@@ -114,6 +114,7 @@ export function createAdapterContinuations(
     | "reserveCredentialHop"
     | "pendingHopPermit"
     | "sendBudgetExhausted"
+    | "requestModelSendLimit"
   >,
   adapterExchange: Pick<
     AdapterExchange,
@@ -264,12 +265,12 @@ export function createAdapterContinuations(
             }));
           } finally { producer?.close(); }
         }
-        // Same #1851 scope guard as the initial send: transient-5xx retry only for direct
-        // Google AI Studio; every other adapter keeps reset-only semantics here.
+        // 统一模型请求 lane（fork 2026-10-23 用户裁决）：终态守卫 continuation 是同一逻辑
+        // 请求的一条 leg，与初始发送共享同一预算与状态门：真实上游 400..599 全重试。
+        // cap 权威 = requestModelSendLimit（provider 配置只可抬升），物理总量由共享 ledger
+        // remainingTransientSendBudget 相交；legacy google 门与 reset-only 豁免取消。
         const continuationTransientPolicy = transientRetryPolicyFor(route.provider);
-        const fetchContinuationWithRetryPolicy = (route.provider.adapter === "google" || continuationTransientPolicy)
-          ? fetchWithTransientRetry
-          : fetchWithResetRetry;
+        const fetchContinuationWithRetryPolicy = fetchWithTransientRetry;
         return await fetchContinuationWithRetryPolicy(
           recovery => {
             sendBudgetState.adapterSendBudget?.startRequest?.({
@@ -299,12 +300,10 @@ export function createAdapterContinuations(
             // Same request-scoped budget as the initial send and the 429/rotation refetches:
             // a terminal-guard continuation is another leg of ONE request, so handing it a
             // fresh `attempts` would let one request exceed the configured total-send ceiling.
-            ...(continuationTransientPolicy || sendBudgetState.adapterSendBudget?.spendEnforced
-              ? {
-                attempts: remainingTransientSendBudget(continuationTransientPolicy?.attempts ?? 1),
-                onSendsConsumed: transientSendReporter(),
-              }
-              : {}),
+              modelRetryMode: true,
+              attempts: remainingTransientSendBudget(transientSendCapFor(
+                continuationTransientPolicy?.attempts, 0, sendBudgetState.requestModelSendLimit)),
+              onSendsConsumed: transientSendReporter(),
           },
           );
       } finally {

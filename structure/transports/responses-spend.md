@@ -272,7 +272,17 @@ and allocate no new scope keys. Already-started sends remain booked even during 
 
 `src/lib/request-execution-budget.ts` shares a physical-start counter across derived budgets and
 freezes the finite positive limit L when the request starts. The default guarded limit is four;
-the initial bounded OAuth request profile allows at most eighteen.
+the initial bounded OAuth request profile allows at most eighteen. 统一模型请求 lane 改写的
+是 ingress 的 fund 而不是这个默认常量：`createInferenceSendBudget` 铸造时直接把
+`maxTotalModelSends = baseSendAllowance` 抬到权威 attempts（`src/lib/model-request-retry.ts`：
+env `OCX_MODEL_REQUEST_MAX_RETRIES` > `config.modelRequestMaxRetries` > 10 次重试 + 首发 = 11，
+地板 10、上限 100，env 可抬到 101），第 11 送不要求 reserve-funded 类；显式 caller 预算与
+fixture 的 4/3 精确性不受影响。`expandInferenceOAuthSendBudget` 的 roster 抬升钳在该权威额
+之内（4×3=12 顶不破 11），Combo 派生 policy 的总额同样 = 权威 attempts（绝对数，不再是
+3+hops+reserve 随目标数放大）。权威读取与 leg 询问经 `request-send-budget.ts` 的
+`requestModelSendLimit`（预算自身 policy 的 LIVE 值，0 是精确的 0）传给
+`transientSendCapFor` 第三参数，调用点不重复读 env/config。合同正文见
+[unified model request retry](model-request-retry.md)。
 `createPhysicalSendReporter` owns selected-seed start receipts, reports only claimed sends and
 closes its producer after reconciliation. Adapter permits claim once at their physical boundary; their executor span keeps the start
 rebindable until OAuth selection reaches the wire, then reports and closes it. Zed completion

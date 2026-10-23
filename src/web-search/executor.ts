@@ -3,14 +3,8 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { sidecarEnter } from "../lib/sidecar-tracker";
-import {
-  applyUpstreamRecoveryInit,
-  fetchWithResetRetry,
-  releaseResponseBodyBestEffort,
-  retryBackoffDelayMs,
-  sleepWithAbort,
-  RETRY_AFTER_CEILING_MS,
-} from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { withUpstreamHttpVersion } from "../lib/upstream-http-version";
 import { parseSidecarSSE, type WebSearchResult } from "./parse";
 import type { CodexUpstreamOutcome } from "../codex/routing";
@@ -21,6 +15,13 @@ export interface SidecarSettings {
   model: string;
   reasoning: string;
   timeoutMs: number;
+  /**
+   * 统一模型重试预算的全局配置值（`config.modelRequestMaxRetries`）。调用方从自己的配置
+   * 带入，env `OCX_MODEL_REQUEST_MAX_RETRIES` 在 leaf 内压过它，地板 10、上限 100。缺省
+   * （plan 未带）解析为默认 10 次重试 + 首发 = 11。sidecar 的 `timeoutMs` 是显式用户预算：
+   * 统一预算超它会以真实错误（最后一个上游响应）收尾，不伪装成功。
+   */
+  modelRequestMaxRetries?: number;
   /** Effective Desktop authless compatibility does not grant auxiliary model use. */
   reserveCompatibility?: boolean;
   /**
@@ -43,25 +44,6 @@ export const IMAGE_INSTRUCTION =
 
 /** A search result, or an `error` string when the search couldn't run (surfaced as a tool result). */
 export type SidecarOutcome = WebSearchResult & { error?: string };
-
-/**
- * Bounded same-search 429 replays for the sidecar POST.
- *
- * The forward backend throttles burst sidecar traffic, and without a replay the 429 becomes a
- * failed tool result that poisons the query for the whole turn (see failedQueries in loop.ts).
- * 1 initial send + 2 replays, counted as physical sends: connection-reset recovery inside each
- * send draws from the same SIDECAR_MAX_SENDS budget, so the two layers cannot multiply into nine
- * paid requests during a degraded period. Retry-After is honored as a lower bound and capped by
- * RETRY_AFTER_CEILING_MS and the remaining sidecar deadline (an instruction past either
- * ends with the 429 instead of parking the search). Each wait releases the unread 429 body first so sockets do not
- * accumulate under a rate-limit storm. The release itself may take up to a second, so a
- * deadline landing during release or backoff ends with the 429 already in hand rather than
- * a timeout; a caller abort still ends the wait through the shared catch, exactly like an
- * abort during the SSE parse. An exhausted budget likewise ends with the 429 in hand.
- */
-const SIDECAR_MAX_SENDS = 3;
-const SIDECAR_429_BASE_DELAY_MS = 1_000;
-const SIDECAR_429_MAX_DELAY_MS = 10_000;
 
 export type SidecarOutcomeRecorder = (outcome: CodexUpstreamOutcome) => void;
 
@@ -109,10 +91,14 @@ export async function runWebSearch(
   const linkedSignal = signalWithTimeout(settings.timeoutMs, abortSignal);
   const sidecarExit = sidecarEnter("web-search");
   try {
-    // One physical-send budget for the whole search. Each helper call receives only what is left
-    // and reports every send it makes, reset retries included.
-    let sendsLeft = SIDECAR_MAX_SENDS;
-    const sendOnce = () => fetchWithResetRetry(
+      // 统一模型合同（2026-10-23）：一次 sidecar 模型调用 = 一份请求 body，全部真实上游 HTTP
+      // 4xx/5xx 走 model lane 的单一共享发送预算（env > settings 配置 > 地板 10 次重试），
+      // transient 与 connection-reset 两层共享同一总额、不相乘。旧的「reset 3 + 429 独立 3」
+      // 双层预算由 helper 的单一 attempts 取代。Retry-After 作为完整下限受显式 sidecar
+      // timeoutMs 约束（retryAfterCeilingMs = 剩余预算：超预算的指令以真实的 429/5xx 收尾，
+      // 不伪 429/200）；caller abort 全程停止。旧的预重试 429 body 释放由 helper 的
+      // cancel-before-retry 承担。
+      const res = await fetchSidecarModel(
       // Recovery nests INSIDE the version helper: applyUpstreamRecoveryInit then always receives a
       // defined init, and withUpstreamHttpVersion spreads the result, so `protocol` and the
       // recovery fields (`connection: close` + Bun's transport-level `keepalive: false`) survive
@@ -130,41 +116,14 @@ export async function runWebSearch(
           redirect: "manual",
         }, recovery), forwardProvider));
       },
-      {
-        replaySafe: true,
-        abortSignal: linkedSignal.signal,
-        label: "web-search-sidecar",
-        attempts: sendsLeft,
-        onSendsConsumed: sends => { sendsLeft -= sends; },
-      },
+        {
+          abortSignal: linkedSignal.signal,
+          label: "web-search-sidecar",
+          configuredRetries: settings.modelRequestMaxRetries,
+          targetKey: () => url,
+          retryAfterCeilingMs: settings.timeoutMs - (Date.now() - t0),
+        },
     );
-    let res = await sendOnce();
-    // Checked before the 429 body is released: a budget found spent after the release could only
-    // end in a send-budget error, recorded as a connection failure instead of the quota evidence.
-    for (let attempt = 0; res.status === 429 && sendsLeft > 0; attempt++) {
-      const delay = retryBackoffDelayMs(attempt, {
-        baseDelayMs: SIDECAR_429_BASE_DELAY_MS,
-        maxDelayMs: SIDECAR_429_MAX_DELAY_MS,
-        headers: res.headers,
-        retryAfterIsLowerBound: true,
-      });
-      // A deadline, not a clamp: an instruction past the ceiling ends the search with the
-      // 429 instead of parking it at a provider that already said it would refuse.
-      if (delay > RETRY_AFTER_CEILING_MS || delay >= settings.timeoutMs - (Date.now() - t0)) break;
-      console.warn(`[web-search] sidecar HTTP 429 — retrying (send ${SIDECAR_MAX_SENDS - sendsLeft + 1}/${SIDECAR_MAX_SENDS}) after ${delay}ms`);
-      try {
-        await releaseResponseBodyBestEffort(res.body, linkedSignal.signal);
-        await sleepWithAbort(delay, linkedSignal.signal);
-      } catch (e) {
-        // The release above may consume up to 1s, so the sidecar deadline can land during
-        // cleanup or mid-backoff — before the replay is dispatched. The observed 429 is
-        // already in hand: end with it rather than laundering it into a timeout. A caller
-        // abort (or a non-deadline throw) still propagates to the shared catch below.
-        if (!linkedSignal.signal.aborted || linkedSignal.signal.reason === abortSignal?.reason) throw e;
-        break;
-      }
-      res = await sendOnce();
-    }
     // Attach the body guard before ANY branch reads it. The success path guarded itself below,
     // but the failure branch's `res.text()` runs first, so a cancel landing between fetch
     // resolution and reader attach orphaned the internal rejection (found investigating #1419).

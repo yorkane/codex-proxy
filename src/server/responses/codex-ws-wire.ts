@@ -1,12 +1,11 @@
 import { normalizeResponsesIncompleteReason } from "../../responses/incomplete-reason";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import {
-  isTransientUpstreamStatus,
   markResponseNonReplayable,
   UPSTREAM_CLOSED_BEFORE_RESPONSE_CODE,
   UPSTREAM_NO_RESPONSE_CODE,
 } from "../../lib/upstream-retry";
-import { isRateLimitOrQuotaFailureMessage, recognizedUpstreamError } from "../../lib/errors";
+import { isTerminalRefusalCode, recognizedUpstreamError } from "../../lib/errors";
 import type { RequestFailureCause, RequestFailureStage } from "../../lib/request-failure-model";
 import { packageVersion } from "../../lib/package-version";
 import { registerProviderResponseProvenance } from "../../providers/request-pacing";
@@ -208,12 +207,76 @@ export function isEmptyCodexWsLifecycleEvent(payload: Record<string, unknown>): 
   return plainRecord(payload.response) && emptyOutput(payload.response);
 }
 
-const QUOTA_REFUSAL_IDENTITIES: ReadonlySet<string> = new Set(["usage_limit_reached", "usage_not_included"]);
+/**
+ * 声明状态的三态判决（fork 扩展，与 SSE helper 的 statedStatus 同口径）：
+ * `number` 是一个被一致声明的 400..599 整数；`"conflict"` 是矛盾/畸形/越界的声明——
+ * 这是「证据互相打架」，绝不回落到结构类映射去凑一个状态（那会把 status:400+status_code:500
+ * 的矛盾帧重放成 503）；`undefined` 是压根没声明，可以回落。`conflict` 的帧按今日形态
+ * 在已提交 body 里交付，与不投影完全同形。
+ */
+type DeclaredStatus = number | "conflict" | undefined;
 
-/** Quota and rate-limit identities keep their own routing: every `rate_limit*` and `*quota*` name. */
-function quotaRefusalIdentity(value: string): boolean {
-  const name = value.toLowerCase();
-  return QUOTA_REFUSAL_IDENTITIES.has(name) || name.startsWith("rate_limit") || name.includes("quota");
+/** 一个声明值的归一：3 位数字串视同整数；非整数数字与其余形态都是 conflict。 */
+function declaredStatusValue(value: unknown): DeclaredStatus {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" && /^\d{3}$/.test(value.trim())) return Number(value.trim());
+  if (typeof value !== "number" || !Number.isInteger(value)) return "conflict";
+  return value;
+}
+
+/**
+ * 合并一组声明状态：全部一致且落在 400..599 才返回数字；任何一个矛盾形态、字段间不一致
+ * 或越界（含 <400 与 >599）都是 conflict。空集合返回 undefined。
+ */
+function combineDeclaredStatuses(values: unknown[]): DeclaredStatus {
+  const stated: number[] = [];
+  for (const value of values) {
+    const status = declaredStatusValue(value);
+    if (status === "conflict") return "conflict";
+    if (status !== undefined) stated.push(status);
+  }
+  if (stated.length === 0) return undefined;
+  if (stated.some(value => value !== stated[0])) return "conflict";
+  const status = stated[0]!;
+  return status >= 400 && status <= 599 ? status : "conflict";
+}
+
+/**
+ * `response.failed` 快照的 lifecycle `status` 字段：常态是 "failed" 这类词。只有数字或
+ * 3 位数字串才是声明的 HTTP 状态，其余一律当不存在（lifecycle 词既不是声明，也不是矛盾）。
+ */
+function snapshotDeclaredStatus(status: unknown): unknown {
+  if (typeof status === "number") return status;
+  if (typeof status === "string" && /^\d{3}$/.test(status.trim())) return status;
+  return undefined;
+}
+
+/**
+ * 归一化后的容量整句匹配集（fork 扩展 #6969 → 全 4xx/5xx，与 SSE helper 对齐并补全现场
+ * 两种终结标点）。无码无声明状态的终态帧只认这几句整句（去首尾空白、小写、去尾部句点，
+ * 句中句点保留），映射 503；文案永远只加状态、不否决任何已声明状态。
+ */
+const CAPACITY_SENTENCES: ReadonlySet<string> = new Set([
+  "selected model is at capacity",
+  "selected model is at capacity. please try a different model",
+  "the selected model is at capacity",
+  "the selected model is at capacity. please try a different model",
+  "selected model is at capacity. please try again later",
+  "the selected model is at capacity. please try again later",
+  "selected model is at capacity, please try again later",
+  "the selected model is at capacity, please try again later",
+]);
+
+// 策略拒绝码的权威表在 `src/lib/errors.ts` 的 `isTerminalRefusalCode`（cyber_policy /
+// misalignment_policy_violation / invalid_prompt / bio_policy）：SSE 投影同用它，两 wire 行为
+// 不分叉。判定顺序与 SSE helper 一致：声明状态（冲突即弃）> recognizedUpstreamError >
+// 拒绝码→400 > 整句容量文案→503 > 放弃。`retryable: false` 不否决；上游声明的数字 status
+// 优先于码（invalid_prompt + status:403 投影 403）。本地 guard 制造的拒绝不产生上游终态帧，
+// 永远不走本函数。
+
+/** 整句容量文案的归一：去首尾空白、去尾部句点、小写。逐字匹配，不做子串。 */
+function capacitySentence(value: string): boolean {
+  return CAPACITY_SENTENCES.has(value.trim().toLowerCase().replace(/\.+$/, ""));
 }
 
 /**
@@ -222,41 +285,82 @@ function quotaRefusalIdentity(value: string): boolean {
  *
  * Only structured evidence counts: a bare `error` frame's single wrapper status (the alias the
  * native client turns into an HTTP error of that status, see {@link codexWsWrapperStatus}), or,
- * with no wrapper alias at all, the recognized overload class; and a `response.failed` with an
- * empty output whose error is the recognized overload class. The status must be a transient
- * gateway status. Message wording never authorizes anything here; it can only veto, so a 5xx whose
- * error names quota or a rate limit keeps the routing it has today.
+ * with no wrapper alias at all, a status declared inside the error object, and only then the
+ * recognized class mapping; a `response.failed` with an empty output combines the frame status,
+ * the snapshot's numeric `status` and the error's declared status the same way. A conflicting,
+ * malformed or out-of-range declaration ("conflict") is a refusal of nothing: it never falls back
+ * to the class mapping and is delivered in the committed body exactly as before.
+ *
+ * Fork contract (2026-10-23 user ruling, the unified model-request retry lane): any real upstream
+ * refusal in 400..599 counts, not only the transient-gateway subset, and quota identities never
+ * veto — a 429 with a rate-limit code, a usage_limit_reached, an overload phrase and the bare
+ * "Selected model is at capacity" sentence (no code) all project. An upstream `retryable: false`
+ * or `x-should-retry: false` hint is not an input here and exempts nothing: the retry budget is
+ * the operator's, not the upstream's.
  */
 export function codexWsPreOutputRefusalStatus(payload: Record<string, unknown>): number | undefined {
   if (payload.stream_id !== undefined) return undefined;
   let error: unknown;
-  let status: number | undefined;
+  let declared: DeclaredStatus;
   if (payload.type === "error") {
     error = payload.error;
     if (error !== undefined && !plainRecord(error)) return undefined;
     const statedAlias = Object.hasOwn(payload, "status") || Object.hasOwn(payload, "status_code");
-    status = codexWsWrapperStatus(payload);
+    const wrapper = codexWsWrapperStatus(payload);
     // A malformed or doubled alias is not evidence of anything.
-    if (statedAlias && status === undefined) return undefined;
-    if (status === undefined && plainRecord(error)) status = recognizedUpstreamError(error)?.httpStatus;
+    if (statedAlias && wrapper === undefined) return undefined;
+    const nested = plainRecord(error)
+      ? combineDeclaredStatuses([error.status, error.status_code])
+      : undefined;
+    if (nested === "conflict") return undefined;
+    // 顶层包装 alias 与 error 内声明同时存在时必须一致：400 与 503 打架就是矛盾证据。
+    if (wrapper !== undefined && nested !== undefined && nested !== wrapper) return undefined;
+    declared = wrapper !== undefined
+      ? wrapper >= 400 && wrapper <= 599 ? wrapper : "conflict"
+      : nested;
+    if (declared === undefined && plainRecord(error)) {
+      // 无包装 alias 且 error 内部无声明：结构类映射，与 SSE 同序。
+      const recognized = recognizedUpstreamError(error)?.httpStatus;
+      declared = recognized === undefined ? undefined : recognized >= 400 && recognized <= 599 ? recognized : "conflict";
+    }
   } else if (payload.type === "response.failed") {
     const response = payload.response;
     if (!plainRecord(response) || !emptyOutput(response)) return undefined;
     error = response.error;
     if (!plainRecord(error)) return undefined;
-    status = recognizedUpstreamError(error)?.httpStatus;
+    declared = combineDeclaredStatuses([
+      payload.status,
+      payload.status_code,
+      snapshotDeclaredStatus(response.status),
+      error.status,
+      error.status_code,
+    ]);
+    if (declared === "conflict") return undefined;
+    if (declared === undefined) {
+      const recognized = recognizedUpstreamError(error)?.httpStatus;
+      declared = recognized === undefined ? undefined : recognized >= 400 && recognized <= 599 ? recognized : "conflict";
+    }
+    if (declared === "conflict") return undefined;
   } else {
     return undefined;
   }
-  if (status === undefined || !isTransientUpstreamStatus(status)) return undefined;
-  if (plainRecord(error)) {
-    const { code, type, message } = error;
-    if ([code, type, message].some(value => value != null && typeof value !== "string")) return undefined;
-    if (typeof code === "string" && quotaRefusalIdentity(code)) return undefined;
-    if (typeof type === "string" && quotaRefusalIdentity(type)) return undefined;
-    if (typeof message === "string" && isRateLimitOrQuotaFailureMessage(message)) return undefined;
+  if (declared === undefined) {
+    // 无声明状态的终态：先认策略码白名单（精确四码，映射 400），再认整句容量文案（映射 503）。
+    const code = plainRecord(error) && typeof error.code === "string" ? error.code
+      : typeof payload.code === "string" ? payload.code : undefined;
+    if (isTerminalRefusalCode(code)) return 400;
+    const message = plainRecord(error) && typeof error.message === "string" ? error.message
+      : typeof payload.message === "string" ? payload.message : undefined;
+    if (message !== undefined && capacitySentence(message)) return 503;
+    return undefined;
   }
-  return status;
+  // 矛盾声明不是任何拒绝：与 SSE 同口径直接放弃投影，帧在已提交 body 里原样交付。
+  if (declared === "conflict") return undefined;
+  // Quota identities no longer veto (统一模型请求 lane)；字段形态仍需是字符串。
+  if (plainRecord(error)) {
+    if ([error.code, error.type, error.message].some(value => value != null && typeof value !== "string")) return undefined;
+  }
+  return declared;
 }
 
 /**

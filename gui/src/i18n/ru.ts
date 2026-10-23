@@ -1183,6 +1183,7 @@ export const ru: Record<TKey, string> = {
   "logs.detail.attempt.completed": "Завершено",
   "logs.detail.attempt.e2eNote": "Общий tok/s — сквозной показатель; для каждой попытки используется её собственная длительность.",
   "logs.detail.attempt.recovery.transient5xx": "Временная ошибка 5xx",
+  "logs.detail.attempt.recovery.modelErrorRetry": "Повтор при ошибке модели (4xx/5xx)",
   "logs.detail.attempt.recovery.connectionReset": "Соединение сброшено",
   "logs.detail.attempt.recovery.oauth401": "Повторная авторизация OAuth",
   "logs.detail.attempt.recovery.key429": "Ключ ограничен (429)",

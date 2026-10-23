@@ -38,6 +38,7 @@ describe("the Responses passthrough lane reads the provider transient policy", (
       + "const transientSendAttempts = (): number => transientSendCapFor(\n"
       + "  transientSendPolicy()?.attempts,\n"
       + "  sendBudgetState.targetSendsUsed,\n"
+      + "  sendBudgetState.requestModelSendLimit,\n"
       + ");",
     ));
   });
@@ -105,32 +106,42 @@ function sendBudgetFor(budget: ReturnType<typeof createRequestExecutionBudget>) 
  * amplification (#4546).
  */
 describe("a configured ladder is bounded by the request budget", () => {
-  test("an absent policy resolves to the constant, unchanged at every send count", () => {
+  test("an absent policy resolves to the unified authority, reduced by sends used", () => {
+    // root design 2026-10-23: the model lane floors every leg at the unified authority
+    // (modelRequestMaxAttempts: env OCX_MODEL_REQUEST_MAX_RETRIES > config > 10 retries +
+    // first send = 11). An absent provider policy no longer resolves to the old constant 3;
+    // it resolves to 11 - used, and the request ledger remains the absolute bound.
     for (const used of [0, 1, 2, 3, 9]) {
-      expect(transientSendCapFor(undefined, used)).toBe(TRANSIENT_RETRY_MAX_ATTEMPTS);
+      expect(transientSendCapFor(undefined, used)).toBe(11 - used);
     }
   });
 
-  test("a configured total is measured against what the request already sent", () => {
-    expect(transientSendCapFor(1, 0)).toBe(1);
-    // The whole total is spent, so no later leg may dispatch. Passing the configured value
-    // straight through would answer 1 here and fund a second upstream send.
-    expect(transientSendCapFor(1, 1)).toBe(0);
-    expect(transientSendCapFor(5, 2)).toBe(3);
-    expect(transientSendCapFor(5, 9)).toBe(0);
+  test("an exact authority total is measured against what the request already sent", () => {
+    // root design 2026-10-23: a provider row alone can no longer narrow the lane below the
+    // floor (see the floor rows). Exact per-request totals live in the third argument -- the
+    // caller's own authority (its ledger's policy total) -- and keep the subtraction contract:
+    // an exact one-send request that already sent once may not dispatch a later leg.
+    expect(transientSendCapFor(1, 0, 1)).toBe(1);
+    expect(transientSendCapFor(1, 1, 1)).toBe(0);
+    expect(transientSendCapFor(5, 2, 5)).toBe(3);
+    expect(transientSendCapFor(5, 9, 5)).toBe(0);
   });
 
-  test("a lower configured value ends the ladder the constant would have continued", () => {
+  test("a lower configured value cannot end the ladder the floor continues", () => {
+    // root design 2026-10-23 inverts this row's old shape: `attempts: 1` no longer ends the
+    // request at one send -- the unified floor (11) wins over a provider row that asks for
+    // less, and exhaustion follows the shared ledger. The same request is fundable at one
+    // send and refuses only when its ledger allowance is spent.
     const budget = createRequestExecutionBudget();
     const state = sendBudgetFor(budget);
 
     expect(state.sendBudgetExhausted(transientSendCapFor(1, state.sendsUsed))).toBe(false);
     budget.used = 1;
-    // Configured `attempts: 1`: one send is the whole request, so no recovery leg may dispatch.
+    // A configured `attempts: 1` cannot make the request exhausted at one send.
+    expect(state.sendBudgetExhausted(transientSendCapFor(1, state.sendsUsed))).toBe(false);
+    // The ledger is the bound: with the guarded caller's three base sends spent, it is.
+    budget.used = 3;
     expect(state.sendBudgetExhausted(transientSendCapFor(1, state.sendsUsed))).toBe(true);
-    // At the constant the same request still looks fundable, which is the behaviour the reporter
-    // measured as "three sends whatever I configure".
-    expect(state.sendBudgetExhausted(transientSendCapFor(undefined, state.sendsUsed))).toBe(false);
   });
 
   test("a higher configured value does not lift the request-wide allowance", () => {
@@ -141,8 +152,9 @@ describe("a configured ladder is bounded by the request budget", () => {
     expect(state.remainingTransientSendBudget(transientSendCapFor(10, state.sendsUsed))).toBe(3);
     budget.used = 2;
     expect(state.remainingTransientSendBudget(transientSendCapFor(10, state.sendsUsed))).toBe(1);
-    // And a narrower configured value still wins over the remaining allowance.
-    expect(state.remainingTransientSendBudget(transientSendCapFor(2, state.sendsUsed))).toBe(0);
+    // A narrower configured value no longer wins: the floor lifts its cap to 11, and the
+    // ledger's own remainder (3 base - 2 used = 1) is what bounds the send.
+    expect(state.remainingTransientSendBudget(transientSendCapFor(2, state.sendsUsed))).toBe(1);
   });
 
   test("a configured one-send total cannot draw the final recovery reserve", () => {
@@ -150,7 +162,9 @@ describe("a configured ladder is bounded by the request budget", () => {
     const state = sendBudgetFor(budget);
 
     state.noteTransientSends(1);
-    const cap = transientSendCapFor(1, state.sendsUsed);
+    // An exact one-send authority (third argument, not a provider row) spends the request:
+    // root design 2026-10-23 keeps exact caller totals exact; only provider rows are floored.
+    const cap = transientSendCapFor(1, state.sendsUsed, 1);
     expect(cap).toBe(0);
 
     // Compose the real rebuild allowance rather than checking only the exhaustion predicate.

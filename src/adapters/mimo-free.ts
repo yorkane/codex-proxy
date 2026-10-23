@@ -6,8 +6,7 @@ import { recordOwnedConfigPath } from "../lib/config-ownership";
 import type { OcxProviderConfig, OcxParsedRequest } from "../types";
 import { createOpenAIChatAdapter } from "./openai-chat";
 import type { ProviderAdapter, AdapterRequest, IncomingMeta } from "./base";
-import { createAdapterPhysicalSend } from "./physical-send";
-import { SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { fetchModelHttpResponseWithRetry } from "./model-http-retry";
 
 const BOOTSTRAP_URL = "https://api.xiaomimimo.com/api/free-ai/bootstrap";
 export const MIMO_CHAT_URL = "https://api.xiaomimimo.com/api/free-ai/openai/chat";
@@ -269,49 +268,45 @@ export function createMimoFreeAdapter(provider: OcxProviderConfig): ProviderAdap
     },
 
     async fetchResponse(request: AdapterRequest, ctx): Promise<Response> {
-      const send = createAdapterPhysicalSend(ctx);
-      const response = await send({ url: request.url, dispatch: executor => executor(request.url, {
-        method: request.method,
-        redirect: "manual",
-        headers: request.headers as Record<string, string>,
-        body: request.body,
-        signal: ctx?.abortSignal,
-      }) });
-
-      // Retry predicate: 401 (expired/invalid JWT) retries ONCE with a fresh token.
-      // 403 is NOT retried — Xiaomi uses it for anti-abuse "Illegal access" and there is
-      // no documented token-expiry signature that would mark a 403 as retryable.
-      if (response.status === 401) {
-        let retryHeaders = request.headers;
+      // 统一模型重试 lane：任何上游 4xx/5xx 在共享发送预算内重试（默认 11 发，env 可配）。
+      // 每轮恰一次模型物理发送；401 的 JWT 刷新是支持流量（bootstrap 不占模型账本），刷新
+      // 成功只改写外层 activeHeaders，由下一轮统一 lane 带新票重发——间歇性 401 在票有效时
+      // 能走到第 2..11 轮，而不是每轮都从旧票重新开始。403 曾是反滥用终态；统一 4xx/599 lane
+      // 现在按运维合同把它当普通模型错误重试，in-round 恢复每轮至多布防一次。
+      // Headers 实例而非 spread 记录：set() 按大小写不敏感收敛到唯一 key。spread 里
+      // { ...headers(小写 authorization), "Authorization": fresh } 会留两个 casing 的键，
+      // fetch 的 Headers 构造按 append 语义合并成 "Bearer stale, Bearer fresh" 组合票。
+      const activeHeaders = new Headers(request.headers);
+      let refreshArmed = true;
+      return fetchModelHttpResponseWithRetry(async (send, lane) => {
+        const response = await send({ url: request.url, dispatch: executor => executor(request.url, {
+          method: request.method,
+          redirect: "manual",
+          headers: activeHeaders,
+          body: request.body,
+          signal: ctx?.abortSignal,
+        }) });
+        if (response.ok) return response;
+        // 非 2xx 交还**原响应**：lane 决定重试时才取消它，终态返回时 body 完好；
+        // 401 判定只读状态码，不消费 body。
+        // Retry predicate: 401 (expired/invalid JWT) refreshes ONCE per round and replays on the
+        // next round with the fresh token. 403 keeps no dedicated path any more (see above).
+        if (response.status !== 401 || !refreshArmed) return response;
+        refreshArmed = false;
+        // The refresh spends one of the unified sends (the next round), so it is only armed while
+        // the ledger still has a send to spend; a refused refresh keeps this round's answer.
+        if (lane.sendsRemaining() <= 0) return response;
         try {
-          return await send({ url: request.url, sendClass: "auth-recovery", recovery: "oauth-401",
-            beforeDispatch: async () => {
-              // Drain the first response body and refresh the JWT only after admission: a
-              // refused replay still returns THIS response to the caller, body intact.
-              // Draining comes first within the block because getMimoJwt issues its own
-              // network call and may throw, and the 401 body would then never be released.
-              try { void response.body?.cancel().catch(() => {}); } catch { /* already consumed */ }
-              resetMimoJwtCache();
-              const freshJwt = await getMimoJwt(ctx?.abortSignal);
-              retryHeaders = {
-                ...(request.headers as Record<string, string>),
-                "Authorization": `Bearer ${freshJwt}`,
-              };
-            },
-            dispatch: executor => executor(request.url, {
-              method: request.method,
-              redirect: "manual",
-              headers: retryHeaders,
-              body: request.body,
-              signal: ctx?.abortSignal,
-            }) });
-        } catch (error) {
-          if (error instanceof SendBudgetExhaustedError) return response;
-          throw error;
+          resetMimoJwtCache();
+          const freshJwt = await getMimoJwt(ctx?.abortSignal);
+          activeHeaders.set("Authorization", `Bearer ${freshJwt}`);
+        } catch {
+          // Bootstrap 失败不是 HTTP 模型错误：交还本轮真实 401（body 完好），lane 继续按预算
+          // 用当前票重试。
+          return response;
         }
-      }
-
-      return response;
+        return response;
+      }, ctx ?? {}, { label: "mimo-free" });
     },
   };
 }

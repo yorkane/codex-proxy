@@ -14,7 +14,8 @@
  *
  * Never throws; every error string passes redactSecretString and scrubs the literal key.
  */
-import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
@@ -36,6 +37,11 @@ export async function runOllamaWebSearch(
   endpoint: string,
   timeoutMs: number,
   abortSignal?: AbortSignal,
+  /**
+   * 统一模型重试预算的全局配置值（`config.modelRequestMaxRetries`），由桥/alpha 调用方从
+   * context.settings 填入；env 在 leaf 内压过它，地板 10。缺省解析为默认 10 次重试 + 首发。
+   */
+  configuredRetries?: number,
 ): Promise<SidecarOutcome> {
   if (!apiKey) {
     return { text: "", sources: [], error: "ollama web-search backend selected without a provider apiKey" };
@@ -48,7 +54,7 @@ export async function runOllamaWebSearch(
   const sidecarExit = sidecarEnter("web-search");
   const startedAt = Date.now();
   try {
-    const res = await fetchWithResetRetry(
+    const res = await fetchSidecarModel(
       recovery => fetch(endpoint, applyUpstreamRecoveryInit({
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
@@ -57,7 +63,9 @@ export async function runOllamaWebSearch(
         // Bun forwards custom headers across redirects, so a redirect would leak the key.
         redirect: "manual",
       }, recovery)),
-      { replaySafe: true, abortSignal: linkedSignal.signal, label: "ollama-web-search-bridge" },
+      // 统一模型合同（2026-10-23）：Ollama web bridge 由模型生成回答，是模型调用；独立
+      // sidecar 无共享账本，预算见 sidecar-model-retry；POST 不声明 replaySafe。
+      { abortSignal: linkedSignal.signal, label: "ollama-web-search-bridge", configuredRetries, targetKey: () => endpoint, retryAfterCeilingMs: timeoutMs - (Date.now() - startedAt) },
     );
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     try {
@@ -124,4 +132,3 @@ export function mapOllamaSearchResponse(payload: unknown): SidecarOutcome {
   if (lines.length === 0) return { text: "", sources: [], error: "ollama web-search returned no results" };
   return { text: `Search results:\n${lines.join("\n")}`, sources };
 }
-

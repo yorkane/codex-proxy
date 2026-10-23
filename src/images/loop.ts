@@ -26,7 +26,8 @@ import { bridgeToResponsesSSE } from "../bridge";
 import { isTerminalRefusalIncomplete } from "../bridge/terminal-refusal";
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait, isNonReplayableResponse, isSameTargetRetryHold, SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit, prepareSameTarget429Wait, isNonReplayableResponse, isSameTargetRetryHold, SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import { releaseProviderRequestSlot, RequestPacingQueueOverloadError, sendTrackingRequestSlot, type ProviderRequestSlot } from "../providers/request-pacing";
 import {
@@ -675,7 +676,7 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
               releaseProviderRequestSlot(slot);
             }
           } else {
-            response = await fetchWithResetRetry(
+            response = await fetchSidecarModel(
               async (retryRecovery) => {
                 const slot = await paceThenResetHeaderDeadline();
                 try {
@@ -699,7 +700,8 @@ export async function runWithImageBridge(deps: ImageBridgeDeps): Promise<Respons
                   releaseProviderRequestSlot(slot);
                 }
               },
-              { replaySafe: true, abortSignal: headerDeadline.signal, label: "image-bridge-loop" },
+              // 统一模型合同（2026-10-23）：与 web-search loop 同一接线，见 loop.ts 注释。
+              { abortSignal: headerDeadline.signal, label: "image-bridge-loop", sendBudget: deps.incomingMeta.sendBudget, targetKey: () => request.url },
             );
           }
         } finally {

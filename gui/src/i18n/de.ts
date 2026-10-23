@@ -1166,6 +1166,7 @@ export const de: Record<TKey, string> = {
   "logs.detail.attempt.completed": "Abgeschlossen",
   "logs.detail.attempt.e2eNote": "Tok/s auf oberster Ebene ist Ende-zu-Ende; jeder Versuch nutzt seine eigene Dauer.",
   "logs.detail.attempt.recovery.transient5xx": "Vorübergehender 5xx-Fehler",
+  "logs.detail.attempt.recovery.modelErrorRetry": "Wiederholung bei Modellfehler (4xx/5xx)",
   "logs.detail.attempt.recovery.connectionReset": "Verbindung zurückgesetzt",
   "logs.detail.attempt.recovery.oauth401": "OAuth-Neuanmeldung",
   "logs.detail.attempt.recovery.key429": "Schlüssel ratenbegrenzt (429)",

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DEFAULT_SUBAGENT_MODELS, SUBAGENT_MODELS_VERSION } from "./subagent-models";
 import { MULTI_AGENT_SURFACE_ADVISORY_VERSION } from "./multi-agent-surface";
 import { DEFAULT_APP_OWNED_MEMORY_BUDGET_BYTES } from "../lib/app-owned-memory";
+import { DEFAULT_MODEL_REQUEST_MAX_RETRIES } from "../lib/model-request-retry";
 import { describeProxyForLog, readWindowsSystemProxy, type WindowsProxyRegistryReader } from "../lib/windows-system-proxy";
 import { readMacOSSystemProxy, type MacOSProxyReader, type MacOSSystemProxyResult } from "./macos-system-proxy";
 import { OPENAI_PROVIDER_TIER_VERSION, type OcxConfig } from "../types";
@@ -44,6 +45,10 @@ export function getDefaultConfig(): OcxConfig {
     port: 10100,
     emptyCompletionRetry: false,
     dropCodexSafetyBuffering: false,
+    // The unified model-request retry budget: every model request that fails with a 4xx/5xx
+    // retries at least this many times. Written explicitly (the floor value) so a fresh install
+    // records the mandated minimum on disk instead of leaving it to be inferred.
+    modelRequestMaxRetries: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
     fastRows: true,
     managementUsageMaxReadBytes: 64 * 1024 * 1024,
     appOwnedMemoryBudgetMb: DEFAULT_APP_OWNED_MEMORY_BUDGET_BYTES / (1024 * 1024),

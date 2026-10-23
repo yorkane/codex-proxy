@@ -102,12 +102,10 @@ import {
   readCodexAccountRecord,
 } from "../../codex/account-store";
 import {
-  fetchWithResetRetry,
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
   isNonReplayableResponse,
   SendBudgetExhaustedError,
-  TRANSIENT_RETRY_MAX_ATTEMPTS,
   type UpstreamSendRecovery,
 } from "../../lib/upstream-retry";
 import {
@@ -168,6 +166,8 @@ import {
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
 import { hasKeyPoolFailover, rotateProviderTransportOn429, selectProactiveApiKeyTransport, transientRetryPolicyFor } from "../../providers/key-failover";
 import { transientSendCapFor } from "./request-send-budget";
+import { nativeModelAuthorityAttempts, nativeModelSendsRemaining } from "../native-model-retry";
+import { runModelRetryScope } from "../../lib/model-retry-scope";
 import { distributedKeyPhysicalFetch, recordDistributedResponseFailure } from "../../providers/api-key-response-ownership";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../../providers/api-key-selection";
 import { stampApiKeyAccountLabel } from "../../providers/label";
@@ -656,6 +656,24 @@ export async function handleResponsesCompact(
   admission?: DataPlaneAdmission,
   options: HandleResponsesCompactOptions = {},
 ): Promise<Response> {
+  // Unified model lane (fork): compact IS a model request, so the whole logical compact -
+  // same-account ladder, 401 replay, quota and transient alternates, the routed fallback -
+  // runs inside ONE model-retry scope. An auto-pause verdict observed mid-ladder commits
+  // at the outermost exit, where it can no longer truncate the send allowance this request
+  // still owns, and one logical request gets one deferred commit.
+  return runModelRetryScope(() => handleResponsesCompactInner(
+    req, config, logCtx, turnAdmissionLease, admission, options,
+  ));
+}
+
+async function handleResponsesCompactInner(
+  req: Request,
+  config: OcxConfig,
+  logCtx: RequestLogContext,
+  turnAdmissionLease?: AdmissionLease,
+  admission?: DataPlaneAdmission,
+  options: HandleResponsesCompactOptions = {},
+): Promise<Response> {
   let body: unknown;
   try {
     body = await readJsonRequestBody(req, undefined, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
@@ -832,7 +850,7 @@ export async function handleResponsesCompact(
   // failure that hands off, continues here. The routed turn used to call handleResponses with
   // no budget at all, so `handleResponsesInner` minted a fresh four after the native attempt
   // had already spent some of the first one.
-  const sendBudget: RequestExecutionBudget = options.sendBudget ?? createInferenceSendBudget(req, logCtx);
+  const sendBudget: RequestExecutionBudget = options.sendBudget ?? createInferenceSendBudget(req, logCtx, config.modelRequestMaxRetries);
   // A manual override onto another backend must not mint ciphertext the conversation model cannot replay.
   const manualOverrideCrossesProvider = options.compactionRoutingOverride
     ? !compactionRoutingKeepsProviderIdentity(config, options.compactionRoutingOverride, route)
@@ -1093,7 +1111,7 @@ export async function handleResponsesCompact(
     const sendSingleCompactAttempt = async (
       doFetch: () => Promise<Response>,
     ): Promise<Response> => {
-      if (sendBudget.remainingBaseSends(TRANSIENT_RETRY_MAX_ATTEMPTS) > 0) {
+      if (nativeModelSendsRemaining(sendBudget, sendBudget.used) > 0) {
         const report = createPhysicalSendReporter(sendBudget, () => ({ poolId: logCtx.spendPoolId ?? route.providerName,
           identityId: logCtx.accountLogLabel }));
         let started = false;
@@ -1227,13 +1245,18 @@ export async function handleResponsesCompact(
       });
       return recovery === "single"
         ? sendSingleCompactAttempt(doFetch)
+        // Unified model lane (fork): compact IS a model request, so its ladder runs the
+        // shared 4xx/5xx gate (modelRetryMode) with the request-wide authority cap; a
+        // provider-configured attempts value may only raise the floor. Every send of
+        // every leg (this ladder, the 401 replay, the 429/402 alternate) draws the SAME
+        // budget through the reporter, so one logical compact has one 11-send ceiling.
         : fetchWithTransientRetry(doFetch, {
           abortSignal: req.signal,
           label: safeHostLabel(compactUrl),
-          // Key-auth policy is a logical-request total; canonical forward keeps its default
-          // ladder. Both intersect the same shared base remainder as ordinary Responses.
+          modelRetryMode: true,
           attempts: sendBudget.remainingBaseSends(transientSendCapFor(
             transientRetryPolicyFor(sendProvider)?.attempts, sendBudget.used,
+            nativeModelAuthorityAttempts(sendBudget),
           )),
           onSendsConsumed: createPhysicalSendReporter(sendBudget, () => ({ poolId: logCtx.spendPoolId ?? route.providerName,
             identityId: logCtx.accountLogLabel })),

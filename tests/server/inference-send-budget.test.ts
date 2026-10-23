@@ -50,9 +50,11 @@ describe("createInferenceSendBudget", () => {
     } finally { dispose(); }
   });
 
-  test("the last helper-driven account gets its prepaid send plus remaining retries", async () => {
+  test("the last helper-driven account spends its prepaid hop plus the unified remainder", async () => {
+    // 统一合同：总额 11 是唯一权威，roster 数不再抬高它。已花 9 送的请求，末段账号的
+    // prepaid hop + 阶梯只剩 2 送（旧合同是 3 送到 12）；耗尽后返回最后一次真实 503，
+    // 任何后续 reserve 被拒。
     const budget = createInferenceSendBudget(new Request("http://localhost/v1/responses"), { model: "m", provider: "p" });
-    expandInferenceOAuthSendBudget(budget, 4);
     const { owner, dispose } = budgetOwner(budget);
     try {
       owner.noteTransientSends(9);
@@ -63,11 +65,12 @@ describe("createInferenceSendBudget", () => {
       const response = await fetchWithTransientRetry(async () => {
         if (sends === 0) hop.permit?.use();
         sends++;
-        return new Response("", { status: sends === 3 ? 200 : 503 });
+        return new Response("", { status: 503 });
       }, { attempts: allowance.attempts, onSendsConsumed: owner.transientSendReporter(allowance.permit) });
-      expect(response.status).toBe(200);
-      expect(sends).toBe(3);
-      expect(budget.used).toBe(12);
+      expect(allowance.attempts).toBe(2);
+      expect(response.status).toBe(503);
+      expect(sends).toBe(2);
+      expect(budget.used).toBe(11);
       expect(budget.reserveDispatch({ sendClass: "auth-recovery", targetKey: "provider|model|oauth-429" }).allowed).toBe(false);
     } finally { dispose(); }
   });
@@ -152,11 +155,18 @@ describe("createInferenceSendBudget", () => {
       expect(budget.used).toBe(2);
     } finally { dispose(); }
   });
-  test("mints a default-policy holder and parks this request's spend tracker on the log", () => {
+  test("mints a unified-authority holder and parks this request's spend tracker on the log", () => {
     const logCtx: RequestLogContext = { model: "m", provider: "p" };
     const req = new Request("http://localhost/v1/responses", { method: "POST" });
     const budget = createInferenceSendBudget(req, logCtx);
-    expect(budget.policy).toEqual(CODEX_TEXT_GUARDED_BUDGET_POLICY);
+    // 统一模型请求合同：ingress 自有预算 mint 时直接 fund 权威额（默认 11 = 10 次重试 +
+    // 首发），base 与 total 相等（第 11 送不要求 reserve-funded 类）；reserve/alternate/
+    // transition 保持 guarded 形态。
+    expect(budget.policy).toEqual({
+      ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
+      maxTotalModelSends: 11,
+      baseSendAllowance: 11,
+    });
     expect(typeof budget.logicalRequestId).toBe("string");
     expect(budget.used).toBe(0);
     expect(logCtx.spendTracker).toBeDefined();
@@ -170,7 +180,7 @@ describe("createInferenceSendBudget", () => {
     expect(a.logicalRequestId).not.toBe(b.logicalRequestId);
   });
 
-  test("roster expansion is bounded and does not change another request or explicit scopes", () => {
+  test("roster expansion is clamped by the unified authority and leaves other scopes alone", () => {
     const req = new Request("http://localhost/v1/responses");
     const budget = createInferenceSendBudget(req, { model: "m", provider: "p" });
     const other = createInferenceSendBudget(req, { model: "m", provider: "p" });
@@ -179,15 +189,20 @@ describe("createInferenceSendBudget", () => {
     expandInferenceOAuthSendBudget(budget, 4);
     expandInferenceOAuthSendBudget(exact, 4);
     expandInferenceOAuthSendBudget(child, 4);
-    expect(budget.policy.baseSendAllowance).toBe(4 * TRANSIENT_RETRY_MAX_ATTEMPTS);
-    expect(budget.policy.maxTotalModelSends).toBe(4 * TRANSIENT_RETRY_MAX_ATTEMPTS);
-    for (const unexpanded of [other, exact, child]) {
-      expect(unexpanded.policy).toEqual(CODEX_TEXT_GUARDED_BUDGET_POLICY);
-    }
+    // 统一合同：4 账号 × 3 的旧抬升 (12) 被权威 11 钳住——总额是一个权威数字，不随
+    // roster 数放大 (#4546 的乘法教训在 roster 维度同样成立)。
+    expect(budget.policy.baseSendAllowance).toBe(11);
+    expect(budget.policy.maxTotalModelSends).toBe(11);
+    // "不被别人的抬升改动"在新合同下的逐项形状：other 是独立 ingress（自带统一 11 基金，
+    // 不被 budget 的 roster 调用触碰）；exact 是显式 caller 预算（4/3 精确性永不扩）；
+    // child 携带派生时的父 policy 快照（11/11），同样不被触碰。
+    expect(other.policy).toEqual({ ...CODEX_TEXT_GUARDED_BUDGET_POLICY, maxTotalModelSends: 11, baseSendAllowance: 11 });
+    expect(exact.policy).toEqual(CODEX_TEXT_GUARDED_BUDGET_POLICY);
+    expect(child.policy).toEqual({ ...CODEX_TEXT_GUARDED_BUDGET_POLICY, maxTotalModelSends: 11, baseSendAllowance: 11 });
     // Later cooldowns or logins cannot shrink or replenish this request's snapshot.
     expandInferenceOAuthSendBudget(budget, 2);
     expandInferenceOAuthSendBudget(budget, 8);
-    for (let i = 0; i < 4 * TRANSIENT_RETRY_MAX_ATTEMPTS; i++) {
+    for (let i = 0; i < 11; i++) {
       const send = budget.reserveDispatch({ sendClass: "transient", targetKey: "physical-url" });
       expect(send.allowed).toBe(true);
       if (send.allowed) send.permit.use();
@@ -196,16 +211,24 @@ describe("createInferenceSendBudget", () => {
     expect(child.used).toBe(budget.used);
   });
 
-  test("one credential retains the default and a spent request cannot expand", () => {
+  test("one credential keeps the unified fund and a spent request cannot expand", () => {
     const req = new Request("http://localhost/v1/responses");
     const single = createInferenceSendBudget(req, { model: "m", provider: "p" });
     expandInferenceOAuthSendBudget(single, 1);
-    expect(single.policy).toEqual(CODEX_TEXT_GUARDED_BUDGET_POLICY);
+    expect(single.policy).toEqual({
+      ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
+      maxTotalModelSends: 11,
+      baseSendAllowance: 11,
+    });
     const started = createInferenceSendBudget(req, { model: "m", provider: "p" });
     const send = started.reserveDispatch({ sendClass: "initial", targetKey: "physical-url" });
     if (send.allowed) send.permit.use();
     expandInferenceOAuthSendBudget(started, 4);
-    expect(started.policy).toEqual(CODEX_TEXT_GUARDED_BUDGET_POLICY);
+    expect(started.policy).toEqual({
+      ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
+      maxTotalModelSends: 11,
+      baseSendAllowance: 11,
+    });
   });
 });
 

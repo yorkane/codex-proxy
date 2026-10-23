@@ -25,6 +25,9 @@
 export const ATTEMPT_RECOVERY_KIND_ROSTER = Object.freeze([
   "transient-5xx",
   "connection-reset",
+  // 统一模型请求 lane（fork 2026-10-23）：预输出上游 HTTP 4xx/5xx 的同目标重放。
+  // 与 transient-5xx 区分——那是旧 5xx 白名单窄 lane 的标签，这一族覆盖全 4xx/5xx。
+  "model-error-retry",
   "oauth-401",
   "oauth-account-403",
   "key-401",

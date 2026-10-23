@@ -182,6 +182,7 @@ function sidecarSettingsForAlphaSearch(
     model: modelForAlphaSearchBackend(backend, sidecar),
     reasoning: sidecar?.reasoning ?? DEFAULT_REASONING,
     timeoutMs: config.search?.timeoutMs ?? SEARCH_UPSTREAM_TIMEOUT_MS,
+    modelRequestMaxRetries: config.modelRequestMaxRetries,
   };
 }
 

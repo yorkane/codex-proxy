@@ -289,6 +289,26 @@
       ]
     },
     {
+      "path": "transports/model-request-retry.md",
+      "tier": 3,
+      "title": "Unified Model Request Retry",
+      "scope": "The unified model-request retry contract: budget resolution and its floor, the dispatch, native, sidecar and runTurn lanes, the pre-output projection, disposal and pause deferral, and the non-replay boundaries.",
+      "documents": [
+        "src/lib/model-request-retry.ts",
+        "src/lib/model-retry-scope.ts",
+        "src/lib/response-disposal.ts",
+        "src/lib/owned-model-retry.ts",
+        "src/lib/sidecar-model-retry.ts",
+        "src/lib/upstream-retry.ts",
+        "src/server/native-model-retry.ts",
+        "src/server/responses/capacity-pre-output.ts",
+        "src/adapters/cursor/http1-bidi.ts",
+        "src/providers/zed.ts",
+        "src/adapters/model-http-retry.ts",
+        "src/server/responses/model-error-preflight.ts"
+      ]
+    },
+    {
       "path": "transports/native-reasoning-retention.md",
       "tier": 3,
       "title": "Native Reasoning Retention",

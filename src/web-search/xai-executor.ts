@@ -12,7 +12,8 @@
  */
 import type { OcxProviderConfig } from "../types";
 import { getValidAccessToken, publicOAuthAuthenticationErrorMessage } from "../oauth";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
@@ -102,7 +103,7 @@ export async function runXaiWebSearch(
   const sidecarExit = sidecarEnter("web-search");
   const t0 = Date.now();
   try {
-    const res = await fetchWithResetRetry(
+    const res = await fetchSidecarModel(
       recovery => fetch(url, applyUpstreamRecoveryInit({
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
@@ -111,7 +112,9 @@ export async function runXaiWebSearch(
         // Credential-bearing: never follow a redirect off the pinned origin.
         redirect: "manual",
       }, recovery)),
-      { replaySafe: true, abortSignal: linkedSignal.signal, label: "xai-web-search-sidecar" },
+      // 统一模型合同（2026-10-23）：Grok responses 是模型生成调用，独立 sidecar 无共享账本，
+      // 预算见 sidecar-model-retry；模型 POST 不声明 replaySafe。
+      { abortSignal: linkedSignal.signal, label: "xai-web-search-sidecar", configuredRetries: settings.modelRequestMaxRetries, targetKey: () => url, retryAfterCeilingMs: settings.timeoutMs - (Date.now() - t0) },
     );
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     if (!res.ok) {

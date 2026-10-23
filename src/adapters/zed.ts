@@ -5,7 +5,7 @@ import type { AnthropicCacheRetention } from "./anthropic/cache-retention";
 import { createGoogleAdapter } from "./google";
 import { createOpenAIChatAdapter } from "./openai-chat";
 import { createResponsesPassthroughAdapter } from "./openai-responses";
-import { createAdapterPhysicalSend } from "./physical-send";
+import { fetchModelHttpResponseWithRetry } from "./model-http-retry";
 import type { AdapterEvent, OcxParsedRequest, OcxProviderConfig } from "../types";
 import { createTranslatorBudget, releaseTranslatedEvent, retainTranslatedEvent, type TranslatorBudget } from "../lib/translator-budget";
 import { releaseCompactionCiphertextLease } from "../responses/compaction";
@@ -370,29 +370,41 @@ export function createZedAdapter(provider: OcxProviderConfig, cacheRetention?: A
     async fetchResponse(request, ctx) {
       if (!credentials) throw new Error("Zed request credentials were not initialized");
       const fetchFn = ctx?.executor ?? globalThis.fetch;
-      const send = createAdapterPhysicalSend(ctx);
-      let completionAttempts = 0;
-      return zedLlmFetch(credentials, "/completions", {
-        fetchFn: (async (input, init) => {
-          const url = input instanceof Request ? input.url : new URL(String(input)).href;
-          // Token exchange/account lookup are support traffic; both completion attempts
-          // share admission and physical ordinals, including the provider's 401 replay.
-          if (url === `${ZED_CLOUD_BASE_URL}/client/users/me`
-            || url === `${ZED_CLOUD_BASE_URL}/client/llm_tokens`) return fetchFn(input, init);
-          const recovery = completionAttempts++ > 0;
-          return send({ url, sendClass: recovery ? "auth-recovery" : "initial",
-            ...(recovery ? { recovery: "oauth-401" } : {}),
-            dispatch: executor => executor(input, init),
-          });
-        }) as typeof globalThis.fetch,
-        signal: ctx?.abortSignal,
-        baseUrl: provider.baseUrl,
-        fetchInit: {
-          method: request.method,
-          headers: request.headers,
-          body: request.body,
-        },
-      });
+      // 统一模型重试 lane：一轮 = 一次 zedLlmFetch 调用（token exchange/account lookup 是
+      // 支持流量，免费；轮内的 401/过期票重放是 Zed 自有协议腿，与首发共享同一个 send 记账，
+      // 由 shouldReplay 以账本剩余门控：剩余 0 时 first 401 不取消、原样交还）。
+      // 任何 4xx/5xx 按统一预算重试（默认 11 发，env 可配）；预算权威是 ctx.sendBudget 的
+      // 绝对总额，恢复腿与重试轮同一账本，不相乘。
+      const zedCredentials = credentials;
+      if (!zedCredentials) throw new Error("Zed request credentials were not initialized");
+      return fetchModelHttpResponseWithRetry(async (send, lane) => {
+        let completionAttempts = 0;
+        return zedLlmFetch(zedCredentials, "/completions", {
+          // 轮内 401 协议重放的准入：账本无剩余发送时不取消 first 401、不发起第二发，
+          // 完整 401 原样交还 lane（耗尽合同=交还最后真实答案，不合成预算错误）。
+          shouldReplay: () => lane.sendsRemaining() > 0,
+          fetchFn: (async (input, init) => {
+            const url = input instanceof Request ? input.url : new URL(String(input)).href;
+            // Token exchange/account lookup are support traffic; every completion send -
+            // including the provider's in-round 401 replay - shares admission and physical
+            // ordinals with the unified lane.
+            if (url === `${ZED_CLOUD_BASE_URL}/client/users/me`
+              || url === `${ZED_CLOUD_BASE_URL}/client/llm_tokens`) return fetchFn(input, init);
+            const recovery = completionAttempts++ > 0;
+            return send({ url, sendClass: recovery ? "auth-recovery" : "initial",
+              ...(recovery ? { recovery: "oauth-401" } : {}),
+              dispatch: executor => executor(input, init),
+            });
+          }) as typeof globalThis.fetch,
+          signal: ctx?.abortSignal,
+          baseUrl: provider.baseUrl,
+          fetchInit: {
+            method: request.method,
+            headers: request.headers,
+            body: request.body,
+          },
+        });
+      }, ctx ?? {}, { label: "zed" });
     },
     async *parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
       if (!response.body) {

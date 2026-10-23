@@ -9,7 +9,8 @@ import { sidecarThinkingOff } from "../adapters/anthropic-model-contract";
 import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "../adapters/client-fingerprint";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { sidecarEnter } from "../lib/sidecar-tracker";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import {
   MAX_SIDECAR_RESPONSE_BYTES,
   cancelReaderWithoutWaiting,
@@ -221,7 +222,7 @@ export async function runAnthropicWebSearch(
   const sidecarExit = sidecarEnter("web-search");
   const t0 = Date.now();
   try {
-    const res = await fetchWithResetRetry(
+    const res = await fetchSidecarModel(
       // The replay needs `keepalive: false` to leave the half-closed pooled socket; Bun has
       // ignored a bare `Connection: close` (oven-sh/bun#20492).
       recovery => dispatch(url, applyUpstreamRecoveryInit({
@@ -231,7 +232,9 @@ export async function runAnthropicWebSearch(
         body: JSON.stringify(body),
         signal: linkedSignal.signal,
       }, recovery)),
-      { replaySafe: true, abortSignal: linkedSignal.signal, label: "web-search-sidecar-anthropic" },
+      // 统一模型合同（2026-10-23）：独立 sidecar 模型调用，无共享请求账本，预算即本调用
+      // env > config > 地板 10 次重试；模型 POST 不声明 replaySafe。
+      { abortSignal: linkedSignal.signal, label: "web-search-sidecar-anthropic", configuredRetries: settings.modelRequestMaxRetries, targetKey: () => url, retryAfterCeilingMs: settings.timeoutMs - (Date.now() - t0) },
     );
     // Guard before any branch reads the body: the failure branch's `res.text()` ran ahead of
     // the success-path guard, reopening the fetch-resolution-to-reader-attach race

@@ -109,6 +109,7 @@ import {
   PoolPreOutputRefusals,
   poolPreOutputRefusalHold,
 } from "./core-codex-account";
+import { projectPreOutputCapacity, restoreCapacityPreOutput } from "./capacity-pre-output";
 import {
   clearCodexModelDenialEvidence,
   recordCodexModelDenialEvidence,
@@ -250,6 +251,7 @@ export async function preparePassthroughExchange(
     | "initialSendAllowance"
     | "noteInitialDispatch"
     | "adapterSendBudget"
+    | "requestModelSendLimit"
   >,
 ) {
   const { config, logCtx, options, req } = requestContext;
@@ -748,32 +750,20 @@ export async function preparePassthroughExchange(
     const cleanupUpstreamAbort = linkAbortSignal(upstream, options.abortSignal ?? req.signal);
     const connectMs = config.connectTimeoutMs ?? 200_000;
     /**
-     * This leg's transient-5xx ladder cap, from the provider's own `transientRetryOn5xx`.
-     *
-     * The lane used to pass `TRANSIENT_RETRY_MAX_ATTEMPTS` at every call site, so an operator who
-     * configured the option on a key-auth `openai-responses` provider changed nothing in either
-     * direction, while the same provider on `openai-chat` was tuned normally. That asymmetry is
-     * #4893. The gate in `transientRetryPolicyFor` returns null for OAuth and forward providers,
-     * so the ChatGPT pool keeps exactly the ladder it has always had.
-     *
-     * Read per call rather than captured once, for two reasons. `route.provider` is reassigned
-     * inside the recovery loop by credential rotation and transport resolution, so a hoisted
-     * policy could outlive the provider row it came from. And the configured value is a total for
-     * the whole request, so it has to be measured against what the request has already sent at
-     * the moment each leg asks.
-     *
-     * Still bounded by the request: every site feeds this to `remainingTransientSendBudget` or
-     * `recoverySendAllowance`, which intersect it with the request-wide base allowance. So a
-     * provider can narrow this request's sends exactly and cannot widen the bound that exists to
-     * stop per-request amplification (#4546).
+     * 本 leg 的瞬态阶梯询问值：provider 行 `transientRetryOn5xx.attempts` 保留 legacy
+     * 「整请求总量」语义，`transientSendCapFor` 第三参数给统一模型权威（本请求
+     * `requestModelSendLimit`，config/env 换算，默认 11）：配置只可抬高、不可压到地板下
+     * (#4893 不对称 + 2026-10-23 统一重试合同)。逐 call 读取：`route.provider` 在恢复循环内
+     * 被轮换重赋。绝对上限仍是共享 ledger 的相交，询问值放大不了总盘 (#4546)。
      */
     const transientSendPolicy = () => transientRetryPolicyFor(route.provider);
     const transientSendAttempts = (): number => transientSendCapFor(
       transientSendPolicy()?.attempts,
       sendBudgetState.targetSendsUsed,
+      sendBudgetState.requestModelSendLimit,
     );
     const configuredTransientSendBudgetExhausted = (): boolean =>
-      transientSendPolicy() !== null && transientSendAttempts() === 0;
+      sendBudgetState.sendBudgetExhausted(transientSendAttempts());
     /**
      * Judged once. The inbound body does not change between legs, and every rebuild this lane
      * performs only ever REMOVES a hazard -- `previous_response_id` is expanded, hosted tools
@@ -1008,52 +998,64 @@ export async function preparePassthroughExchange(
     // #6969: Pool sends hold empty lifecycle frames so a pre-output refusal reaches the ladder below.
     const preOutputRefusals = new PoolPreOutputRefusals();
     const preOutputRefusalHold = () => poolPreOutputRefusalHold(admissionState.authCtx, route.provider, connectMs, options.comboAttempt);
+    /**
+     * 首发执行体（统一模型 lane + 预输出投影）。链序：transport -> adoptObservedResponse
+     * (宿主健康/401/429 证据) -> preOutputRefusals.observe (WS #6969) -> projectPreOutputCapacity
+     * (200 SSE 零输出终态 -> 上游声明状态的 JSON 投影进入统一阶梯；非 200-SSE/歧义/超时/
+     * 溢出逐字直通)。投影发生在 transient 层看见响应之前；合同与闭包前形态逐字一致。
+     */
+    const initialPassthroughSend = (): Promise<Response> => fetchWithTransientRetry(
+      recovery => {
+        // The pool-wide recovery window measures recovery traffic against observed demand,
+        // and this is where demand is observed: `recovery === undefined` is a new request's
+        // first send, everything after it is the same request trying again. Without this the
+        // ratio has no denominator and the window collapses to its quiet-pool floor, which
+        // would throttle recovery on a busy proxy exactly as hard as on an idle one (#4701).
+        if (recovery === undefined) classifyPoolRecoveryDispatch("initial");
+        transportState.noteRoutedAttemptSend(passthroughEstimate, recovery);
+        return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+        }, recovery), upstream.signal, connectMs, upstreamRequestsStream,
+          providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+            httpOnly: canonicalBufferedJson,
+            nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
+              && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+              ? options.nativeControl : undefined,
+            dispatchOverride: oauthDispatch(request, parsed, "passthrough"),
+            providerName: route.providerName,
+            modelId: route.modelId,
+            onPhysicalDispatch: receiptMode ? sendBudgetState.noteInitialDispatch : undefined,
+            accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: admissionState.authCtx }, headers),
+            onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
+            beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
+              ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+            preOutputRefusalHold: preOutputRefusalHold(),
+          }),
+          route.provider.authMode === "forward")
+          // Every real attempt response - including an intermediate 4xx/5xx the
+          // retry wrapper replaces - proves the host was reached (#914 review).
+          .then(adoptObservedResponse).then(preOutputRefusals.observe)
+          .then(response => projectPreOutputCapacity(response, {
+            signal: upstream.signal,
+            maxWaitMs: Math.min(2_000, Math.floor(connectMs / 2)),
+          }));
+      },
+      { abortSignal: upstream.signal, label: safeHostLabel(request.url),
+        attempts: sendBudgetState.initialSendAllowance(transientSendAttempts()),
+        // 统一模型请求 lane：400..599 全状态重试、慢-attempt 不早退、Retry-After 全下界
+        // 等待（默认 deadline Infinity，caller abort 全程尊重）、执行体包 model-retry scope。
+        // 物理总量仍由请求 ledger（统一 11 额）相交封顶，此处 cap 只是本 leg 的询问值。
+        modelRetryMode: true,
+        // Reporter path: direct requests and enforced spend. Receipt-mode sends are settled
+        // by `onPhysicalDispatch`; a reporter as well would count them twice.
+        ...(receiptMode ? {} : { onSendsConsumed: transientSendReporter() }),
+        claimAmbiguousResend: claimPreHeaderResend,
+      },
+    );
     try {
-      // Transient-5xx pre-stream retry (devlog/_plan/260716_claudecode_hardening/010):
-      // the ChatGPT backend emits transient 502/520s that an immediate retry absorbs.
-      // Body is a replayable string; nothing has streamed to the client yet.
-      upstreamResponse = await fetchWithTransientRetry(
-        recovery => {
-          // The pool-wide recovery window measures recovery traffic against observed demand,
-          // and this is where demand is observed: `recovery === undefined` is a new request's
-          // first send, everything after it is the same request trying again. Without this the
-          // ratio has no denominator and the window collapses to its quiet-pool floor, which
-          // would throttle recovery on a busy proxy exactly as hard as on an idle one (#4701).
-          if (recovery === undefined) classifyPoolRecoveryDispatch("initial");
-          transportState.noteRoutedAttemptSend(passthroughEstimate, recovery);
-          return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
-            method: request.method,
-            headers: request.headers,
-            body: request.body,
-          }, recovery), upstream.signal, connectMs, upstreamRequestsStream,
-            providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              httpOnly: canonicalBufferedJson,
-              nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
-                && responseEffects.plaintextV2AgentMessageToolNames.size === 0
-                ? options.nativeControl : undefined,
-              dispatchOverride: oauthDispatch(request, parsed, "passthrough"),
-              providerName: route.providerName,
-              modelId: route.modelId,
-              onPhysicalDispatch: receiptMode ? sendBudgetState.noteInitialDispatch : undefined,
-              accountAutoPause: (name, provider, headers) => captureAccountAutoPauseAttempt(name, provider, { config, codex: admissionState.authCtx }, headers),
-              onCodexWsQuota: codexWsQuotaObserver(admissionState.authCtx, route.provider, route.modelId),
-              beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
-                ? createCodexAuthDispatchGuard(admissionState.authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
-              preOutputRefusalHold: preOutputRefusalHold(),
-            }),
-            route.provider.authMode === "forward")
-            // Every real attempt response — including an intermediate 5xx the
-            // retry wrapper replaces — proves the host was reached (#914 review).
-            .then(adoptObservedResponse).then(preOutputRefusals.observe);
-        },
-        { abortSignal: upstream.signal, label: safeHostLabel(request.url),
-          attempts: sendBudgetState.initialSendAllowance(transientSendAttempts()),
-          // Reporter path: direct requests and enforced spend. Receipt-mode sends are settled
-          // by `onPhysicalDispatch`; a reporter as well would count them twice.
-          ...(receiptMode ? {} : { onSendsConsumed: transientSendReporter() }),
-          claimAmbiguousResend: claimPreHeaderResend,
-        },
-      );
+      upstreamResponse = await initialPassthroughSend();
     } catch (err) {
       preOutputRefusals.recordOnLocalExit(err, options.abortSignal?.aborted === true || req.signal.aborted,
         config, admissionState.authCtx, route.provider, route.modelId);
@@ -1182,7 +1184,7 @@ export async function preparePassthroughExchange(
               route.provider.authMode === "forward")
               .then(adoptObservedResponse);
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url), attempts: allowance.attempts,
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url), attempts: allowance.attempts, modelRetryMode: true,
             onSendsConsumed: transientSendReporter(allowance.permit),
             claimAmbiguousResend: recovery === "empty-completion" ? undefined : claimPreHeaderResend },
         );
@@ -1325,7 +1327,7 @@ export async function preparePassthroughExchange(
             ).then(adoptObservedResponse);
           },
           { abortSignal: upstream.signal, label: safeHostLabel(request.url),
-            attempts: remainingTransientSendBudget(transientSendAttempts()),
+            attempts: remainingTransientSendBudget(transientSendAttempts()), modelRetryMode: true,
             onSendsConsumed: transientSendReporter(), claimAmbiguousResend: claimPreHeaderResend },
         );
       } catch (err) {
@@ -1338,10 +1340,9 @@ export async function preparePassthroughExchange(
 
     if (codex401ReplayKind !== null && upstreamResponse.status === 401 && !wasPermanentAccountRefusal(upstreamResponse)) break;
 
-    // Native Responses providers return before the generic adapter recovery loop below. Keep
-    // their OAuth contract identical: one pre-stream 401 forces a credential refresh and one
-    // rebuilt replay. xAI's current subscription models use this branch now that their official
-    // Grok CLI catalog declares the Responses backend.
+    // Native Responses providers return before the generic adapter recovery loop below; keep the
+    // same OAuth contract: one pre-stream 401 forces one refresh + one rebuilt replay (xAI takes
+    // this branch now that the Grok CLI catalog declares Responses).
     if (
       upstreamResponse.status === 401 && !wasPermanentAccountRefusal(upstreamResponse)
       && isOAuth401ReplayProvider
@@ -1448,7 +1449,7 @@ export async function preparePassthroughExchange(
               route.provider.authMode === "forward")
               .then(adoptObservedResponse);
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url), attempts: remainingTransientSendBudget(transientSendAttempts()),
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url), attempts: remainingTransientSendBudget(transientSendAttempts()), modelRetryMode: true,
             onSendsConsumed: transientSendReporter(), claimAmbiguousResend: claimPreHeaderResend },
         );
       } catch (err) {
@@ -1542,9 +1543,8 @@ export async function preparePassthroughExchange(
       && !isNonReplayableResponse(upstreamResponse)
      && rateLimitPolicy !== null
       && rateLimitRetries < rateLimitPolicy.attempts
-      // Checked here rather than inside the helper: prepareSameTarget429Wait releases the 429
-      // body, so a refusal discovered after the wait can no longer return the real rate-limit
-      // answer and would surface a synthetic 502 instead.
+      // Checked here, not inside the helper: prepareSameTarget429Wait releases the 429 body, so
+      // a refusal found after the wait can only answer with a synthetic 502.
       && !sendBudgetExhausted(transientSendAttempts())
     ) {
       rateLimitRetries += 1;
@@ -1595,7 +1595,7 @@ export async function preparePassthroughExchange(
               route.provider.authMode === "forward")
               .then(adoptObservedResponse);
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url), attempts: remainingTransientSendBudget(transientSendAttempts()),
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url), attempts: remainingTransientSendBudget(transientSendAttempts()), modelRetryMode: true,
             onSendsConsumed: transientSendReporter(), claimAmbiguousResend: claimPreHeaderResend },
         );
       } catch (err) {
@@ -1718,7 +1718,8 @@ export async function preparePassthroughExchange(
       }
     }
     // #6969: a projection nothing above recovered goes on as the original stream, before any reader.
-    upstreamResponse = preOutputRefusals.restore(upstreamResponse);
+    // 统一 lane：HTTP SSE 预输出投影与 WS 投影共用这个交付点，restore 逐字交还原 200 流。
+    upstreamResponse = restoreCapacityPreOutput(preOutputRefusals.restore(upstreamResponse));
     // The deterministic route record cannot classify history it never observed (restart, expiry,
     // eviction, or an older transcript). Inspect only a bounded clone of a 4xx whose exact outbound
     // Responses body still carries opaque state, then rebuild once through the ordinary adapter

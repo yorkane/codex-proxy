@@ -55,7 +55,7 @@ replacement within the existing send budget. Without either permission, the reje
 [ambiguous connection-reset replay boundary](#ambiguous-connection-reset-replay-boundary).
 Reusable request bytes were never the test: a string body makes a send mechanically
 repeatable, not idempotent, and a model POST is not idempotent. Timeouts, aborts,
-`ECONNREFUSED`, HTTP error statuses, and mid-stream SSE failures are never retried at all.
+`ECONNREFUSED`, HTTP error statuses (model lane excepted; owner: [unified model request retry](model-request-retry.md)), and mid-stream SSE failures are never retried at all.
 
 The `replaySafe` callers are the sidecars, whose work is a tool call rather than a turn: the
 vision describers, the web-search executors and loop, and the image loop. The model-POST

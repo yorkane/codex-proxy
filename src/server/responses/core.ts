@@ -14,15 +14,33 @@ import type { TranslatorBudget } from "../../lib/translator-budget";
 import { executeComboResponses } from "./core-combo";
 import { registerTurn, unregisterTurn } from "../lifecycle";
 import { runWithCompactionRecovery } from "./compaction-recovery";
+import { runModelRetryScope } from "../../lib/model-retry-scope";
 /**
  * Route one `/v1/responses` request through the adapter pipeline: recovery loop, passthrough
  * wire, image/web-search bridges, and the terminal-guard continuation.
+ *
+ * 统一模型请求 lane（root 裁决）：整个逻辑请求体包在最外层 model-retry scope 里。
+ * 只有 fetchWithTransientRetry 的 per-leg scope 会在每个 leg 结束（含 429/auth recovery、
+ * key rotation 的中途）提前 flush 排队的自动 pause，让后续 leg 被自家 pause 截断；
+ * handler 级 scope 把 flush 推到本请求终态返回之后，pause 提交不影响本请求的 11 送额度。
+ * reentrant：combo 子请求与 standalone fetch helper 的 scope 共享这一最外层，flush 归
+ * 这里。observer 的 flush 是 best-effort（单条失败 warn 后继续），绝不让提交延迟拖住
+ * 客户端响应流。
  */
 export async function handleResponses(
   req: Request,
   config: OcxConfig,
   logCtx: RequestLogContext,
   options: HandleResponsesOptions = {},
+): Promise<Response> {
+  return runModelRetryScope(() => handleResponsesImpl(req, config, logCtx, options));
+}
+
+async function handleResponsesImpl(
+  req: Request,
+  config: OcxConfig,
+  logCtx: RequestLogContext,
+  options: HandleResponsesOptions,
 ): Promise<Response> {
   const ownsBudget = options.translatorBudget === undefined;
   const translatorBudget = options.translatorBudget ?? createTranslatorBudget();
@@ -47,7 +65,7 @@ export async function handleResponses(
       translatorBudget,
       accountLoad,
       // Once at ingress, spend observer included: a combo child inherits the parent's holder.
-      sendBudget: options.sendBudget ?? createInferenceSendBudget(req, logCtx),
+      sendBudget: options.sendBudget ?? createInferenceSendBudget(req, logCtx, config.modelRequestMaxRetries),
     }, (req, config, logCtx, options) => handleResponsesInner(req, config, logCtx, options, requestDispatchers));
     const finalResponse = ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget, abortSignal) : response;
     if (!accountLoad.lease) { release(); return finalResponse; }

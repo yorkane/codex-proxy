@@ -2,7 +2,8 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { decodeJwtPayload, extractAccountId } from "../../oauth/chatgpt";
 import type { OcxConfig } from "../../types";
 import { boundedBodyDecodeFailure, readBoundedResponseBody } from "../../lib/bounded-body";
-import { isTransientUpstreamStatus, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
+import { isModelHttpErrorStatus, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
+import { MODEL_REQUEST_MAX_RETRIES_LIMIT, modelRequestMaxRetries } from "../../lib/model-request-retry";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
 import { MAX_AGENT_TASK_CIPHERTEXT_BYTES, MAX_AGENT_TASK_ENCRYPTED_PARTS, structurallyValidFernetTokens } from "./encrypted-payload";
 import {
@@ -35,9 +36,13 @@ const OPENAI_TOKEN_AUDIENCE = "https://api.openai.com/v1";
 const MAX_ASSIGNMENT_BYTES = 2 * 1024 * 1024;
 const MAX_RECOVERY_RESPONSE_BYTES = 4 * 1024 * 1024;
 const CACHE_SCOPE_KEY = randomBytes(32);
-// 1 initial send + up to 2 retries matches TRANSIENT_RETRY_MAX_ATTEMPTS; retries stay inside
-// the caller's deadline, admission scope, and shared flight (#3661).
+// 统一模型合同（2026-10-23）：recovery 是一次真 ChatGPT Codex 模型调用，4xx/5xx 全状态按
+// 统一预算重试（env > config > 地板 10）。legacy `retries` 只可抬升该预算、永不压到地板下；
+// 钳制上界与 leaf 一致（100）。retries  stays inside the caller's window, admission scope, and
+// shared flight (#3661).
 const MAX_RECOVERY_RETRIES = 2;
+/** 整条 recovery ladder 的总响应上界：逐-attempt 窗口累加之外再封一道，绝不无限。 */
+const RECOVERY_LADDER_MAX_MS = 15 * 60_000;
 const RECOVERY_RETRY_BASE_DELAY_MS = 500;
 const RECOVERY_RETRY_MAX_DELAY_MS = 2_000;
 
@@ -47,6 +52,11 @@ export interface AgentTaskRecoveryOptions {
   timeoutMs?: number;
   cacheEntries?: number;
   retries?: number;
+  /**
+   * 统一模型重试预算的全局配置值（`config.modelRequestMaxRetries`），由
+   * `agentTaskRecoveryConfig` 带入；env `OCX_MODEL_REQUEST_MAX_RETRIES` 在 leaf 内压过它。
+   */
+  modelRequestMaxRetries?: number;
 }
 
 export type AgentTaskRecoveryFailureReason =
@@ -77,6 +87,7 @@ export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOpt
     retries: Number.isFinite(raw.retries) && (raw.retries ?? 0) >= 0
       ? Math.min(MAX_RECOVERY_RETRIES, Math.floor(raw.retries!))
       : 0,
+    modelRequestMaxRetries: config.modelRequestMaxRetries,
   };
 }
 
@@ -491,7 +502,9 @@ async function attemptRecovery(
       if (deadlineSignal.aborted) return terminal({ recovered: false, reason: "recovery_timeout" });
       return {
         resolution: { recovered: false, reason: "recovery_http_rejected" },
-        retryable: isTransientUpstreamStatus(response.status),
+        // 统一模型合同：状态门是 400..599 全集，不是瞬态白名单；上游拒绝提示不豁免本地
+        // 重试义务。本地态（caller abort / ladder deadline）在上面先行 terminal，不入门。
+        retryable: isModelHttpErrorStatus(response.status),
         retryHeaders: response.headers,
       };
     }
@@ -528,28 +541,31 @@ async function requestRecovery(
 ): Promise<AgentTaskRecoveryResolution> {
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? 45_000;
-  const deadline = Date.now() + timeoutMs;
+  // 统一模型预算：leaf（env > 传入配置 > 地板 10）是基线，legacy `retries` 只可抬升它。
+  const unifiedRetries = modelRequestMaxRetries(options.modelRequestMaxRetries);
+  const raised = Number.isFinite(options.retries) ? Math.max(0, Math.floor(options.retries!)) : 0;
+  const retries = Math.min(MODEL_REQUEST_MAX_RETRIES_LIMIT, Math.max(unifiedRetries, raised));
+  // `timeoutMs` 现在是**每次 attempt** 的响应窗口：共享 deadline 会在统一预算跑满前截断，
+  // root 裁决逐 attempt 延长。整条 ladder 仍有界 = min(窗口×(重试+1), LADDER_MAX)，绝不无限。
+  const ladderDeadlineMs = Math.min(RECOVERY_LADDER_MAX_MS, Math.max(timeoutMs, timeoutMs * (retries + 1)));
+  const deadline = Date.now() + ladderDeadlineMs;
   const timeout = setTimeout(
     () => controller.abort(new DOMException("Agent task recovery timed out", "TimeoutError")),
-    timeoutMs,
+    ladderDeadlineMs,
   );
   const signal = abortSignal
     ? AbortSignal.any([abortSignal, controller.signal])
     : controller.signal;
   try {
-    // The configured bound is re-clamped here: callers may pass options that never went
-    // through agentTaskRecoveryConfig, and a larger value must not widen the outage window.
-    const retries = Number.isFinite(options.retries)
-      ? Math.max(0, Math.min(MAX_RECOVERY_RETRIES, Math.floor(options.retries!)))
-      : 0;
     for (let attempt = 0; ; attempt += 1) {
       const { resolution, retryable, retryHeaders } = await attemptRecovery(
         admission, envelope, options, signal, abortSignal, controller.signal,
       );
       if (resolution.recovered || !retryable || attempt >= retries) return resolution;
       // Retry-After is the provider's floor, not something our backoff cap may shorten.
-      // If honouring it would outlive the shared deadline, end with this failure rather
-      // than resend early into a refusal.
+      // 统一模型合同（2026-10-23）：RA 等待只受整条 ladder 的总 bound 与 caller abort 约束，
+      // 单-attempt 窗口不再是 RA 上限——默认 45s 窗口会把上游点名的 90s 提前掐掉，违反
+      // 「缺省完整等待」裁决。总 bound（min(窗口×总发送数, LADDER_MAX)）就是 caller budget。
       const delayMs = retryBackoffDelayMs(attempt, {
         baseDelayMs: RECOVERY_RETRY_BASE_DELAY_MS,
         maxDelayMs: RECOVERY_RETRY_MAX_DELAY_MS,

@@ -356,6 +356,12 @@ describe("membership oracle", () => {
       // Fork-added (563779142, 2026-10-09) under responses/ with its emitted tool-name repair
       // siblings; the tool-name-repair- seed names the adapters domain, which is wrong for it.
       "tool-name-repair-official-gate.test.ts",
+      // Fork 2026-10-23（统一模型重试 lane）：四个新 leaf 测试按导入域落 lib//responses/，
+      // 正则 seed 按子系统名指向 vision/codex-integration/server，显式表是权威落位。
+      "sidecar-model-retry.test.ts",
+      "native-model-retry.test.ts",
+      "native-model-retry-ladder.test.ts",
+      "owned-model-retry.test.ts",
     ]);
     const mismatches: string[] = [];
     let resolved = 0;

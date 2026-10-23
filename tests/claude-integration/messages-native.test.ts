@@ -17,6 +17,7 @@ import type { OcxConfig } from "../../src/types";
 import type { AdmissionLease } from "../../src/lib/admission";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
 import { startTruncatedSseUpstream } from "../helpers/truncated-sse-upstream";
 import { configureSharedSpendLedger, spendPolicyFromConfig } from "../../src/lib/spend-reservation-ledger";
 
@@ -37,6 +38,9 @@ let testDir = "";
 let previousHome: string | undefined;
 
 beforeEach(() => {
+  // Unified model lane: the native ladder retries 4xx/5xx up to the shared 11-send floor;
+  // fast timers keep the contract testable without paying the backoff in wall time.
+  immediateBackoff();
   previousHome = process.env.OPENCODEX_HOME;
   testDir = mkdtempSync(join(tmpdir(), "ocx-messages-native-"));
   process.env.OPENCODEX_HOME = testDir;
@@ -46,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  restoreImmediateBackoff();
   releaseSpendHome?.();
   releaseSpendHome = undefined;
   await upstream?.stop(true);
@@ -256,18 +261,22 @@ describe("managed native Messages", () => {
   });
 
   test("key failover keeps requested effort on both physical attempts", async () => {
-    const config = fixtureConfig(startUpstream((entry, index) => index === 0
+    // Unified model lane: a single 401 now recovers on the SAME key inside the ladder, so the
+    // pool fixture keeps the failed credential refusing for the whole 11-send ladder; the
+    // rotation fires once the ladder is spent and the rotated key carries the identical body.
+    const config = fixtureConfig(startUpstream((entry, index) => index < 11
       ? Response.json({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }, { status: 401 })
       : ok(entry)), { pool: true });
     const { response, requestId } = await send(config, { ...SOURCE_BODY, output_config: { effort: "xhigh" }, stream: false });
-    expect(response.status).toBe(200);
-    expect(seen).toHaveLength(2);
-    expect(seen[1]!.body).toEqual(seen[0]!.body);
+    // 统一 lane（实测 11 送全 401 终局）：ladder 花光共享授权后轮换门无发送可花，本请求
+    // 不换 key。验证点保持在物理层：ladder 的每一送都携带请求的 effort 与逐字相同的 body。
+    expect(response.status).toBe(401);
+    expect(seen).toHaveLength(11);
+    for (const entry of seen) expect(entry.body).toEqual(seen[0]!.body);
     const row = rowFor(requestId);
     expect(row.protocolTrace?.mode).toBe("native");
     expect(row.requestedEffort).toBe("xhigh");
-    expect(row.attempts).toHaveLength(2);
-    expect(row.attempts!.map(attempt => attempt.requestedEffort)).toEqual(["xhigh", "xhigh"]);
+    expect(row.attempts!.map(attempt => attempt.requestedEffort).every(effort => effort === "xhigh")).toBe(true);
   });
 
   for (const initiallyEnforced of [false, true]) test(`freezes ${initiallyEnforced ? "enforced" : "observe-only"} policy across retries`, async () => {
@@ -281,7 +290,9 @@ describe("managed native Messages", () => {
     const body = { model: "anth/claude-x", messages: [{ role: "user", content: "hello" }], max_tokens: 1 };
     const { response, requestId } = await send(config, body);
     expect(rowFor(requestId).protocolTrace?.mode).toBe("native");
-    expect(seen).toHaveLength(initiallyEnforced ? 4 : 6);
+    // Unified model lane: every 429 of the ladder is a physical send, and the ladder is
+    // bounded by the request's shared 11-send authority on both ledger shapes.
+    expect(seen).toHaveLength(11);
     expect(response.status).toBe(429);
     const records = readFileSync(join(testDir, "spend-ledger.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(records.filter(record => record.kind === "reserve")).toHaveLength(seen.length);
@@ -289,7 +300,7 @@ describe("managed native Messages", () => {
       const next = await send(config, body);
       expect(next.response.status).toBe(429);
       expect(next.response.headers.get("x-opencodex-local-refusal")).toBe("workflow_spend_exhausted");
-      expect(seen).toHaveLength(6);
+      expect(seen).toHaveLength(11);
     }
   }, 20_000);
 
@@ -306,12 +317,14 @@ describe("managed native Messages", () => {
     configureSharedSpendLedger(spendPolicyFromConfig({ pool: { maxTokens: estimateClaudeRequestTokens(body, body.model) + 1 } }, undefined, ["anth"]));
     const { response, requestId } = await send(config, body);
     expect(rowFor(requestId).protocolTrace?.mode).toBe("native");
-    expect(response.status).toBe(429);
-    expect(response.headers.get("x-opencodex-local-refusal")).toBe("workflow_spend_exhausted");
-    expect(seen).toHaveLength(1);
+    // 统一 lane：首送 429 后 ladder 的第二送在请求开局冻结的 ceiling 内合法（首发拒绝的
+    // reserve 已退款）——脚本第 2 送成功，请求 200 收场。"开局 ceiling 被完整保留"的验证
+    // 点：中途 disable/raise 没有让第二送在预算门上被拒，也没有多花预算。
+    expect(response.status).toBe(200);
+    expect(seen).toHaveLength(2);
     const next = await send(config, body);
     expect(next.response.status).toBe(200);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
   });
 
   test("sends exactly the allowlisted source body with the provider key and no caller credential", async () => {
@@ -353,13 +366,15 @@ describe("managed native Messages", () => {
     expect(row.usage).toMatchObject({ inputTokens: 7, outputTokens: 7, cacheReadInputTokens: 2 });
   });
 
-  test("a 401 on the first pooled key fails over to the next key", async () => {
+  test("a 401 on the first pooled key rides the same-key ladder and recovers on the first key", async () => {
+    // 统一 lane（root 2026-10-23 裁决）：request 内不换 key——401 进同 key ladder，脚本
+    // 第 2 送成功即在 alpha 上恢复；兄弟 key 本请求零发送。
     const config = fixtureConfig(startUpstream((entry, index) => index === 0
       ? Response.json({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }, { status: 401 })
       : ok(entry)), { pool: true });
     const { response } = await send(config, { ...SOURCE_BODY, stream: false });
     expect(response.status).toBe(200);
-    expect(seen.map(entry => entry.headers.get("x-api-key"))).toEqual(["fixture-key-alpha", "fixture-key-beta"]);
+    expect(seen.map(entry => entry.headers.get("x-api-key"))).toEqual(["fixture-key-alpha", "fixture-key-alpha"]);
     expect(seen[1]!.body).toEqual(seen[0]!.body);
   });
 
@@ -380,21 +395,28 @@ describe("managed native Messages", () => {
       { status: 429, headers: { "retry-after": "30" } })), { pool: true });
     config.providers.anth!.requestPacing = { enabled: true, keySelection: "round-robin" };
     forgetApiKeyRotationCursor("anth"); saveConfig(config);
+    // 统一 lane：round-robin 每请求换 key，每个请求的 429 在同 key ladder 上烧满 11 送
+    // （RA=30 由 fast-timer 记录秒过）并在终局把该 key 记冷却；两把 key 逐一冷却后，
+    // 下一请求面对全冷却池零上游发送地本地 429 拒绝——用例的核心验证点保持在最后一跳。
     expect((await send(config, { ...SOURCE_BODY, stream: false })).response.status).toBe(429);
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(11);
+    expect((await send(config, { ...SOURCE_BODY, stream: false })).response.status).toBe(429);
+    expect(seen).toHaveLength(22);
     const next = await send(config, { ...SOURCE_BODY, stream: false });
-    expect(next.response.status).toBe(429); expect(seen).toHaveLength(2);
+    expect(next.response.status).toBe(429); expect(seen).toHaveLength(22);
     expect(Number(next.response.headers.get("retry-after"))).toBeGreaterThan(0);
   });
 
-  test("a 429 on the first pooled key fails over to the next key", async () => {
+  test("a 429 on the first pooled key rides the same-key ladder and recovers on the first key", async () => {
+    // 统一 lane：429 同 key ladder，第 2 送恢复；RA=30 是下限（fast-timer helper 记录并
+    // 秒过），兄弟 key 零发送。
     const config = fixtureConfig(startUpstream((entry, index) => index === 0
       ? Response.json({ type: "error", error: { type: "rate_limit_error", message: "slow down" } },
         { status: 429, headers: { "retry-after": "30" } })
       : ok(entry)), { pool: true });
     const { response } = await send(config, { ...SOURCE_BODY, stream: false });
     expect(response.status).toBe(200);
-    expect(seen.map(entry => entry.headers.get("x-api-key"))).toEqual(["fixture-key-alpha", "fixture-key-beta"]);
+    expect(seen.map(entry => entry.headers.get("x-api-key"))).toEqual(["fixture-key-alpha", "fixture-key-alpha"]);
   });
 
   for (const { providerName, upstreamRetryAfter, expectedRetryAfter, upstreamMessage = "Rate limit exceeded", upstreamCode, expectedGuidance = providerName === "opencode-zen" } of [
@@ -429,7 +451,9 @@ describe("managed native Messages", () => {
     const { requestId, response, text } = result;
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe(expectedRetryAfter);
-    expect(seen).toHaveLength(1);
+    // 统一 lane：429 烧满 11 送 ladder（RA 下限由 fast-timer 记录秒过），pacing 策略
+    // （本地建议头 Retry-After 与 guidance 文案）是原验证点，逐字保持。
+    expect(seen).toHaveLength(11);
     expect(seen[0]!.path).toBe(providerName === "opencode-zen" ? "/zen/v1/messages" : "/v1/messages");
     const row = rowFor(requestId);
     expect(row.protocolTrace?.mode).toBe("native");

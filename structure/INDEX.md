@@ -50,6 +50,7 @@ The wire surfaces a client actually talks to.
 | [`transports/byte-accounting.md`](transports/byte-accounting.md) | Request-copy and stream-buffer byte accounting shared by parsing, SSE rewriting, the adapters, and the translator budget, plus durable spill admission. |
 | [`transports/anthropic-thinking-recovery.md`](transports/anthropic-thinking-recovery.md) | One-shot exact signature-binding recovery before output, and successful-retry memo boundaries. |
 | [`transports/responses.md`](transports/responses.md) | The Responses HTTP/SSE endpoint, dispatch, credential and upload boundaries, and core module ownership. |
+| [`transports/model-request-retry.md`](transports/model-request-retry.md) | The unified model-request retry contract: budget resolution and its floor, the dispatch, native, sidecar and runTurn lanes, the pre-output projection, disposal and pause deferral, and the non-replay boundaries. |
 | [`transports/native-reasoning-retention.md`](transports/native-reasoning-retention.md) | Optional native reasoning ciphertext forwarding on model/account switches, configuration and management controls. |
 | [`transports/responses-wire-shapes.md`](transports/responses-wire-shapes.md) | Mixed-wire model defaults, xAI agent-message continuation, declared-tool membership, and passthrough SSE stream shapes. |
 | [`transports/responses-failover.md`](transports/responses-failover.md) | Upstream reset retry, the ambiguous-resend gate, combo failover and commit boundaries, compaction routing, and output headroom. |
@@ -173,7 +174,9 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/adapters/anthropic-rejection-memo.ts` | [`transports/anthropic-thinking-recovery.md`](transports/anthropic-thinking-recovery.md) |
 | `src/adapters/anthropic-replay.ts` | [`transports/anthropic-thinking-recovery.md`](transports/anthropic-thinking-recovery.md) |
 | `src/adapters/anthropic-tool-catalog.ts` | [`transports/anthropic-thinking-recovery.md`](transports/anthropic-thinking-recovery.md) |
+| `src/adapters/cursor/http1-bidi.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/adapters/dsh-account.ts` | [`providers/dsh-account.md`](providers/dsh-account.md) |
+| `src/adapters/model-http-retry.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/adapters/openai-chat.ts` | [`providers/mimo-bare-calls.md`](providers/mimo-bare-calls.md) |
 | `src/adapters/openai-chat/` | [`providers/mimo-bare-calls.md`](providers/mimo-bare-calls.md) |
 | `src/adapters/openai-responses/opengateway-input.ts` | [`providers/opengateway.md`](providers/opengateway.md) |
@@ -235,6 +238,12 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/lib/advisor-activation.ts` | [`advisor.md`](advisor.md) |
 | `src/lib/decision-quota-sink.ts` | [`providers/jev-decision.md`](providers/jev-decision.md) |
 | `src/lib/gui-pair-intent.ts` | [`remote-link.md`](remote-link.md) |
+| `src/lib/model-request-retry.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
+| `src/lib/model-retry-scope.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
+| `src/lib/owned-model-retry.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
+| `src/lib/response-disposal.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
+| `src/lib/sidecar-model-retry.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
+| `src/lib/upstream-retry.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/lib/windows-owner-acl.ts` | [`remote-link.md`](remote-link.md) |
 | `src/link/` | [`remote-messaging.md`](remote-messaging.md)<br>[`remote-link.md`](remote-link.md) |
 | `src/messaging/` | [`remote-messaging.md`](remote-messaging.md)<br>[`local-messaging.md`](local-messaging.md) |
@@ -258,6 +267,7 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/providers/quota/anthropic-account-quota.ts` | [`providers/anthropic-account-pool.md`](providers/anthropic-account-pool.md) |
 | `src/providers/quota/dsh-account.ts` | [`providers/dsh-account.md`](providers/dsh-account.md) |
 | `src/providers/request-pacing.ts` | [`providers/anthropic-key-billing.md`](providers/anthropic-key-billing.md) |
+| `src/providers/zed.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/quota-pool/` | [`quota-pool.md`](quota-pool.md) |
 | `src/quota/` | [`dashboard-and-usage.md`](dashboard-and-usage.md) |
 | `src/reasoning-effort.ts` | [`runtime.md`](runtime.md) |
@@ -279,10 +289,13 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/management/link-routes.ts` | [`remote-link.md`](remote-link.md) |
 | `src/server/management/model-routes.ts` | [`pricing.md`](pricing.md) |
 | `src/server/management/quota-pool-routes.ts` | [`quota-pool.md`](quota-pool.md) |
+| `src/server/native-model-retry.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/server/responses/account-auto-pause-recovery.ts` | [`account-auto-pause.md`](account-auto-pause.md) |
 | `src/server/responses/advisor-plan-slot.ts` | [`advisor.md`](advisor.md) |
 | `src/server/responses/advisor-slot.ts` | [`advisor.md`](advisor.md) |
 | `src/server/responses/anthropic-thinking-recovery.ts` | [`transports/anthropic-thinking-recovery.md`](transports/anthropic-thinking-recovery.md) |
+| `src/server/responses/capacity-pre-output.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
+| `src/server/responses/model-error-preflight.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/server/responses/opengateway-completion-guard.ts` | [`providers/opengateway.md`](providers/opengateway.md) |
 | `src/server/responses/passthrough-completion.ts` | [`providers/opengateway.md`](providers/opengateway.md) |
 | `src/server/responses/passthrough-dispatch.ts` | [`providers/opengateway.md`](providers/opengateway.md) |

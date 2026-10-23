@@ -69,6 +69,8 @@ export const RESPONSES_CORE_MODULES = [
   "pacing-overload.ts",
   "reset-replay.ts",
   "passthrough-delivery.ts",
+  // Reached from passthrough-dispatch.ts: bounded HTTP/SSE pre-output model-error projection.
+  "capacity-pre-output.ts",
   "buffered-sse-json.ts",
   "terminal-error-redaction.ts",
   // Reached from passthrough-delivery.ts: overload terminals carry a client retry directive.
@@ -78,6 +80,8 @@ export const RESPONSES_CORE_MODULES = [
   "sidecar-send-budget.ts",
   "completion-policy.ts",
   "run-turn-execution.ts",
+  // Reached from run-turn-execution.ts: unified model-error preflight gate (fork 2026-10-23).
+  "model-error-preflight.ts",
   "adapter-dispatch.ts",
   "antigravity-validation-refusal.ts",
   "adapter-continuation.ts",

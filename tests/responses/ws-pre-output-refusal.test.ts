@@ -21,6 +21,15 @@ import { BOUNDED_WS_RUNTIME, streamingInit } from "../helpers/ws-upstream-fixtur
  * refused the turn with a structured 5xx and no output reached no retry layer at all. With the
  * opt-in hold, such a refusal settles as a replayable gateway status and can be restored to the
  * original stream; every other outcome must stay exactly what it was.
+ *
+ * Extended by the 2026-10-23 unified model-request lane: the gate covers every structured
+ * 400..599 refusal (401/403/404/429 quota identities/500/502/503/504/507/599 and the bare
+ * capacity sentence), an upstream `retryable: false` or `x-should-retry: false` hint exempts
+ * nothing, and conflicting/malformed declarations project nothing at all. Native-control exchanges
+ * deliberately keep today's in-body terminal for post-preamble refusals: the steering/injection
+ * channel owns a multi-response session whose state mutates before the gate is consulted, so a
+ * mid-turn refusal there is not replayable as one whole turn (root ruling 2026-10-23); the
+ * pre-commit refused-create 4xx projection still runs under native control.
  */
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -190,10 +199,19 @@ describe("an authoritative refusal before any output becomes a replayable gatewa
     const carried = await exchange(opened(CREATED, withAdvice));
     expect(carried.status).toBe(503);
     expect(carried.headers.get("retry-after")).toBe("30");
-    // 非过载的 502 投影不带建议
+    // 统一 lane：所有投影都带可执行等待指令；无建议时用默认 2s（与 SSE helper 同口径）
     const gateway = await exchange(opened(CREATED, SERVER_ERROR));
     expect(gateway.status).toBe(502);
-    expect(gateway.headers.get("retry-after")).toBeNull();
+    expect(gateway.headers.get("retry-after")).toBe("2");
+    // 完整下界不被缩短：文案提示与帧头并存时取最大
+    const both = { ...OVERLOADED, headers: { "retry-after": "120" },
+      error: { ...OVERLOADED.error, message: "Our servers are currently overloaded. Try again in 30s." } };
+    const honoured = await exchange(opened(CREATED, both));
+    expect(honoured.headers.get("retry-after")).toBe("120");
+    // 只有文案提示时，提示就是下界
+    const hinted = { type: "error", status: 503, error: { code: "server_is_overloaded", message: "Try again in 45s." } };
+    const fromHint = await exchange(opened(CREATED, hinted));
+    expect(fromHint.headers.get("retry-after")).toBe("45");
   });
 });
 
@@ -221,14 +239,12 @@ describe("everything else keeps today's settle", () => {
   });
 
   test.each([
-    ["a 429 wrapper", { type: "error", status: 429, error: { code: "rate_limit_exceeded", message: "slow down" } }],
-    ["a 5xx that names quota", { type: "error", status: 503, error: { code: "usage_limit_reached", message: "limit" } }],
-    ["a 5xx whose message is quota", { type: "error", status: 502, error: { message: "You exceeded your current quota" } }],
-    ["a 5xx with a rate_limit_* code", { type: "error", status: 503, error: { code: "rate_limit_requests", message: "Please try again later" } }],
-    ["a 5xx with a rate_limit_* type", { type: "error", status: 503, error: { type: "rate_limit_tokens", message: "Please try again later" } }],
     ["a foreign stream id", { ...OVERLOADED, stream_id: "other" }],
     ["doubled wrapper aliases", { ...OVERLOADED, status_code: 503 }],
+    ["conflicting declarations inside the error", { type: "error", status: 400, error: { status: 400, status_code: 500, message: "x" } }],
+    ["an out-of-range wrapper status", { type: "error", status: 200, error: { message: "x" } }],
     ["an unrecognized code without a wrapper status", { type: "error", error: { code: "mystery", message: "x" } }],
+    ["a near-capacity sentence (substring, not the whole line)", { type: "error", error: { message: "the upstream is at capacity today" } }],
   ])("after the preamble, %s is relayed in the body", async (_name, frame) => {
     await committed(await exchange(opened(CREATED, frame)));
   });
@@ -318,8 +334,10 @@ describe("everything else keeps today's settle", () => {
     expect(body.indexOf("event: response.created")).toBeLessThan(body.indexOf("event: response.completed"));
   });
 
-  test("a native-control exchange never holds", async () => {
-    installFake(opened(CREATED, OVERLOADED));
+  test("a native-control exchange relays a post-preamble 429 in the body", async () => {
+    // 裁决（root 2026-10-23）：steering/injection 通道的所有权跨多 response，attach/continuation
+    // 状态在门判定前已变更，中途拒绝不能整轮重放；预commit 4xx 投影不受影响。
+    installFake(opened(CREATED, { type: "error", status: 429, error: { code: "rate_limit_exceeded", message: "slow" } }));
     const init = streamingInit();
     const prepared = prepareCodexWsRequest(CODEX_URL, init)!;
     const session = new CodexWsSession("wss://chatgpt.com/backend-api/codex/responses", prepared.headers, true);
@@ -345,13 +363,13 @@ describe("everything else keeps today's settle", () => {
 });
 
 describe("refusal identity and hold bound", () => {
-  test("only structured transient 5xx evidence counts", () => {
+  test("structured 4xx/5xx evidence counts, malformed declarations do not", () => {
     expect(codexWsPreOutputRefusalStatus(OVERLOADED)).toBe(503);
     expect(codexWsPreOutputRefusalStatus({ type: "error", error: { code: "server_is_overloaded" } })).toBe(503);
     expect(codexWsPreOutputRefusalStatus({ type: "error", status: 500, error: { message: "boom" } })).toBe(500);
-    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 400, error: { message: "bad" } })).toBeUndefined();
+    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 400, error: { message: "bad" } })).toBe(400);
     expect(codexWsPreOutputRefusalStatus({ type: "error", status: "503" })).toBeUndefined();
-    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 503, error: { code: "rate_limit_requests" } })).toBeUndefined();
+    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 503, error: { code: "rate_limit_requests" } })).toBe(503);
     expect(codexWsPreOutputRefusalStatus({ ...FAILED_OVERLOADED, response: { ...FAILED_OVERLOADED.response, output: [{}] } }))
       .toBeUndefined();
   });
@@ -377,5 +395,105 @@ describe("refusal identity and hold bound", () => {
     expect(response.status).toBe(200);
     expect(Date.now() - started).toBeLessThan(HOLD_MS);
     void response.body?.cancel();
+  });
+});
+
+describe("the unified model-request lane projects every structured 4xx/5xx refusal (2026-10-23)", () => {
+  test("a 429 with a rate-limit code projects with its frame's own Retry-After", async () => {
+    const frame = { type: "error", status: 429, error: { code: "rate_limit_exceeded", message: "slow down" }, headers: { "retry-after": "30" } };
+    const projection = await exchange(opened(CREATED, frame));
+    expect(projection.status).toBe(429);
+    expect(isCodexWsPreOutputRefusal(projection)).toBe(true);
+    expect(isNonReplayableResponse(projection)).toBe(false);
+    expect(projection.headers.get("retry-after")).toBe("30");
+    expect(await projection.clone().json()).toMatchObject({ error: { code: "rate_limit_exceeded" } });
+    // The projection strips upstream retry hints it does not own.
+    expect(projection.headers.get("x-should-retry")).toBeNull();
+    const body = await restoreCodexWsPreOutputRefusal(projection).text();
+    expect(body).toContain("rate_limit_exceeded");
+  });
+
+  test.each([
+    ["usage_limit_reached 503", { type: "error", status: 503, error: { code: "usage_limit_reached", message: "limit" } }, 503],
+    ["quota-worded 502", { type: "error", status: 502, error: { message: "You exceeded your current quota" } }, 502],
+    ["a 401", { type: "error", status: 401, error: { code: "authentication_error", message: "expired" } }, 401],
+    ["a 403", { type: "error", status: 403, error: { code: "permission_error", message: "no access" } }, 403],
+    ["a 404", { type: "error", status: 404, error: { code: "not_found_error", message: "gone" } }, 404],
+    ["a 500", { type: "error", status: 500, error: { message: "boom" } }, 500],
+    ["a 507", { type: "error", status: 507, error: { message: "storage" } }, 507],
+    ["a 599", { type: "error", status: 599, error: { message: "weird edge" } }, 599],
+    ["a statusless policy code", { type: "error", error: { code: "cyber_policy", message: "blocked" } }, 400],
+    ["an invalid_prompt failed terminal", { type: "response.failed", response: { id: "resp_1", status: "failed", output: [], error: { code: "invalid_prompt", message: "prompt flagged" } } }, 400],
+    ["a declared status over a policy code", { type: "error", status: 403, error: { code: "invalid_prompt", message: "flagged" } }, 403],
+    ["the bare capacity sentence", { type: "error", error: { message: "Selected model is at capacity" } }, 503],
+    ["the capacity sentence with a trailing period", { type: "error", error: { message: "Selected model is at capacity." } }, 503],
+    ["the try-a-different-model variant", { type: "error", error: { message: "selected model is at capacity. please try a different model" } }, 503],
+    ["the try-again-later variant", { type: "error", error: { message: "Selected model is at capacity. Please try again later." } }, 503],
+    ["the comma try-again-later variant", { type: "response.failed", response: { id: "resp_1", status: "failed", output: [], error: { message: "selected model is at capacity, please try again later" } } }, 503],
+  ])("%s settles as a replayable gateway %i", async (_name, frame, expected) => {
+    const projection = await exchange(opened(CREATED, frame));
+    expect(projection.status).toBe(expected);
+    expect(isCodexWsPreOutputRefusal(projection)).toBe(true);
+    expect(isNonReplayableResponse(projection)).toBe(false);
+    void restoreCodexWsPreOutputRefusal(projection).body?.cancel();
+  });
+
+  test("an upstream retryable:false hint does not exempt the projection", async () => {
+    const frame = { type: "error", status: 429, error: { code: "rate_limit_exceeded", message: "slow", retryable: false }, headers: { "x-should-retry": false } };
+    const projection = await exchange(opened(CREATED, frame));
+    expect(projection.status).toBe(429);
+    const json = await projection.clone().json() as { error: Record<string, unknown> };
+    expect(json.error.retryable).toBeUndefined();
+    expect(projection.headers.get("x-should-retry")).toBeNull();
+    void restoreCodexWsPreOutputRefusal(projection).body?.cancel();
+  });
+
+  test("the whole 4xx family relays in the body when the hold is off", async () => {
+    const frame = { type: "error", status: 429, error: { code: "rate_limit_exceeded", message: "slow" } };
+    const body = await (await exchange(opened(CREATED, frame), 0)).text();
+    expect(body).toContain("rate_limit_exceeded");
+  });
+
+  test("status declared once inside the error projects without a wrapper alias", () => {
+    expect(codexWsPreOutputRefusalStatus({ type: "error", error: { status: 429, message: "busy" } })).toBe(429);
+    expect(codexWsPreOutputRefusalStatus({ type: "response.failed", response: { status: "failed", output: [], error: { status_code: "503", message: "overloaded" } } })).toBe(503);
+    // Conflicting declarations project nothing (never a fallback-invented status).
+    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 400, error: { status: 400, status_code: 500, message: "x" } })).toBeUndefined();
+    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 200, error: { message: "x" } })).toBeUndefined();
+    expect(codexWsPreOutputRefusalStatus({ type: "error", status: 503, error: { code: "rate_limit_requests", status: 400 } })).toBeUndefined();
+  });
+});
+
+describe("the projection keeps the full Retry-After lower bound across every candidate (root review 2026-10-23)", () => {
+  // 元数据通道的 prelude 头与安全白名单同源：`codex.response.metadata` 帧可以把上游
+  // retry-after 放进 prelude，帧顶层 headers 的投影则会覆盖它——max 必须把两个都收进候选。
+  const RA60 = { type: "codex.response.metadata", headers: { "retry-after": "60" } };
+
+  test("prelude 60 with a top-level frame header of 2 projects 60, not the covering 2", async () => {
+    const frame = { ...OVERLOADED, headers: { "retry-after": "2" } };
+    const projection = await exchange(opened(RA60, CREATED, frame));
+    expect(projection.status).toBe(503);
+    expect(projection.headers.get("retry-after")).toBe("60");
+    void restoreCodexWsPreOutputRefusal(projection).body?.cancel();
+  });
+
+  test("a nested response.failed error.headers Retry-After of 30 is read despite rejectionHeaders dropping it", async () => {
+    const failed = { type: "response.failed", response: { id: "resp_1", status: "failed", output: [], error: { code: "server_is_overloaded", message: "overloaded", headers: { "Retry-After": "30" } } } };
+    const projection = await exchange(opened(CREATED, failed));
+    expect(projection.status).toBe(503);
+    expect(projection.headers.get("retry-after")).toBe("30");
+    void restoreCodexWsPreOutputRefusal(projection).body?.cancel();
+  });
+
+  test("a fractional delta-seconds value is never parsed as a past HTTP-date", async () => {
+    // '1.5' 进 Date.parse 会变成一个过去的日期，下界被截成 0 再抬成 1s，缩短上游指令。
+    const frame = { ...OVERLOADED, headers: { "retry-after": "1.5" } };
+    const projection = await exchange(opened(CREATED, frame));
+    expect(projection.status).toBe(503);
+    const seconds = Number(projection.headers.get("retry-after"));
+    expect(Number.isFinite(seconds)).toBe(true);
+    expect(seconds).toBeGreaterThanOrEqual(1.5);
+    expect(projection.headers.get("retry-after")).toBe("2");
+    void restoreCodexWsPreOutputRefusal(projection).body?.cancel();
   });
 });

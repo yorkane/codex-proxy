@@ -246,6 +246,7 @@ export function planVisionSidecar(
         model: routedModel,
         reasoning: DEFAULT_REASONING,
         timeoutMs: resolveVisionTimeoutMs(cfg.timeoutMs),
+        modelRequestMaxRetries: config.modelRequestMaxRetries,
       },
       maxDescriptionsPerTurn: resolveMaxDescriptionsPerTurn(cfg.maxDescriptionsPerTurn),
     };
@@ -271,6 +272,7 @@ export function planVisionSidecar(
         model,
         reasoning: normalizeVisionReasoningForModel(model, cfg.reasoning) ?? DEFAULT_REASONING,
         timeoutMs: resolveVisionTimeoutMs(cfg.timeoutMs),
+        modelRequestMaxRetries: config.modelRequestMaxRetries,
       },
       maxDescriptionsPerTurn,
     };
@@ -285,6 +287,7 @@ export function planVisionSidecar(
       model,
       reasoning: normalizeVisionReasoningForModel(model, cfg.reasoning) ?? DEFAULT_REASONING,
         timeoutMs: resolveVisionTimeoutMs(cfg.timeoutMs),
+        modelRequestMaxRetries: config.modelRequestMaxRetries,
     },
     maxDescriptionsPerTurn,
   };
