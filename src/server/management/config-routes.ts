@@ -1,4 +1,5 @@
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
+import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT, modelRequestMaxRetries } from "../../lib/model-request-retry";
 import { resolveMainAccountHardLockThresholds } from "../../codex/main-account-hard-lock";
 import { getMainAccountExternalUsageWarning } from "../../codex/main-account-external-usage";
 import { getObservedMainQuotaIdentityKey } from "../../codex/main-account-cache";
@@ -441,6 +442,14 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexDesktopAuthless: config.codexDesktopAuthless === true,
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
       codexClientCompaction: config.codexClientCompaction === true,
+      // The unified model-request retry budget as the running process resolves it (env first,
+      // then config, then the 10-retry floor), so the dashboard reads the effective number
+      // rather than what config.json happens to say. The accepted range travels with it; a
+      // malformed env value is not reported as an override because it changes nothing.
+      modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
+      modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
+      modelRequestMaxRetriesMin: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+      modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
       codexDesktopSwitches: describeCodexDesktopSwitches(config, await observedCodexDesktopSwitchApply()),
       compactionRouting: config.compactionRouting ?? null,
       compactionRecovery: config.compactionRecovery ?? null,
@@ -545,6 +554,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       compactionRecovery?: unknown;
       memoryModels?: unknown;
       reasoningRetention?: unknown;
+      modelRequestMaxRetries?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
@@ -563,8 +573,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.compactionRouting === undefined
       && body.compactionRecovery === undefined
       && body.reasoningRetention === undefined
-      && body.memoryModels === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, or memoryModels" }, 400);
+      && body.memoryModels === undefined
+      && body.modelRequestMaxRetries === undefined) {
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, memoryModels, or modelRequestMaxRetries" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -667,6 +678,20 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     )) {
       return jsonResponse({ error: `appOwnedMemoryBudgetMb must be an integer from ${MIN_APP_OWNED_MEMORY_BUDGET_MB} to ${MAX_APP_OWNED_MEMORY_BUDGET_MB}` }, 400);
     }
+    // The write boundary for the unified model-request retry budget is strict: a 5, a 999, a
+    // 1.5, a "25" or a 0 is refused with the accepted range, never silently widened to the 10
+    // floor. The read-time floor stays in the leaf (a hand-edited disk value still retries at
+    // least 10 times); the API refuses to persist a number that would not mean what it says.
+    // `null` is the documented clear: it deletes the key and the shipped floor applies, so it
+    // is accepted here and handled in the mutation block.
+    if (body.modelRequestMaxRetries !== undefined && body.modelRequestMaxRetries !== null && !(
+      typeof body.modelRequestMaxRetries === "number"
+      && Number.isInteger(body.modelRequestMaxRetries)
+      && body.modelRequestMaxRetries >= DEFAULT_MODEL_REQUEST_MAX_RETRIES
+      && body.modelRequestMaxRetries <= MODEL_REQUEST_MAX_RETRIES_LIMIT
+    )) {
+      return jsonResponse({ error: `modelRequestMaxRetries must be an integer from ${DEFAULT_MODEL_REQUEST_MAX_RETRIES} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}` }, 400);
+    }
     const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention"]);
     const previousSettings = {
       codexAutoStart: config.codexAutoStart,
@@ -699,6 +724,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
       codexClientCompaction: config.codexClientCompaction,
       hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
+      modelRequestMaxRetries: config.modelRequestMaxRetries,
+      hasModelRequestMaxRetries: Object.hasOwn(config, "modelRequestMaxRetries"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
     let pickerIsEnabled = pickerWasEnabled;
@@ -755,6 +782,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Null clears both phases; the GUI sends that when neither row names a model.
       if (memoryModels === null) deleteConfigTopLevelKey(config, "memoryModels");
       else if (memoryModels?.success) config.memoryModels = memoryModels.data;
+      // Absent/default is the floor, so the default is persisted by deleting the key; an
+      // explicit number inside the accepted range is stored verbatim.
+      if (typeof body.modelRequestMaxRetries === "number") {
+        config.modelRequestMaxRetries = body.modelRequestMaxRetries;
+      } else if (body.modelRequestMaxRetries === null) {
+        deleteConfigTopLevelKey(config, "modelRequestMaxRetries");
+      }
       if (quotaAutoRefreshChange) {
         const { id, window, enabled } = quotaAutoRefreshChange;
         const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
@@ -811,6 +845,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasCodexClientCompaction) {
         config.codexClientCompaction = previousSettings.codexClientCompaction;
       } else deleteConfigTopLevelKey(config, "codexClientCompaction");
+      if (previousSettings.hasModelRequestMaxRetries) {
+        config.modelRequestMaxRetries = previousSettings.modelRequestMaxRetries;
+      } else deleteConfigTopLevelKey(config, "modelRequestMaxRetries");
       restoreCompactionRouting();
       throw error;
     }
@@ -866,6 +903,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexDesktopSwitches,
       compactionRouting: config.compactionRouting ?? null,
       compactionRecovery: config.compactionRecovery ?? null,
+      modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
+      modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
+      modelRequestMaxRetriesMin: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+      modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
       reasoningRetention: config.reasoningRetention ?? null,
       // The panel re-reads its own save response, so a missing block would render both
       // phases as "Off" while the server kept them.

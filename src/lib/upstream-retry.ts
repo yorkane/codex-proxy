@@ -17,6 +17,9 @@
  */
 import { clearableDeadline } from "./abort";
 import { redactSecretString } from "./redact";
+import { disposeResponse } from "./response-disposal";
+import { modelRequestMaxAttempts } from "./model-request-retry";
+import { runModelRetryScope } from "./model-retry-scope";
 
 /**
  * Responses the origin may already be executing. RFC 9110 §9.2.2 forbids an intermediary
@@ -242,6 +245,20 @@ export function isTransientUpstreamStatus(status: number): boolean {
     || status === 520 || status === 521 || status === 522;
 }
 
+/**
+ * 统一模型请求 lane 的状态门（fork 新增）：真实上游返回的任何 HTTP 4xx/5xx 都算模型请求
+ * 出错，必须在统一预算内重试。
+ *
+ * 用户合同是「只要是模型请求 4xx/5xx 出错，都必须按配置重试，至少 10 次」。这不以状态码
+ * 白名单、不以响应体文案、也不以上游 `x-should-retry` 提示为门：该提示从来不是本 helper
+ * 的输入（只读 `Retry-After`），上游拒绝提示不豁免本地重试义务。本地制造的信号走各自的
+ * 门，不在此列：`isNonReplayableResponse`（歧义 socket 重置、发出后网关态）依旧一票否决，
+ * 代理本地准入/存储/预算拒绝根本不会以「上游响应」形态进入本 lane。
+ */
+export function isModelHttpErrorStatus(status: number): boolean {
+  return status >= 400 && status <= 599;
+}
+
 export interface RetryBackoffOptions {
   baseDelayMs: number;
   maxDelayMs: number;
@@ -429,6 +446,10 @@ export function retryBackoffDelayMs(attempt: number, opts: RetryBackoffOptions):
 }
 
 export function cancelResponseBodyBestEffort(res: Response): void {
+  // 代理合成的替身响应（预输出投影等）的 body 是已关闭的 JSON，cancel 触达不到真正需要
+  // 清理的上游 reader。中心释放登记（src/lib/response-disposal.ts）在投影构造时写入、在
+  // restore（责任移交）时摘除，所以这里无条件先 dispose：有登记就闭环，无登记是 no-op。
+  try { disposeResponse(res); } catch { /* disposal is best-effort like the cancel below */ }
   try {
     const cancellation = res.body?.cancel();
     if (cancellation) void cancellation.catch(() => {});
@@ -547,6 +568,22 @@ export interface ResetRetryOptions {
 export interface TransientRetryOptions extends ResetRetryOptions {
   /** Test seam: per-attempt slow budget override (defaults to TRANSIENT_RETRY_SLOW_ATTEMPT_MS). */
   slowAttemptMs?: number;
+  /**
+   * 统一模型请求 lane（fork 新增）：把本调用变成「模型 HTTP 错误全重试」形态。
+   *
+   * 与默认（窄瞬态门）的三个差异，全部是用户 2026-10-23 裁决的直接翻译：
+   * 1. 状态门从 {@link isTransientUpstreamStatus} 白名单换成 {@link isModelHttpErrorStatus}
+   *    的 400..599 全集；缺省 `attempts` 从 3 换成统一预算 {@link modelRequestMaxAttempts}
+   *    （默认 11 = 10 次重试 + 首发，env `OCX_MODEL_REQUEST_MAX_RETRIES` 可配）。
+   * 2. slow-attempt 早退（15s「慢 502」形状）移除：真实模型错误按合同至少重试 10 次，
+   *    慢不是放弃的理由。
+   * 3. `Retry-After` 缺省 deadline 从 60s 换成 Infinity：上游点名多久就等多久（下限语义
+   *    不变），caller abort 全程尊重；显式传 `retryAfterCeilingMs` 的调用方保持自报 deadline
+   *    的早退语义。
+   * 本地 non-replayable 标记与 caller abort 的一票否决不变。非模型窄 lane（key failover、
+   * web-search 429、auth 更新）不带此 flag，行为逐字节保持。
+   */
+  modelRetryMode?: boolean;
   /**
    * How long this caller can wait on an honoured `Retry-After`, defaulting to
    * {@link RETRY_AFTER_CEILING_MS}. It is a deadline, never a clamp: an instruction inside it
@@ -728,8 +765,31 @@ export async function fetchWithTransientRetry(
   doFetch: ReplayableFetch,
   opts: TransientRetryOptions = {},
 ): Promise<Response> {
-  const budget = normalizeSendAttempts(opts.attempts, TRANSIENT_RETRY_MAX_ATTEMPTS);
-  const slowAttemptMs = opts.slowAttemptMs ?? TRANSIENT_RETRY_SLOW_ATTEMPT_MS;
+  // 统一模型 lane 的缺省预算是统一请求额（默认 11），窄瞬态 lane 保持 3。
+  const budget = normalizeSendAttempts(
+    opts.attempts,
+    opts.modelRetryMode === true ? modelRequestMaxAttempts() : TRANSIENT_RETRY_MAX_ATTEMPTS,
+  );
+  // 模型 lane 的整个执行体包进统一重试 scope（pause-deferral 契约）：scope 激活期间自动
+  // pause 的持久化提交排队，本 helper 任何出口（返回/抛出/abort）之后、值传播回调用方
+  // 之前由 scope 的 finally flush。reentrant 幂等：nested 调用共享最外层 scope。窄 lane
+  // 不包，逐字节保持原行为。
+  if (opts.modelRetryMode === true) return runModelRetryScope(() => transientRetryRun(doFetch, opts, budget));
+  return transientRetryRun(doFetch, opts, budget);
+}
+
+async function transientRetryRun(
+  doFetch: ReplayableFetch,
+  opts: TransientRetryOptions,
+  budget: number,
+): Promise<Response> {
+  // 模型 lane 移除慢-attempt 早退：真实模型错误按合同重试到底，慢不是放弃理由。
+  const slowAttemptMs = opts.modelRetryMode === true
+    ? Number.POSITIVE_INFINITY
+    : opts.slowAttemptMs ?? TRANSIENT_RETRY_SLOW_ATTEMPT_MS;
+  const isRetryableStatus = opts.modelRetryMode === true
+    ? isModelHttpErrorStatus
+    : (status: number) => isTransientUpstreamStatus(status);
   const transientStatuses: number[] = [];
   // `attempts` is ONE total-send budget shared with the inner reset layer, not a per-layer
   // count. Forwarding it into every `fetchWithResetRetry` made the two multiply: with
@@ -770,7 +830,7 @@ export async function fetchWithTransientRetry(
   for (let attempt = 0; sent < budget; attempt++) {
     // A non-replayable gateway status was settled after the request body had already left
     // for the origin; retrying it here is the automatic resend the marker exists to forbid.
-    if (res.ok || !isTransientUpstreamStatus(res.status) || isNonReplayableResponse(res)) return res;
+    if (res.ok || !isRetryableStatus(res.status) || isNonReplayableResponse(res)) return res;
     // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
     // a response whose body we just cancelled.
     if (opts.abortSignal?.aborted) return res;
@@ -780,7 +840,10 @@ export async function fetchWithTransientRetry(
     // broke it in both directions: a caller with a 30s budget slept the full 45s an upstream
     // asked for, and a caller that could genuinely wait 120s was handed the error back for a
     // 90s instruction it was willing to honour.
-    const waitDeadlineMs = opts.retryAfterCeilingMs ?? RETRY_AFTER_CEILING_MS;
+    // 模型 lane 的缺省 deadline 是 Infinity：上游点名多久就等多久，真实模型错误不因
+    // 60s 默认被提前放弃；显式传入的调用方 deadline 仍被完整尊重。
+    const waitDeadlineMs = opts.retryAfterCeilingMs
+      ?? (opts.modelRetryMode === true ? Number.POSITIVE_INFINITY : RETRY_AFTER_CEILING_MS);
     if (instructedDelay !== undefined && instructedDelay > waitDeadlineMs) {
       // Honouring the stated wait would park this request past the deadline it can commit
       // to, and sleeping only up to the deadline is a send the provider already said it will

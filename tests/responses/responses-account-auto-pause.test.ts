@@ -9,6 +9,7 @@ import { flushResponseState, clearResponseStateForTests } from "../../src/respon
 import { clearGenericFailoverHealth } from "../../src/oauth/generic-account-failover";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
 import type { OcxConfig } from "../../src/types";
 
 const originalHome = process.env.OPENCODEX_HOME;
@@ -20,8 +21,10 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = home;
   releaseSpend = acquireOwnedSpendHome();
   clearGenericFailoverHealth();
+  immediateBackoff();
 });
 afterEach(async () => {
+  restoreImmediateBackoff();
   await flushResponseState(); clearResponseStateForTests();
   releaseSpend(); clearGenericFailoverHealth();
   globalThis.fetch = originalFetch;
@@ -60,10 +63,13 @@ for (const oauth of [true, false]) {
     }) as typeof fetch;
     const first = await send(config, name);
     expect(first.status, first.text).toBe(403);
-    expect(sends.length).toBe(1);
+    // Unified model-request lane: the in-request 403 is retried to the 11-send budget on the
+    // same credential, the automatic pause settles at the request end, so no sibling send is
+    // bought inside the request that pauses (deferral contract, 2026-10-23).
+    expect(sends.length).toBe(11);
     const second = await send(config, name);
     expect(second.status, second.text).toBe(200);
-    expect(sends).toEqual([`Bearer synthetic-${oauth ? "0" : "A"}`, `Bearer synthetic-${oauth ? "0" : "A"}`, `Bearer synthetic-${oauth ? "1" : "B"}`]);
+    expect(sends).toEqual([...Array(11).fill(`Bearer synthetic-${oauth ? "0" : "A"}`), `Bearer synthetic-${oauth ? "1" : "B"}`]);
     const third = await send(config, name);
     expect(third.status, third.text).toBe(200);
     expect(sends.at(-1)).toBe(`Bearer synthetic-${oauth ? "1" : "B"}`);
@@ -77,7 +83,10 @@ test("default-off HTTP requests preserve the refusal and never rotate/pause", as
   let sends = 0;
   globalThis.fetch = (async () => { sends++; return orgRefusal(); }) as typeof fetch;
   for (let n = 0; n < 3; n++) expect((await send(config, "fixture")).status).toBe(403);
-  expect(sends).toBe(3);
+  // 统一模型 lane（root 2026-10-23 裁决）：auto-pause 关闭不豁免上游重试义务——
+  // 403 是真实上游模型拒绝，每个请求在自己的统一 ladder 上打满 11 送后以 403 收场，
+  // 3 请求 = 33 送。no-rotate/no-pause 的验证点保持：池行不被禁用。
+  expect(sends).toBe(33);
   expect(config.providers.fixture!.apiKeyPool![0]!.disabled).not.toBe(true);
 });
 
@@ -103,7 +112,8 @@ test("Anthropic organization refusal pauses and rebuilds the in-flight OAuth req
     expect(first.status, first.text).toBe(403);
     const second = await send(config, "anthropic");
     expect(second.status, second.text).toBe(200);
-    expect(sends).toEqual(["Bearer synthetic-0", "Bearer synthetic-0", "Bearer synthetic-1"]);
+    // Same lane shape as above: eleven refusals on account 0, pause at request end, sibling next request.
+    expect(sends).toEqual([...Array(11).fill("Bearer synthetic-0"), "Bearer synthetic-1"]);
     expect(getAccountSet("anthropic")!.accounts[0]!.paused).toBe(true);
   } finally { clearAnthropicAccountPoolState(); }
 });
@@ -155,7 +165,7 @@ test("Codex pool permanent refusal pauses without forcing reauth and retries a s
     const secondText = await second.text();
     expect(second.status, secondText).toBe(200);
     expect(config.pausedCodexAccountIds).toContain("fixture-a");
-    expect(sends).toEqual(["Bearer synthetic-fixture-a", "Bearer synthetic-fixture-a", "Bearer synthetic-fixture-b"]);
+    expect(sends).toEqual([...Array(11).fill("Bearer synthetic-fixture-a"), "Bearer synthetic-fixture-b"]);
   } finally { clearCodexUpstreamHealth(); clearThreadAccountMap(); }
 });
 
@@ -180,7 +190,7 @@ test("native Messages keeps OAuth auto-pause and current-request rotation", asyn
   try {
     const first = await sendNative(); await first.text(); expect(first.status).toBe(403);
     const second = await sendNative(); const text = await second.text(); expect(second.status, text).toBe(200);
-    expect(sends).toEqual(["Bearer synthetic-native-0", "Bearer synthetic-native-0", "Bearer synthetic-native-1"]);
+    expect(sends).toEqual([...Array(11).fill("Bearer synthetic-native-0"), "Bearer synthetic-native-1"]);
   } finally { clearAnthropicAccountPoolState(); }
 });
 
@@ -193,11 +203,13 @@ test("provider-specific exact send total preserves the original refusal", async 
   globalThis.fetch = (async () => { sends++; return orgRefusal(); }) as typeof fetch;
   const response = await send(config, "fixture");
   expect(response.status, response.text).toBe(403);
-  expect(sends).toBe(1);
+  // The unified floor outranks a provider attempts value: 1 folds into `configured` and
+  // resolves to the 10-retry floor, so the lane spends the full 11 sends before settling.
+  expect(sends).toBe(11);
 });
 
 for (const wire of ["chat", "messages"] as const) for (const distributed of [false, true]) {
-  test(`native ${wire} recovers auto-pause reached after a same-key 429 replay (distributed=${distributed})`, async () => {
+  test(`native ${wire} rides the unified same-key ladder to a committed pause; the next request is served by the sibling (distributed=${distributed})`, async () => {
     const config = configFor("fixture", false);
     const provider = config.providers.fixture!;
     provider.accountAutoPause = { enabled: true, consecutiveFailures: 1 };
@@ -213,7 +225,8 @@ for (const wire of ["chat", "messages"] as const) for (const distributed of [fal
       const headers = new Headers(init?.headers);
       sends.push(headers.get("authorization") ?? headers.get("x-api-key") ?? "missing");
       if (sends.length === 1) return Response.json({ error: { type: "rate_limit_error", message: "synthetic rate limit" } }, { status: 429 });
-      if (sends.length === 2) return orgRefusal();
+      // 统一 lane（root 2026-10-23 裁决）：403 也是可重放状态，同 key ladder 每送都收到它。
+      if (sends.length <= 11) return orgRefusal();
       return wire === "chat" ? completion() : Response.json({ id: "synthetic-message", type: "message", role: "assistant", model: "fixture", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } });
     }) as typeof fetch;
     const body = { model: "fixture/fixture", max_tokens: 64, messages: [{ role: "user", content: "synthetic" }], stream: false };
@@ -222,9 +235,19 @@ for (const wire of ["chat", "messages"] as const) for (const distributed of [fal
       ? await (await import("../../src/server/chat-completions")).handleChatCompletions(req, config, { model: "fixture", provider: "fixture" })
       : await (await import("../../src/server/claude-messages")).handleClaudeMessages(req, config, { model: "fixture", provider: "fixture" });
     const text = await response.text();
-    expect(response.status, text).toBe(200);
-    expect(sends.length).toBe(3);
-    expect(sends[2]).toContain("synthetic-B");
+    // 首送 429 起整条 lane 就是同 key 统一阶梯：request 内不换 key，A 的永久 403 连续
+    // 拒绝在 scope flush 后提交 pause，本请求花满 11 送以 403 收场。
+    expect(response.status, text).toBe(403);
+    expect(sends.length).toBe(11);
+    expect(sends.every(auth => auth.includes("synthetic-A"))).toBe(true);
     expect(config.providers.fixture!.apiKeyPool![0]!.disabled).toBe(true);
+    // pause 跨请求持久：下一个请求由健康兄弟服务（原始功能保持被验证）。
+    const req2 = new Request(`http://localhost/v1/${wire === "chat" ? "chat/completions" : "messages"}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const response2 = wire === "chat"
+      ? await (await import("../../src/server/chat-completions")).handleChatCompletions(req2, config, { model: "fixture", provider: "fixture" })
+      : await (await import("../../src/server/claude-messages")).handleClaudeMessages(req2, config, { model: "fixture", provider: "fixture" });
+    const text2 = await response2.text();
+    expect(response2.status, text2).toBe(200);
+    expect(sends[11]).toContain("synthetic-B");
   });
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as retry from "../../../src/lib/upstream-retry";
+import { modelRequestMaxAttempts } from "../../../src/lib/model-request-retry";
 import { createRequestExecutionBudget } from "../../../src/lib/request-execution-budget";
 import { budgetOwner } from "../../helpers/send-budget-owner";
 import type { AdapterRequest } from "../../../src/adapters/base";
@@ -8,10 +9,17 @@ import { ANTIGRAVITY_VALIDATION_REQUIRED_PREFIX, safeVertexHttpErrorMessage, ret
 import { isAntigravityValidationRefusal } from "../../../src/server/responses/antigravity-validation-refusal";
 
 describe("Antigravity 403 body boundary", () => {
+  // 统一模型 lane 下 403 也进 ladder；本组钉的是 403 体边界（读取上限/脱敏），
+  // 用 caller 单发送预算把 ladder 固定在一次，保持测试的时间边界原义。
+  const singleSend = () => createRequestExecutionBudget({
+    maxTotalModelSends: 1, baseSendAllowance: 1, finalRecoveryAllowance: 0,
+    maxAlternateTargetSends: 1, maxTargetTransitions: 0,
+  });
   test("a complete structured reason inside 4096 bytes survives normalization", async () => {
     const payload = JSON.stringify({ error: { status: "PERMISSION_DENIED", message: "validate",
       details: [{ reason: "VALIDATION_REQUIRED" }] } });
     const result = await fetchAntigravityWithRetry(request, {
+      sendBudget: singleSend(),
       executor: (async () => new Response(payload, { status: 403 })) as typeof fetch,
     });
     expect((await result.text()).startsWith(`${ANTIGRAVITY_VALIDATION_REQUIRED_PREFIX}:`)).toBe(true);
@@ -38,6 +46,7 @@ describe("Antigravity 403 body boundary", () => {
     const payload = JSON.stringify({ error: { status: "PERMISSION_DENIED", message: "secret-canary",
       filler: "x".repeat(4200), details: [{ reason: "VALIDATION_REQUIRED" }] } });
     const result = await fetchAntigravityWithRetry(request, {
+      sendBudget: singleSend(),
       executor: (async () => new Response(payload, { status: 403 })) as typeof fetch,
     });
     const text = await result.text();
@@ -49,6 +58,7 @@ describe("Antigravity 403 body boundary", () => {
     const stalled = new ReadableStream<Uint8Array>({ start() {} });
     const start = performance.now();
     const result = await fetchAntigravityWithRetry(request, {
+      sendBudget: singleSend(),
       executor: (async () => new Response(stalled, { status: 403 })) as typeof fetch,
     });
     expect(performance.now() - start).toBeLessThan(3500);
@@ -66,14 +76,42 @@ const request: AdapterRequest = {
   body: "{}",
 };
 
-function mockFetch(responses: Array<Response | Error>): { calls: RequestInit[] } {
+function mockFetch(responses: Array<Response | Error | (() => Response | Error)>): { calls: RequestInit[] } {
+  // 统一 lane 的 ladder 会打到 11 送：单元素脚本被重复消费时，重试路径会 cancel 掉被丢弃
+  // 的响应体，之后复用同一 Response（连 clone 都不行——原体已 disturbed）就报 Body already
+  // used（旧 3 送合同在 cancel 之前收场，掩盖了这一点）。首次投递交付原对象——身份断言与
+  // body 钩子挂在它身上——并在投递前捕获体/状态/头规格；之后的重复投递按规格新建独立
+  // Response，每送消费各自的流。需要逐字保真身份/钩子且被反复消费的用例（自定义
+  // body.cancel）传工厂函数：每送调用一次，不做 clone 规格捕获（clone 会 tee 掉流，
+  // 把钩子换掉）。
   const calls: RequestInit[] = [];
   let i = 0;
+  type Spec = { text: string; status: number; statusText: string; headers: Headers };
+  const specs: Array<Spec | undefined> = responses.map(() => undefined);
   globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
     calls.push(init ?? {});
-    const next = responses[i++] ?? responses[responses.length - 1];
+    const index = i < responses.length ? i : responses.length - 1;
+    i += 1;
+    const entry = responses[index]!;
+    const next = typeof entry === "function" ? entry() : entry;
     if (next instanceof Error) throw next;
-    return next;
+    if (typeof entry === "function") return next;
+    if (specs[index] === undefined) {
+      // 首投：先捕获规格，再交付原对象本体（身份断言与 body 钩子挂在它身上）。
+      specs[index] = {
+        text: await next.clone().text(),
+        status: next.status,
+        statusText: next.statusText,
+        headers: new Headers(next.headers),
+      };
+      return next;
+    }
+    const spec = specs[index]!;
+    return new Response(spec.text, {
+      status: spec.status,
+      statusText: spec.statusText,
+      headers: new Headers(spec.headers),
+    });
   }) as typeof fetch;
   return { calls };
 }
@@ -84,6 +122,7 @@ function vertexError(code: number, status: string, message: string): string {
 
 describe("vertex retry fetch", () => {
   test("Google preserves the executor TypeError after its header deadline", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const original = new TypeError("google executor deadline rejection");
     let sends = 0;
     const executor = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -95,7 +134,9 @@ describe("vertex retry fetch", () => {
       });
     }) as typeof fetch;
     await expect(fetchVertexWithRetry(request, { executor, timeoutMs: 1 })).rejects.toBe(original);
-    expect(sends).toBe(retry.TRANSIENT_RETRY_MAX_ATTEMPTS);
+    waits.mockRestore();
+    // 统一模型 lane（2026-10-23）：无 caller 账本时 ladder 上限是统一预算（11 起），不再是 3。
+    expect(sends).toBe(modelRequestMaxAttempts());
   });
 
   for (const [name, fetchResponse] of [["Vertex", fetchVertexWithRetry], ["Antigravity", fetchAntigravityWithRetry]] as const) {
@@ -172,9 +213,8 @@ describe("vertex retry fetch", () => {
     } finally { waits.mockRestore(); dispose(); }
   });
 
-  test("a status the ladder would never retry reports nothing withheld", async () => {
-    // The other half of the four-way distinction: no recovery kind AND no withheld reason has
-    // to keep meaning "nothing was eligible", or the new field says everything and so nothing.
+  test("a budget-refused 404 reports the withheld recovery (unified lane: 4xx is eligible)", async () => {
+    // 统一模型 lane（2026-10-23）：404 现在也是可重放族的一员，被预算拒绝时按 #5044 归因。
     const parent = createRequestExecutionBudget();
     parent.used = 3;
     const { owner, dispose } = budgetOwner(parent);
@@ -190,10 +230,11 @@ describe("vertex retry fetch", () => {
       const response = await fetchVertexWithRetry(request, {
         sendBudget: scope,
         returnRawErrors: true,
+        onPhysicalSend: () => {},
         onRecoveryWithheld: event => withheld.push(event.reason),
       });
       expect(response).toBe(first);
-      expect(withheld).toEqual([]);
+      expect(withheld).toEqual(["retry-send-budget"]);
     } finally { dispose(); }
   });
 
@@ -241,20 +282,26 @@ describe("vertex retry fetch", () => {
   });
 
   test("retries without waiting for retryable response body cancellation", async () => {
-    const first = new Response("overloaded", { status: 503, headers: { "Retry-After": "0" } });
-    const neverSettles = new Promise<void>(() => {});
+    // 行义不变：cancel() 永不 resolve 时重试照走。后退计时器 mock 掉，让 250ms 竞速
+    // 只钉"cancel 未被等待"这一件事，而不是撞上 320–480ms 的真实首步退避。
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
+    // 工厂投递：每送一具新 Response，钩子挂在被投递的那一具本体上——重试路径 cancel 的
+    // 正是这具流；mock 对工厂条目不做 clone 规格捕获（clone 的 tee 会替换流、抹掉钩子）。
+    const makeStalled = (): Response => {
+      const first = new Response("overloaded", { status: 503, headers: { "Retry-After": "0" } });
+      const neverSettles = new Promise<void>(() => {});
+      const originalCatch = neverSettles.catch.bind(neverSettles);
+      Object.defineProperty(neverSettles, "catch", {
+        value: (onRejected: (reason: unknown) => unknown) => {
+          rejectionObserved = true;
+          return originalCatch(onRejected);
+        },
+      });
+      Object.defineProperty(first.body!, "cancel", { value: () => neverSettles });
+      return first;
+    };
     let rejectionObserved = false;
-    const originalCatch = neverSettles.catch.bind(neverSettles);
-    Object.defineProperty(neverSettles, "catch", {
-      value: (onRejected: (reason: unknown) => unknown) => {
-        rejectionObserved = true;
-        return originalCatch(onRejected);
-      },
-    });
-    Object.defineProperty(first.body!, "cancel", {
-      value: () => neverSettles,
-    });
-    const mock = mockFetch([first, new Response("ok", { status: 200 })]);
+    const mock = mockFetch([makeStalled, () => new Response("ok", { status: 200 })]);
 
     const res = await Promise.race([
       fetchVertexWithRetry(request, { timeoutMs: 5_000 }),
@@ -265,24 +312,26 @@ describe("vertex retry fetch", () => {
     expect(await res.text()).toBe("ok");
     expect(mock.calls).toHaveLength(2);
     expect(rejectionObserved).toBe(true);
+    waits.mockRestore();
   });
 
   test("retries a thrown network error then succeeds", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const mock = mockFetch([new Error("ECONNRESET"), new Response("ok", { status: 200 })]);
     const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
     expect(res.status).toBe(200);
     expect(mock.calls).toHaveLength(2);
+    waits.mockRestore();
   });
 
-  test("does NOT retry a quota-exhausted 429 (single attempt), but DOES retry a plain rate-limit 429", async () => {
+  test("retries a quota-exhausted 429 too (unified lane: no body-class veto)", async () => {
     const quota = mockFetch([
       new Response(vertexError(429, "RESOURCE_EXHAUSTED", "Quota exceeded for your current billing plan"), { status: 429, headers: { "Retry-After": "0" } }),
       new Response("ok", { status: 200 }),
     ]);
     const qres = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
-    expect(qres.status).toBe(429);
-    expect(await qres.text()).toContain("Vertex AI quota exhausted");
-    expect(quota.calls).toHaveLength(1);
+    expect(qres.status).toBe(200);
+    expect(quota.calls).toHaveLength(2);
 
     const rate = mockFetch([
       new Response(vertexError(429, "RESOURCE_EXHAUSTED", "rate limit, try again"), { status: 429, headers: { "Retry-After": "0" } }),
@@ -293,12 +342,14 @@ describe("vertex retry fetch", () => {
     expect(rate.calls).toHaveLength(2);
   });
 
-  test("does not retry a non-retryable 400 and classifies the body", async () => {
+  test("retries a plain 400 to the unified cap and classifies the final body", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const mock = mockFetch([new Response(vertexError(400, "INVALID_ARGUMENT", "bad model"), { status: 400 })]);
     const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("Vertex AI invalid request");
-    expect(mock.calls).toHaveLength(1);
+    expect(mock.calls).toHaveLength(modelRequestMaxAttempts());
+    waits.mockRestore();
   });
 
   test("replays one structurally repaired request after a provider schema 400", async () => {
@@ -331,36 +382,39 @@ describe("vertex retry fetch", () => {
   });
 
   test("raw mode preserves final error body and headers without normalization", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const raw = vertexError(400, "INVALID_ARGUMENT", "provider-private-detail");
     const mock = mockFetch([new Response(raw, { status: 400, headers: { "x-provider-error": "raw" } })]);
     const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000, returnRawErrors: true });
     expect(res.headers.get("x-provider-error")).toBe("raw");
     expect(await res.text()).toBe(raw);
-    expect(mock.calls).toHaveLength(1);
+    expect(mock.calls).toHaveLength(modelRequestMaxAttempts());
+    waits.mockRestore();
   });
 
-  test("raw mode does NOT retry a quota-exhausted 429 and preserves raw response", async () => {
+  test("raw mode retries a quota-exhausted 429 and keeps the raw shape on exhaustion", async () => {
     const raw = vertexError(429, "RESOURCE_EXHAUSTED", "Quota exceeded for billing");
     const mock = mockFetch([
       new Response(raw, { status: 429, headers: { "Retry-After": "0", "x-raw-quota": "1" } }),
       new Response("ok", { status: 200 }),
     ]);
     const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000, returnRawErrors: true });
-    expect(mock.calls).toHaveLength(1);
-    expect(res.status).toBe(429);
-    expect(res.headers.get("x-raw-quota")).toBe("1");
-    expect(await res.text()).toBe(raw);
+    expect(mock.calls).toHaveLength(2);
+    expect(res.status).toBe(200);
   });
 
   test("Antigravity normal mode retains classified redacted errors", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     mockFetch([new Response(vertexError(400, "INVALID_ARGUMENT", "bad Authorization: Bearer secret-token"), { status: 400 })]);
     const res = await fetchAntigravityWithRetry(request, { timeoutMs: 5_000 });
     const text = await res.text();
     expect(text).toContain("Antigravity invalid request");
     expect(text).not.toContain("secret-token");
+    waits.mockRestore();
   });
 
   test("Antigravity location denial surfaces as location-not-supported with the upstream 400 (#3467)", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const mock = mockFetch([new Response(
       vertexError(400, "FAILED_PRECONDITION", "User location is not supported for the API use."),
       { status: 400 },
@@ -370,20 +424,25 @@ describe("vertex retry fetch", () => {
     const text = await res.text();
     expect(text).toContain("Antigravity location not supported");
     expect(text).not.toContain("invalid request");
-    expect(mock.calls).toHaveLength(1);
+    // 统一 lane（2026-10-23）：这条 400 也在可重放族里，同目标 ladder 打满预算后按
+    // #3467 交付终态分类体；旧"一次即停"合同作废。
+    expect(mock.calls).toHaveLength(modelRequestMaxAttempts());
+    waits.mockRestore();
   });
 
-  test("does not retry 401/403 (single attempt)", async () => {
+  test("retries 401/403 as well (unified lane, cap-bounded, final classified body)", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const mock401 = mockFetch([new Response(vertexError(401, "UNAUTHENTICATED", "bad token"), { status: 401 })]);
     const res401 = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
     expect(res401.status).toBe(401);
     expect(await res401.text()).toContain("Vertex AI authentication failed");
-    expect(mock401.calls).toHaveLength(1);
+    expect(mock401.calls).toHaveLength(modelRequestMaxAttempts());
 
     const mock403 = mockFetch([new Response(vertexError(403, "PERMISSION_DENIED", "no access"), { status: 403 })]);
     const res403 = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
     expect(res403.status).toBe(403);
-    expect(await res403.text()).toContain("Vertex AI access denied");
+    expect(mock403.calls).toHaveLength(modelRequestMaxAttempts());
+    waits.mockRestore();
   });
 
   test("aborts promptly when the caller signal fires", async () => {
@@ -405,33 +464,35 @@ describe("vertex retry fetch", () => {
     expect(mock.calls).toHaveLength(2);
   });
 
-  test("direct AI Studio keeps the raw final error body and does not replay repaired 400s", async () => {
+  test("direct AI Studio keeps raw 400 semantics (no repair replay) and retries to the cap", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const raw = vertexError(400, "INVALID_ARGUMENT", "tools.0.custom.input_schema: JSON schema is invalid");
     const mock = mockFetch([
       new Response(raw, { status: 400, headers: { "x-provider-error": "raw" } }),
       new Response("ok", { status: 200 }),
     ]);
     const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
-    expect(res.status).toBe(400);
-    expect(res.headers.get("x-provider-error")).toBe("raw");
-    expect(await res.text()).toBe(raw);
-    expect(mock.calls).toHaveLength(1);
+    // 统一 lane：400 进重放但没有结构修复（AI Studio 无 repair 路径），第二送即恢复。
+    // "no repair replay" 钉在重放的字节上：两次投递的 body 逐字相同。
+    expect(res.status).toBe(200);
+    expect(mock.calls).toHaveLength(2);
+    expect(mock.calls[1]?.body).toBe(mock.calls[0]?.body);
+    waits.mockRestore();
   });
 
-  test("direct AI Studio does NOT retry a quota-exhausted 429 (single attempt, raw body returned)", async () => {
+  test("direct AI Studio retries a quota-exhausted 429 and serves the recovery", async () => {
     const raw = vertexError(429, "RESOURCE_EXHAUSTED", "Quota exceeded for quota metric 'Generate Content API requests'");
     const mock = mockFetch([
       new Response(raw, { status: 429, headers: { "Retry-After": "0", "x-direct-raw": "quota" } }),
       new Response("ok", { status: 200 }),
     ]);
     const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
-    expect(mock.calls).toHaveLength(1);
-    expect(res.status).toBe(429);
-    expect(res.headers.get("x-direct-raw")).toBe("quota");
-    expect(await res.text()).toBe(raw);
+    expect(mock.calls).toHaveLength(2);
+    expect(res.status).toBe(200);
   });
 
   test("direct AI Studio retries transient rate-limit 429s (bounded, raw body on exhaustion)", async () => {
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
     const raw = vertexError(429, "RESOURCE_EXHAUSTED", "rate limit, try again");
     const mock = mockFetch([
       new Response(raw, { status: 429, headers: { "Retry-After": "0" } }),
@@ -439,9 +500,10 @@ describe("vertex retry fetch", () => {
       new Response(raw, { status: 429, headers: { "Retry-After": "0", "x-final": "yes" } }),
     ]);
     const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
-    expect(mock.calls).toHaveLength(3);
+    expect(mock.calls).toHaveLength(modelRequestMaxAttempts());
     expect(res.headers.get("x-final")).toBe("yes");
     expect(await res.text()).toBe(raw);
+    waits.mockRestore();
   });
 
   test("fetchGoogleWithRetry routes physical attempts through ctx.executor when provided", async () => {

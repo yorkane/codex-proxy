@@ -22,7 +22,8 @@ import { providerFetch } from "./fetch-helpers";
 import { normalizeLogConversationId } from "../request-log-conversation";
 import { normalizeDeclaredToolName, type AdapterEvent, type OcxProviderContinuationState } from "../../types";
 import { adapterFailureFromMessage, SEND_BUDGET_EXHAUSTED_CODE, SPEND_LEDGER_STORAGE_UNAVAILABLE_CODE, type OcxErrorPayload } from "../../lib/errors";
-import { SendBudgetExhaustedError, markResponseNonReplayable } from "../../lib/upstream-retry";
+import { SendBudgetExhaustedError, markResponseNonReplayable, sleepWithAbort } from "../../lib/upstream-retry";
+import { isModelHttpErrorForPreflight, modelErrorPreflightRetryDelayMs } from "./model-error-preflight";
 import { hasKeyPoolFailover, rotateProviderTransportOn401, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import {
   hasEligibleGenericOAuthFailoverTarget,
@@ -134,6 +135,7 @@ export async function executeResponsesRunTurn(
     | "noteAdapterRecoveryWithheld"
     | "reserveCredentialHop"
     | "pendingHopPermit"
+    | "requestModelSendLimit"
   >,
   completionPolicy: Pick<ResponsesCompletionPolicy, "emptyCompletionGuardEnabled" | "emptyCompletionGuardMaxRetries">,
 ): Promise<Response> {
@@ -160,6 +162,7 @@ export async function executeResponsesRunTurn(
     noteAdapterPhysicalSend,
     noteAdapterRecoveryWithheld,
     reserveCredentialHop,
+    requestModelSendLimit,
   } = sendBudgetState;
   const { emptyCompletionGuardEnabled, emptyCompletionGuardMaxRetries } = completionPolicy;
   const {
@@ -421,10 +424,12 @@ export async function executeResponsesRunTurn(
     const wsFirstParsed = wsPlan ? runTurnWebSearchInitialParsed(parsed) : parsed;
     const runTurn = async (): Promise<void> => runTurnAttempt(queue, undefined, true, wsFirstParsed, initialPacingSlot);
     const runTurnFailoverArmed = () =>
-      route.provider.authMode === "oauth"
-      || (transportState.runTurnAdapter.name === "qoder" && hasKeyPoolFailover(route.provider))
-      || !!(transportState.genericFailoverAccountId
-        && isGenericOAuthFailoverEnabled(config, route.providerName));
+      // 统一模型请求 lane（fork 2026-10-23 用户裁决）：preflight 重放对每条 runTurn lane
+      // 全量武装。合同覆盖所有模型请求的 4xx/5xx，不以凭证形态（oauth/key-pool/泛池）
+      // 为门。凭证恢复 arm（key/oauth 轮换）在 recoverRunTurnAdapterOnPreflightError 内
+      // 自持其谓词，未配置池的 lane 那些 arm 照常返回 false；统一同目标 arm 接管其余
+      // 状态。预输出缓冲语义不变：只 hold 心跳与首个有意义事件，replayUnsafe 即放弃。
+      true;
     const dispatchSearchIteration = (iterParsed: PreparedResponsesRequest["parsed"]): AsyncIterable<AdapterEvent> => {
       const iterQueue = createAdapterEventQueue({
         onBacklogExceeded: () => runTurnAbort.abort(),
@@ -585,6 +590,11 @@ export async function executeResponsesRunTurn(
       if (keyRecovery) return keyRecovery;
       if (await recoverRunTurnAdapterOnPreflight401(error)) return "oauth-401";
       if (await rotateRunTurnAdapterOnPreflight429(error)) return "oauth-account-429";
+      // 统一模型请求 lane（fork 2026-10-23 用户裁决）：凭证轮换 arm 全部消费/拒绝之后，
+      // 真实上游 400..599 的预输出错误仍进同目标有界重放（同一 ledger，transient 类：
+      // base 用尽即拒，永不消耗唯一 final-recovery reserve）。本地拒绝码与
+      // retryable:false（歧义重置）由门函数一票否决，不在此列。
+      if (await recoverRunTurnModelSameTarget(error)) return "model-error-retry";
       return undefined;
     };
     const rotateRunTurnAdapterOnPreflight429 = async (
@@ -653,6 +663,54 @@ export async function executeResponsesRunTurn(
         hop.permit?.release();
         return false;
       }
+    };
+    // 统一模型请求 lane（fork 2026-10-23 用户裁决）：凭证轮换 arm 全部消费/拒绝之后，真实
+    // 上游 4xx/5xx 的预输出错误进同目标有界重放。判定门（retryable:false 不再否决、上游
+    // cyber_policy 不算本地拒绝、歧义重置码与精确本地码白名单一票否决）在
+    // model-error-preflight.ts。重发是一次 recovery leg：先 reserve（transient 类——base 用尽
+    // 即拒，`transient` 不在 RESERVE_FUNDED_CLASSES，永不消耗那唯一一次 final-recovery
+    // reserve），再经 pendingHopPermit 把预订递给重放 attempt（与轮换 hop 相同的 #4709 移交
+    // 语义：adapter 的 dispatch ladder 消耗首 reservation，防一层预订一层收费）。
+    // targetKey 用 lastTargetKey——同目标重发不是端点迁移，不得消耗 maxTargetTransitions/
+    // maxAlternateTargetSends 那两份单一额度。Retry-After 是下限：等满指令时长，caller abort
+    // 打断即停（把预订还回去，不消耗重试计数）。
+    let modelErrorRetries = 0;
+    const recoverRunTurnModelSameTarget = async (
+      error: Extract<AdapterEvent, { type: "error" }>,
+    ): Promise<boolean> => {
+      if (runTurnAbort.signal.aborted) return false;
+      if (!isModelHttpErrorForPreflight(error)) return false;
+      // 本地计数与 ledger 相交：requestModelSendLimit 是绝对总发送数（11 = 首发 + 10 次重
+      // 试），本计数管「至少 10」的合同独立于 combo 派生 scope 等 ledger 侧效应；reserve
+      // 管物理总量硬顶。两者取先到。
+      if (modelErrorRetries >= requestModelSendLimit - 1) {
+        noteAdapterRecoveryWithheld({ reason: "retry-send-budget" });
+        return false;
+      }
+      const decision = adapterDispatchBudget
+        ? adapterDispatchBudget.reserveDispatch({
+            sendClass: "transient",
+            targetKey: adapterDispatchBudget.lastTargetKey ?? `${route.providerName}|${route.modelId}`,
+          })
+        : undefined;
+      if (decision && !decision.allowed) {
+        noteAdapterRecoveryWithheld({ reason: "retry-send-budget" });
+        return false;
+      }
+      const delayMs = modelErrorPreflightRetryDelayMs(error);
+      try {
+        await sleepWithAbort(delayMs, runTurnAbort.signal);
+      } catch {
+        decision?.permit.release();
+        return false;
+      }
+      if (runTurnAbort.signal.aborted) {
+        decision?.permit.release();
+        return false;
+      }
+      modelErrorRetries += 1;
+      if (decision?.permit) sendBudgetState.pendingHopPermit = decision.permit;
+      return true;
     };
     const streamAfterPreflight = (
       initialSource: AsyncIterable<AdapterEvent>,

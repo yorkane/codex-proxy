@@ -10,7 +10,8 @@
  */
 import type { OcxProviderConfig } from "../types";
 import { getValidAccessTokenSnapshot, publicOAuthAuthenticationErrorMessage } from "../oauth";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
@@ -68,7 +69,7 @@ export async function runGeminiWebSearch(
   const sidecarExit = sidecarEnter("web-search");
   const t0 = Date.now();
   try {
-    const res = await fetchWithResetRetry(
+    const res = await fetchSidecarModel(
       recovery => fetch(`${base}/v1internal:generateContent`, applyUpstreamRecoveryInit({
         method: "POST",
         headers: {
@@ -80,7 +81,9 @@ export async function runGeminiWebSearch(
         signal: linkedSignal.signal,
         redirect: "manual",
       }, recovery)),
-      { replaySafe: true, abortSignal: linkedSignal.signal, label: "gemini-web-search-sidecar" },
+      // 统一模型合同（2026-10-23）：Antigravity generateContent 是模型生成调用，独立 sidecar
+      // 无共享账本，预算见 sidecar-model-retry；模型 POST 不声明 replaySafe。
+      { abortSignal: linkedSignal.signal, label: "gemini-web-search-sidecar", configuredRetries: settings.modelRequestMaxRetries, targetKey: () => `${base}/v1internal:generateContent`, retryAfterCeilingMs: settings.timeoutMs - (Date.now() - t0) },
     );
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     try {

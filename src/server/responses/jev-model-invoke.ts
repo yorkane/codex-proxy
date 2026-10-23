@@ -154,7 +154,7 @@ export function createJevModelInvoker(context: JevModelInvokerContext): JevModel
         callerDirectAuth: null,
         openAiSidecarAuth: null,
         nativeCallerAuth: null,
-        sendBudget: createInferenceSendBudget(context.req, childLog),
+        sendBudget: createInferenceSendBudget(context.req, childLog, context.config.modelRequestMaxRetries),
         turnAdmissionLease: lease,
         internalDecisionCall: true,
       });

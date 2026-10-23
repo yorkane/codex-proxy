@@ -69,6 +69,14 @@ interface ZedRequestOptions {
   fetchFn?: ZedFetch;
   signal?: AbortSignal;
   forceRefresh?: boolean;
+  /**
+   * 401 协议重放的准入闸门（统一模型重试 lane 用）：first 响应命中 refresh 信号后，
+   * 只有本回调为 true 才取消原 body 并重发；false 时直接返回 first 响应（完整 body）。
+   * 缺省（旧调用方）= 恒重放一次，401 原语义逐字不变。共享发送预算的调用方必须传入
+   * 「账本还有剩余发送」的谓词：剩余 0 时第二发必被拒，先 cancel 再抛会销毁真实
+   * 401 证据，让合成的预算错误盖掉上游答案。
+   */
+  shouldReplay?: () => boolean;
 }
 
 interface CachedLlmToken {
@@ -435,7 +443,7 @@ export async function zedLlmFetch(
     }
   };
   let response = await request(false);
-  if (shouldRefreshZedLlmToken(response)) {
+  if (shouldRefreshZedLlmToken(response) && (options.shouldReplay?.() ?? true)) {
     await response.body?.cancel().catch(() => undefined);
     response = await request(true);
   }

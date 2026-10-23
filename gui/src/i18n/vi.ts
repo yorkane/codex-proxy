@@ -1204,6 +1204,7 @@ export const vi: Record<TKey, string> = {
   "logs.detail.attempt.completed": "Đã hoàn thành",
   "logs.detail.attempt.e2eNote": "Chỉ số tok/s tổng thể (top-level) là tính từ đầu đến cuối (end-to-end); mỗi lần thử (attempt) sử dụng thời lượng riêng của nó.",
   "logs.detail.attempt.recovery.transient5xx": "Lỗi tạm thời 5xx (Transient 5xx)",
+  "logs.detail.attempt.recovery.modelErrorRetry": "Thử lại lỗi mô hình (4xx/5xx)",
   "logs.detail.attempt.recovery.connectionReset": "Kết nối bị đặt lại (Connection reset)",
   "logs.detail.attempt.recovery.oauth401": "Xác thực lại OAuth (OAuth re-authentication)",
   "logs.detail.attempt.recovery.key429": "Khoá bị giới hạn tỷ lệ (Key rate-limited 429)",

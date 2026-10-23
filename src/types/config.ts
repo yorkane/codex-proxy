@@ -568,6 +568,21 @@ export interface OcxConfig {
   /** Display Codex credits on account cards; display only, default off. */
   showCodexCredits?: boolean;
   /**
+   * Per-request upstream retry budget for every model request that fails with a 4xx/5xx
+   * (fork addition; the operator requirement is "always retry, at least 10 times").
+   *
+   * The persisted value is an intent within 10-100; the read-time floor lives in
+   * `src/lib/model-request-retry.ts`, so a hand-edited 0, a negative number, or a malformed
+   * value never drops the budget below 10 retries. `OCX_MODEL_REQUEST_MAX_RETRIES` overrides
+   * this for the running process without touching the persisted config, and a malformed
+   * environment value falls back to it rather than silently disabling the retry protection.
+   *
+   * Distinct from `OCX_CODEX_REQUEST_MAX_RETRIES` / `OCX_CODEX_STREAM_MAX_RETRIES`, which
+   * bound the Codex CLIENT's retries and are injected into `config.toml`; neither aliases
+   * nor inherits the other.
+   */
+  modelRequestMaxRetries?: number;
+  /**
    * @deprecated Compatibility-only limit for bounded legacy usage readers.
    * `GET /api/usage` always aggregates the complete ledger.
    */

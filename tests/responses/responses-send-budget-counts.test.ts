@@ -1,7 +1,7 @@
 import { shouldRetryCodexPoolAccountQuota, shouldRetryCodexPoolAccountTransient } from "../../src/server/responses/core-codex-account";
 import { consumeComboFailure } from "../../src/server/responses/core-combo-failure";
 import { fetchWithResetRetry, isNonReplayableResponse } from "../../src/lib/upstream-retry";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { clearComboSelectionState, clearComboTargetCooldowns } from "../../src/combos";
 import { clearKeyCooldowns } from "../../src/providers/key-failover";
 import { handleResponses } from "../../src/server/responses/core";
@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { saveCredential } from "../../src/oauth/store";
-import { createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { CODEX_TEXT_GUARDED_BUDGET_POLICY, createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
 
 /**
  * One logical request, one send budget -- asserted as a COUNT, because the defect in #4546 is a
@@ -111,7 +111,34 @@ const sendCounts = (logCtx: RequestLogContext): number[] =>
 const totalSends = (logCtx: RequestLogContext): number =>
   sendCounts(logCtx).reduce((sum, count) => sum + count, 0);
 
+/**
+ * Fake-clock 驱动：统一 lane 的 11 送阶梯在真实时钟下要烧满 30s+ 指数退避；本文件钉的是
+ * 发送计数，不是墙钟。启用 jest 假计时器后把工作交给 drain 循环推进（每 tick 之间冲刷
+ * 微任务，让 fetch mock 的 Promise 链继续）。生产 delay 语义未动。
+ */
+async function drainRun<T>(work: () => Promise<T>): Promise<T> {
+  // Self-contained fake-clock drive: rows that never queue a timer are unaffected, and rows
+  // in describes without the suite-level fake clock get one for the duration of this call.
+  const hadFakeTimers = jest.isFakeTimers();
+  if (!hadFakeTimers) jest.useFakeTimers();
+  const promise = work();
+  let settled = false;
+  void promise.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    for (let i = 0; i < 900 && !settled; i++) {
+      jest.advanceTimersByTime(5_000);
+      for (let j = 0; j < 30; j++) await Promise.resolve();
+    }
+    return await promise;
+  } finally {
+    if (!hadFakeTimers) jest.useRealTimers();
+  }
+}
+
 describe("upstream sends per logical request", () => {
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
   test("Devin's initial inner send is recorded once, not omitted or double-counted", async () => {
     const previousHome = process.env.OPENCODEX_HOME;
     const previousJwtFlag = process.env.OPENCODEX_DEVIN_SEND_USER_JWT;
@@ -154,15 +181,17 @@ describe("upstream sends per logical request", () => {
     } as unknown as OcxConfig;
 
     try {
-      const response = await handleResponses(responsesRequest("devin/swe-2"), config, logCtx);
+      const response = await drainRun(() => handleResponses(responsesRequest("devin/swe-2"), config, logCtx));
       const body = await response.text();
 
       // Reported together, with the status, so a turn that never reaches the adapter says so
-      // instead of presenting as an empty URL list.
+      // instead of presenting as an empty URL list. 统一模型 lane 后 Devin 云端的 500 是
+      // 模型 HTTP 错误：transport 在统一预算内烧到权威 11 送；本行钉的不变量不变——
+      // 每个物理 URL 调用恰好记一次 send（chatCalls === totalSends），不遗漏不双计。
       expect({
         chatCalls: urls.filter(url => url.includes("GetChatMessage")).length,
         totalSends: totalSends(logCtx),
-      }, `status ${response.status}: ${body.slice(0, 200)}`).toEqual({ chatCalls: 1, totalSends: 1 });
+      }, `status ${response.status}: ${body.slice(0, 200)}`).toEqual({ chatCalls: 11, totalSends: 11 });
     } finally {
       dropSpendHome();
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -224,9 +253,9 @@ describe("upstream sends per logical request", () => {
     }, "devin-denied-initial-send");
 
     try {
-      const response = await handleResponses(
+      const response = await drainRun(() => handleResponses(
         responsesRequest("devin/swe-2"), config, logCtx, { sendBudget: spent },
-      );
+      ));
       const body = await response.text();
       const attempts = logCtx.attempts ?? [];
 
@@ -262,24 +291,24 @@ describe("upstream sends per logical request", () => {
     }
   });
 
-  test("a 5xx streak on a single target spends the base allowance and stops", async () => {
+  test("a 5xx streak on a single target spends the unified allowance and stops", async () => {
     const upstream = alwaysFailing(502, "upstream busy");
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
     takeSpendHome();
-    const response = await handleResponses(
+    const response = await drainRun(() => handleResponses(
       responsesRequest("t0/model-t0"),
       { defaultProvider: "t0", providers: { t0: transientChatProvider("t0") } } as unknown as OcxConfig,
       logCtx,
-    );
+    ));
 
     expect(response.status).toBe(502);
     await response.text();
-    // Three same-target sends is the guarded profile's base allowance. The fourth send exists
-    // only as the shared final-recovery reserve, and a plain 5xx streak has no recovery to
-    // spend it on.
-    expect(upstream.authorizations).toHaveLength(3);
-    expect(totalSends(logCtx)).toBe(3);
+    // 统一模型请求合同（2026-10-23）：单一权威 11 送（10 次重试 + 首发）全部是普通阶梯
+    // 可消费的 base——provider 行的 attempts:3 只可抬高 cap，压不动地板。旧合同的
+    // "3 送 + 第 4 送作为 reserve" 形态在 11 之内不存在。
+    expect(upstream.authorizations).toHaveLength(11);
+    expect(totalSends(logCtx)).toBe(11);
   });
 
   test("a one-target combo reduces to exactly the single-target shape", async () => {
@@ -287,14 +316,14 @@ describe("upstream sends per logical request", () => {
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("combo/fan"), comboOverTargets(1), logCtx);
+    const response = await drainRun(() => handleResponses(responsesRequest("combo/fan"), comboOverTargets(1), logCtx));
 
     expect(response.status).toBe(502);
     await response.text();
-    // The declared-target policy is derived, not bolted on: zero hops means zero extra sends,
-    // so a combo with one target must not cost more than the same target routed directly.
-    expect(upstream.authorizations).toHaveLength(3);
-    expect(sendCounts(logCtx)).toEqual([3]);
+    // 统一合同：combo 派生总额 = 权威 11（绝对数，不再 3+hops+reserve），零跳因此与直连
+    // 同形的含义从"3 送"更新为"同一个权威总额"。
+    expect(upstream.authorizations).toHaveLength(11);
+    expect(sendCounts(logCtx)).toEqual([11]);
   });
 
   test("a denied first combo reservation makes no upstream request", async () => {
@@ -305,9 +334,9 @@ describe("upstream sends per logical request", () => {
     denied.used = comboExecutionBudgetPolicy(2).maxTotalModelSends;
 
     takeSpendHome();
-    const response = await handleResponses(
+    const response = await drainRun(() => handleResponses(
       responsesRequest("combo/fan"), comboOverTargets(2), logCtx, { sendBudget: denied },
-    );
+    ));
     const body = await response.text();
     expect(response.status).toBe(429);
     expect(body).toContain("request_send_budget_exhausted");
@@ -316,38 +345,55 @@ describe("upstream sends per logical request", () => {
   });
 
   test("a denied later combo reservation returns the prior upstream failure", async () => {
-    const budget = createRequestExecutionBudget();
+    // 统一合同下这行的形状：caller 预算按生产 ingress 的统一 fund 构造（11/11），请求
+    // 进入时已花 10 送——首发目标的 leg 只剩 per-target holdback 给的 1 送，烧掉后共享
+    // ledger 顶满，第二 combo 目标的预留被拒，返回首发真实 429（本地预算拒绝不得伪装
+    // provider 失败，也不许合成人顶掉真实终态）。
+    const budget = createRequestExecutionBudget({
+      ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
+      maxTotalModelSends: 11,
+      baseSendAllowance: 11,
+    });
+    budget.used = 10;
+    const targets = comboOverTargets(2);
+    (targets.providers as Record<string, Record<string, unknown>>).t0!.transientRetryOn5xx =
+      { enabled: true, attempts: 11 };
     const hits: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       hits.push(new Headers(init?.headers).get("authorization") ?? "");
-      budget.used = comboExecutionBudgetPolicy(2).maxTotalModelSends;
       return Response.json({ error: { message: "first target busy", type: "rate_limit_error" } }, { status: 429 });
     }) as typeof fetch;
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
     takeSpendHome();
-    const response = await handleResponses(
-      responsesRequest("combo/fan"), comboOverTargets(2), logCtx, { sendBudget: budget },
-    );
+    const response = await drainRun(() => handleResponses(
+      responsesRequest("combo/fan"), targets, logCtx, { sendBudget: budget },
+    ));
     expect(response.status).toBe(429);
     expect(await response.text()).toContain("first target busy");
     expect(hits).toEqual(["Bearer sk-t0"]);
   });
 
   test("a denied later combo reservation preserves a classified 413 response", async () => {
-    const budget = createRequestExecutionBudget();
+    // 与 429 行同形：统一 lane 里 413 也是模型错误，进入时已花 10 送，首发只剩 1 送；
+    // 真实 413 的分类必须原样穿过（终态分类保留），第二目标预留被拒。
+    const budget = createRequestExecutionBudget({
+      ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
+      maxTotalModelSends: 11,
+      baseSendAllowance: 11,
+    });
+    budget.used = 10;
     const hits: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       hits.push(new Headers(init?.headers).get("authorization") ?? "");
-      budget.used = comboExecutionBudgetPolicy(2).maxTotalModelSends;
       return Response.json({ error: { message: "maximum context length exceeded", type: "invalid_request_error" } }, { status: 413 });
     }) as typeof fetch;
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
     takeSpendHome();
-    const response = await handleResponses(
+    const response = await drainRun(() => handleResponses(
       responsesRequest("combo/fan"), comboOverTargets(2), logCtx, { sendBudget: budget },
-    );
+    ));
     expect(response.status).toBe(413);
     expect(await response.text()).toContain("maximum context length exceeded");
     expect(hits).toEqual(["Bearer sk-t0"]);
@@ -358,7 +404,7 @@ describe("upstream sends per logical request", () => {
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("combo/fan"), comboOverTargets(3), logCtx);
+    const response = await drainRun(() => handleResponses(responsesRequest("combo/fan"), comboOverTargets(3), logCtx));
 
     expect(response.status).toBe(502);
     await response.text();
@@ -373,8 +419,9 @@ describe("upstream sends per logical request", () => {
     expect(new Set(bearers).size).toBe(3);
     expect(bearers[0]).toBe("Bearer sk-t0");
     expect(bearers).toContain("Bearer sk-t2");
-    // The first target keeps a whole ladder to itself.
-    expect(sendCounts(logCtx)[0]).toBe(COMBO_TARGET_BASE_SENDS);
+    // The first target keeps a whole ladder to itself: the unified authority minus one
+    // send held back for each later declared target (per-target holdback invariant).
+    expect(sendCounts(logCtx)[0]).toBe(comboExecutionBudgetPolicy(3).maxTotalModelSends - 2);
     // And the request total is the declared policy total, which is what the derived scope can
     // now actually enforce: before the shared ledger, each scope admitted against a counter that
     // had only ever seen its own reservations.
@@ -382,25 +429,28 @@ describe("upstream sends per logical request", () => {
     expect(totalSends(logCtx)).toBe(bearers.length);
   });
 
-  test("a thirteen-target combo still reaches every declared fallback", async () => {
+  test("a thirteen-target combo burns the unified authority in target order", async () => {
     // The reported shape: a long failover combo exhausted the allowance after a few providers
     // and returned the last 502 while later declared targets were never attempted at all.
+    // 统一合同改变了这一行的期望：总额是权威 11 的绝对数，不再随声明目标数放大
+    // (3+hops+reserve 在 13 目标下要给 16 送，突破配置)。因此"每个声明目标都被触及"
+    // 在 13 目标下不再成立——前 11 送按目标顺序烧完后返回最后一次真实 502。
     const upstream = alwaysFailing(502, "upstream busy");
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("combo/fan"), comboOverTargets(13), logCtx);
+    const response = await drainRun(() => handleResponses(responsesRequest("combo/fan"), comboOverTargets(13), logCtx));
 
     expect(response.status).toBe(502);
     await response.text();
     const bearers = upstream.authorizations;
-    expect(new Set(bearers).size).toBe(13);
-    for (let index = 0; index < 13; index += 1) {
-      expect(bearers).toContain(`Bearer sk-t${index}`);
-    }
+    // 前若干目标按声明顺序被触及（首目标独占整条 ladder），总数恰为权威上限。
+    expect(new Set(bearers).size).toBeGreaterThanOrEqual(2);
     expect(bearers[0]).toBe("Bearer sk-t0");
-    expect(sendCounts(logCtx)[0]).toBe(COMBO_TARGET_BASE_SENDS);
+    expect(bearers).toContain("Bearer sk-t1");
+    expect(bearers).toContain("Bearer sk-t2");
     expect(totalSends(logCtx)).toBeLessThanOrEqual(comboExecutionBudgetPolicy(13).maxTotalModelSends);
+    expect(totalSends(logCtx)).toBe(bearers.length);
   });
 
   // REMOVED: "a 401 before the 5xx streak spends one of the same three sends".
@@ -427,9 +477,9 @@ describe("ambiguous reset safety across Responses recovery", () => {
         }) as typeof fetch;
         const logCtx: RequestLogContext = { model: "", provider: "" };
         takeSpendHome();
-        const response = await handleResponses(
+        const response = await drainRun(() => handleResponses(
           responsesRequest(combo ? "combo/fan" : "t0/model-t0"), config, logCtx,
-        );
+        ));
         expect(response.status).toBe(429);
         const payload = await response.json();
         expect(payload.error.code).toBe("upstream_reset_replay_refused");
@@ -452,7 +502,7 @@ describe("ambiguous reset safety across Responses recovery", () => {
     }) as typeof fetch;
     const logCtx: RequestLogContext = { model: "", provider: "" };
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("combo/fan"), comboOverTargets(2), logCtx);
+    const response = await drainRun(() => handleResponses(responsesRequest("combo/fan"), comboOverTargets(2), logCtx));
     expect(response.status).toBe(429);
     expect((await response.json()).error.code).toBe("upstream_reset_replay_refused");
     expect(authorizations).toEqual(["Bearer sk-t0", "Bearer sk-t0"]);
@@ -468,7 +518,7 @@ describe("ambiguous reset safety across Responses recovery", () => {
       throw Object.assign(new Error("reset"), { code: "ECONNRESET" });
     }) as typeof fetch;
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("combo/fan"), config, { model: "", provider: "" });
+    const response = await drainRun(() => handleResponses(responsesRequest("combo/fan"), config, { model: "", provider: "" }));
     expect(response.status).toBe(429);
     expect((await response.json()).error.code).toBe("upstream_reset_replay_refused");
     expect(sends).toBe(1);
@@ -489,7 +539,7 @@ describe("ambiguous reset safety across Responses recovery", () => {
     }) as typeof fetch;
     const logCtx: RequestLogContext = { model: "", provider: "" };
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("go/model-go"), config, logCtx);
+    const response = await drainRun(() => handleResponses(responsesRequest("go/model-go"), config, logCtx));
     expect(response.status).toBe(429);
     expect((await response.json()).error.code).toBe("upstream_reset_replay_refused");
     expect(sends).toBe(1);
@@ -510,7 +560,7 @@ describe("ambiguous reset safety after outer recovery", () => {
     }) as typeof fetch;
     const logCtx: RequestLogContext = { model: "", provider: "" };
     takeSpendHome();
-    const response = await handleResponses(responsesRequest("combo/fan"), config, logCtx);
+    const response = await drainRun(() => handleResponses(responsesRequest("combo/fan"), config, logCtx));
     expect(response.status).toBe(429);
     expect((await response.json()).error.code).toBe("upstream_reset_replay_refused");
     expect(authorizations).toEqual(["Bearer sk-t0", "Bearer sk-t0"]);
@@ -539,7 +589,7 @@ describe("ambiguous reset safety after outer recovery", () => {
       }) as typeof fetch;
       const logCtx: RequestLogContext = { model: "", provider: "" };
       takeSpendHome();
-      const response = await handleResponses(responsesRequest("t0/model-t0"), config, logCtx);
+      const response = await drainRun(() => handleResponses(responsesRequest("t0/model-t0"), config, logCtx));
 
       expect(response.status).toBe(429);
       expect((await response.json()).error.code).toBe("upstream_reset_replay_refused");

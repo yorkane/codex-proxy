@@ -1205,6 +1205,7 @@ export const ko: Record<TKey, string> = {
   "logs.detail.attempt.completed": "완료",
   "logs.detail.attempt.e2eNote": "상위 tok/s는 전체 요청 기준이며 각 시도는 자체 소요 시간을 사용합니다.",
   "logs.detail.attempt.recovery.transient5xx": "일시적 5xx 오류",
+  "logs.detail.attempt.recovery.modelErrorRetry": "모델 오류 재시도 (4xx/5xx)",
   "logs.detail.attempt.recovery.connectionReset": "연결이 재설정됨",
   "logs.detail.attempt.recovery.oauth401": "OAuth 재인증",
   "logs.detail.attempt.recovery.key429": "키 요청 한도 초과 (429)",

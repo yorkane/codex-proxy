@@ -24,7 +24,8 @@ import type { WebSearchBackendId } from "./index";
 import { pacingHeaderDeadline } from "./header-deadline";
 import { redactSecretString } from "../lib/redact";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait, isNonReplayableResponse, isSameTargetRetryHold, SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit, prepareSameTarget429Wait, isNonReplayableResponse, isSameTargetRetryHold, SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import { RequestPacingQueueOverloadError } from "../providers/request-pacing";
 import {
@@ -612,7 +613,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               onRecoveryWithheld: deps.incomingMeta.onRecoveryWithheld,
             });
           } else {
-            response = await fetchWithResetRetry(
+            response = await fetchSidecarModel(
               (retryRecovery) => {
                 // Record every helper-driven send (the callback runs for the first attempt and
                 // each connection-reset replay); preserve the caller's recovery kind
@@ -633,7 +634,10 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                   signal: headerDeadline.signal,
                 }, retryRecovery));
               },
-              { replaySafe: true, abortSignal: headerDeadline.signal, label: "web-search-loop" },
+              // 统一模型合同（2026-10-23）：真实上游 HTTP 4xx/5xx 按统一预算重试（env >
+              // config > 地板 10 次重试），预算与请求共享账本相交；模型 POST 不声明
+              // replaySafe，歧义 reset 照旧 settle 成 non-replayable 拒绝。
+              { abortSignal: headerDeadline.signal, label: "web-search-loop", sendBudget: deps.incomingMeta.sendBudget, targetKey: () => request.url },
             );
           }
         } finally {

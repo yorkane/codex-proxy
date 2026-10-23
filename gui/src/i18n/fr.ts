@@ -1205,6 +1205,7 @@ export const fr: Record<TKey, string> = {
   "logs.detail.attempt.completed": "Terminée",
   "logs.detail.attempt.e2eNote": "Le débit global en jetons/s est calculé de bout en bout ; chaque tentative utilise sa propre durée.",
   "logs.detail.attempt.recovery.transient5xx": "Erreur 5xx temporaire",
+  "logs.detail.attempt.recovery.modelErrorRetry": "Nouvelle tentative d'erreur modèle (4xx/5xx)",
   "logs.detail.attempt.recovery.connectionReset": "Réinitialisation de la connexion",
   "logs.detail.attempt.recovery.emptyCompletion": "Nouvelle tentative après une réponse vide",
   "logs.detail.attempt.recovery.consoleGoUpload": "Nouvelle tentative d’envoi Console",

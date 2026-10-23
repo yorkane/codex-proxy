@@ -4,7 +4,8 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { sidecarEnter } from "../lib/sidecar-tracker";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { parseSidecarSSE } from "../web-search/parse";
 import type { SidecarOutcomeRecorder } from "../web-search/executor";
 import { NATIVE_RESERVE_MODEL } from "../codex/catalog/native-models";
@@ -14,6 +15,12 @@ export interface VisionSettings {
   model: string;
   reasoning: VisionReasoningEffort;
   timeoutMs: number;
+  /**
+   * 统一模型重试预算的全局配置值（`config.modelRequestMaxRetries`），由 plan builder 带入；
+   * env `OCX_MODEL_REQUEST_MAX_RETRIES` 在 leaf 内压过它，地板 10、上限 100。缺省解析为
+   * 默认 10 次重试 + 首发 = 11。`timeoutMs` 是显式用户预算：统一预算超它会以真实错误收尾。
+   */
+  modelRequestMaxRetries?: number;
   /** Effective Desktop authless compatibility does not grant auxiliary model use. */
   reserveCompatibility?: boolean;
 }
@@ -97,7 +104,7 @@ export async function describeImage(
   const sidecarExit = sidecarEnter("vision");
   const t0 = Date.now();
   try {
-    const res = await fetchWithResetRetry(
+    const res = await fetchSidecarModel(
       // The replay needs `keepalive: false` to abandon the half-closed pooled socket; Bun has
       // ignored a bare `Connection: close` (oven-sh/bun#20492).
       recovery => {
@@ -113,7 +120,9 @@ export async function describeImage(
           redirect: "manual",
         }, recovery));
       },
-      { replaySafe: true, abortSignal: linkedSignal.signal, label: "vision-sidecar" },
+      // 统一模型合同（2026-10-23）：独立 sidecar 调用没有共享请求账本，预算即本调用的
+      // env > config > 地板 10 次重试；模型 POST 不声明 replaySafe。
+      { abortSignal: linkedSignal.signal, label: "vision-sidecar", configuredRetries: settings.modelRequestMaxRetries, targetKey: () => `${forwardProvider.baseUrl}/responses`, retryAfterCeilingMs: settings.timeoutMs - (Date.now() - t0) },
     );
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
     try {

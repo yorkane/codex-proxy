@@ -1,5 +1,7 @@
 import { createInferenceSendBudget } from "../inference/context";
+import { modelRequestMaxAttempts } from "../../lib/model-request-retry";
 import type { ResponsesRequestContext } from "./core-options";
+import type { OcxConfig } from "../../types";
 import { claimDispatchSpendProof, createPhysicalSendReporter, createRequestExecutionBudget, isRequestExecutionBudget, reportDispatchSends } from "../../lib/request-execution-budget";
 import {
   chargeWorkflowSends,
@@ -29,22 +31,39 @@ import type {
  * straight through would make it a per-leg ceiling instead, and a request configured at one send
  * could still reach upstream again on a recovery leg (#4893).
  *
- * An absent policy returns the constant unchanged, so a provider that configures nothing behaves
- * exactly as it does today at every call site.
+ * 统一模型请求 lane（fork，2026-10-23 用户裁决）：模型请求的真实上游 HTTP 4xx/5xx 必须按
+ * 统一预算重试至少 10 次。**权威**是全局配置，第三参数 `authorityAttempts` 收的是**绝对
+ * 发送数**（= retries + 1）：调用点传本请求预算的 `requestModelSendLimit`（ingress 构造时
+ * 由 `config.modelRequestMaxRetries` fund，leaf 内 env `OCX_MODEL_REQUEST_MAX_RETRIES`
+ * 压过配置，地板 10 / 上限 100），combo 派生 scope 传其自身 policy 总量。缺省（旧调用点）
+ * 读 env+默认。provider 行的 `transientRetryOn5xx.attempts` 保留 legacy「整请求总量」语义
+ * 但只可**抬升** cap——provider 想给 12 送就允许 12——永不压到权威之下（配置 3 的
+ * key-auth provider 拿 11，不是 3）。抬升只影响本 leg 的 cap；物理总量仍被请求 ledger 的
+ * `maxTotalModelSends` 相交封顶。非模型窄 lane（key failover、web-search 429 等）不经过
+ * 这里，保持常量 3。
  */
 export function transientSendCapFor(
   configuredAttempts: number | undefined,
   sendsUsed: number,
+  authorityAttempts?: number,
 ): number {
-  if (configuredAttempts === undefined) return TRANSIENT_RETRY_MAX_ATTEMPTS;
-  return Math.max(0, configuredAttempts - Math.max(0, sendsUsed));
+  const floor = authorityAttempts !== undefined && Number.isFinite(authorityAttempts)
+    ? Math.max(0, Math.floor(authorityAttempts))
+    : modelRequestMaxAttempts();
+  const cap = Math.max(floor, configuredAttempts ?? 0);
+  return Math.max(0, cap - Math.max(0, sendsUsed));
 }
 
 /** Owns the shared request send counter and recovery permits. */
 export function createResponsesSendBudget(
-  requestContext: Pick<ResponsesRequestContext, "options" | "req" | "logCtx">,
+  // `config` 是**可选**的全局字段来源（root 裁决：不为统一 lane 的 optional 全局字段遍改
+  // 数十个既有直接调用测试的 harness）。生产上下文携带完整 OcxConfig，结构化赋值即可；
+  // fixture 省略它时统一权威从 leaf 读 env+默认（与 `config.modelRequestMaxRetries` 缺省
+  // 同值），语义一致。
+  requestContext: Pick<ResponsesRequestContext, "options" | "req" | "logCtx">
+    & { config?: Pick<OcxConfig, "modelRequestMaxRetries"> },
 ) {
-  const { options, req, logCtx } = requestContext;
+  const { options, req, logCtx, config } = requestContext;
 
 
   // One transient-retry budget for the whole LOGICAL request, read ABOVE the passthrough branch
@@ -53,7 +72,7 @@ export function createResponsesSendBudget(
   // fresh default of 3. It is now a holder carried on options, so a combo child inherits the
   // parent's spend instead of starting over per target -- both halves of the measured
   // amplification in #4546.
-  const sendBudget = options.sendBudget ?? createInferenceSendBudget(req, logCtx);
+  const sendBudget = options.sendBudget ?? createInferenceSendBudget(req, logCtx, config?.modelRequestMaxRetries);
   // The root workflow is the user-visible task. A per-request cap cannot bound a fan-out that
   // sends once per child seven hundred times, so every send charged to the request is charged
   // to the root as well (#4546).
@@ -309,13 +328,34 @@ export function createResponsesSendBudget(
    * mislabelled evidence #4592 existed to stop.
    */
   const recoveryClassFor = (recovery: AttemptRecoveryKind): SendClass =>
-    /401|429|oauth|rate-limit|key/.test(recovery) ? "auth-recovery" : "repair";
+    // 统一模型请求 lane（fork 2026-10-23）：model-error-retry 是纯同目标重发，与 transient
+    // ladder 同类——`transient` 不在 RESERVE_FUNDED_CLASSES，base 用尽后直接拒绝，永不
+    // 消耗那唯一一次 final-recovery reserve（账号移动/rebuild 的额度）。
+    /401|429|oauth|rate-limit|key/.test(recovery) ? "auth-recovery"
+      : recovery === "model-error-retry" ? "transient" : "repair";
 
   return {
     workflowRootId,
     noteTransientSends,
     transientSendReporter,
     remainingTransientSendBudget,
+    /**
+     * 本逻辑请求的统一模型发送权威（绝对物理发送上限，含首发/reserve/全部 leg）。
+     *
+     * 来源是请求预算自己的 policy：ingress 预算在构造时由
+     * `config.modelRequestMaxRetries`（env 优先）fund；Combo 派生 scope 用自己的
+     * `comboExecutionBudgetPolicy` 总量。leg 层从这里取 cap，不再重复读 env/config，
+     * 保证「配置 12 → ledger 13 → leg cap 也 13」一致。显式 caller 预算用自己的 policy
+     * 总量（外部硬上限可保），stub 预算回落到统一 leaf。
+     */
+    get requestModelSendLimit(): number {
+      // 预算自己的 policy 是权威：显式 caller 的 0 是**精确的 0**，不能被读成"未设置"再
+      // 回落 11——日志与其他 reader 必须看见同一个数字。只有非本工厂预算（stub/窄 holder，
+      // policy 缺失或非整数）才回落到全局 leaf。
+      const policyTotal = adapterSendBudget?.policy?.maxTotalModelSends;
+      if (Number.isSafeInteger(policyTotal) && (policyTotal as number) >= 0) return policyTotal as number;
+      return modelRequestMaxAttempts(config?.modelRequestMaxRetries);
+    },
     /** Only this child's prepaid send, not every pending external booking, is spendable here. */
     initialSendAllowance: (cap: number): number => Math.min(cap,
       remainingTransientSendBudget(cap) + (initialPermit ? 1 : 0)),

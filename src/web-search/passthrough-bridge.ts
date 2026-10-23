@@ -825,8 +825,14 @@ export function appendBridgeSearchTurn(
 export function createOllamaBridgeExecutor(
   plan: PassthroughWebSearchBridgePlan,
   apiKey: string,
+  /**
+   * 统一模型重试预算的全局配置值（`config.modelRequestMaxRetries`）：与 delivery 调用点
+   * 同一 context 字段，闭包调用方（无完整 context 可传时）显式带上它，global config 在
+   * ollama 桥同样生效；缺省解析为 leaf 默认/env。
+   */
+  modelRequestMaxRetries?: number,
 ): PassthroughWebSearchBridgeExecutor {
-  return createPassthroughWebSearchBridgeExecutor(plan, { providerApiKey: apiKey });
+  return createPassthroughWebSearchBridgeExecutor(plan, { providerApiKey: apiKey, modelRequestMaxRetries });
 }
 
 /** Per-search credentials and sidecar settings. Secrets stay off the plan object. */
@@ -836,6 +842,12 @@ export interface PassthroughWebSearchBridgeExecutorContext {
   hostedTool?: Record<string, unknown>;
   describeImages?: boolean;
   sidecar?: Pick<OcxWebSearchSidecarConfig, "backend" | "model" | "reasoning" | "xSearch">;
+  /**
+   * 统一模型重试预算的全局配置值（`config.modelRequestMaxRetries`），由 delivery 调用点从
+   * 本请求配置填入；env `OCX_MODEL_REQUEST_MAX_RETRIES` 在 leaf 内压过它，地板 10。缺省
+   * （调用点未带，如 ollama 直连桥）解析为默认 10 次重试 + 首发 = 11。
+   */
+  modelRequestMaxRetries?: number;
 }
 
 const DEFAULT_OPENAI_BRIDGE_MODEL = "gpt-5.6-luna";
@@ -893,6 +905,7 @@ export function sidecarSettingsForBridge(
     reasoning: sidecar.reasoning ?? DEFAULT_BRIDGE_REASONING,
     timeoutMs: plan.timeoutMs,
     describeImages: context.describeImages === true,
+    modelRequestMaxRetries: context.modelRequestMaxRetries,
   };
 }
 
@@ -943,6 +956,7 @@ export function createPassthroughWebSearchBridgeExecutor(
           plan.endpoint,
           plan.timeoutMs,
           querySignal,
+          settings.modelRequestMaxRetries,
         );
       case "openai": {
         const sidecar = context.auth?.openAiSidecar;

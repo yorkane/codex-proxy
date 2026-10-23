@@ -13,6 +13,7 @@ import { resolveProviderApiKey } from "../providers/api-key-resolve";
 import { createHash } from "node:crypto";
 import { setProviderApiKeyPaused } from "../providers/api-key-pause";
 import { AccountRefusalStreaks, autoPauseThreshold, permanentAccountRefusal } from "./account-auto-pause-policy";
+import { cancelModelRetryCommitsForKey, deferModelRetryCommit, modelRetryScopeActive } from "../lib/model-retry-scope";
 import { clearThreadAccountMapForAccount, reconcileCodexActiveAfterExclusion } from "../codex/routing";
 import { isNonReplayableResponse } from "../lib/upstream-retry";
 import { hasUpstreamRewriters, upstreamRewriterEpoch } from "../plugins/upstream-hooks";
@@ -153,12 +154,39 @@ export function captureAccountAutoPauseAttempt(name: string, provider: OcxProvid
         if (reason) markPermanentAccountRefusal(response);
         return reason;
       });
-      const paused = await tracker.observe(key, incarnation, threshold, verdict, response.ok,
-        () => policyCurrent() && current(), pause);
-      if (paused) {
-        markAccountAutoPaused(response);
-        // Fixed codes only. Never print the upstream body, provider label, or account identifier.
-        console.warn(`[account-auto-pause] paused after ${threshold} consecutive permanent account refusals`);
+      // Sampling stays eager: the verdict reads the body before a retry can cancel it, and the
+      // permanent-refusal marker above was set at classification time. What defers inside a
+      // model-retry scope is the streak commit. Persistence and the auto-pause marker must not
+      // truncate this request’s send budget (an immediate threshold pause fences the next
+      // dispatch and settles the request under 11 sends), so the observation replays at the
+      // flush of the outermost scope run. Explicit user pause, revocation, generation changes
+      // and the policy fence stay immediate: capture checks are untouched, and every replayed
+      // commit re-runs current()/policyCurrent() and the disk fence at commit time.
+      const commitObservation = async () => {
+        const paused = await tracker.observe(key, incarnation, threshold, verdict, response.ok,
+          () => policyCurrent() && current(), pause);
+        if (paused) {
+          markAccountAutoPaused(response);
+          // Fixed codes only. Never print the upstream body, provider label, or account identifier.
+          console.warn(`[account-auto-pause] paused after ${threshold} consecutive permanent account refusals`);
+        }
+      };
+      if (modelRetryScopeActive()) {
+        if (response.ok) {
+          // A success retires this credential’s queued refusals and its settle target, so an
+          // already-recovered request never commits a stale error at flush. The success’s own
+          // observation still runs, resetting the shared streak exactly as the immediate path.
+          cancelModelRetryCommitsForKey(key);
+          await commitObservation();
+        } else {
+          // The queued closure carries its own response: the marker lands on the refusal
+          // whose queued commit tripped the threshold (provenance-accurate) and never on a
+          // response of another concurrent request. A refusal retired by a mid-scope success
+          // is never retroactively marked, because its commit was cancelled with the key.
+          deferModelRetryCommit(commitObservation, key);
+        }
+      } else {
+        await commitObservation();
       }
     } catch {
       // Optional persistence must preserve the original provider response.

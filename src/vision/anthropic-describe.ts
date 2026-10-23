@@ -6,7 +6,8 @@ import { sidecarThinkingOff } from "../adapters/anthropic-model-contract";
 import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "../adapters/client-fingerprint";
 import { signalWithTimeout, cancelBodyOnAbort } from "../lib/abort";
 import { sidecarEnter } from "../lib/sidecar-tracker";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit } from "../lib/upstream-retry";
+import { fetchSidecarModel } from "../lib/sidecar-model-retry";
 import { publicOAuthAuthenticationErrorMessage } from "../oauth";
 import { getAnthropicSidecarAccessToken } from "../oauth/anthropic-routing";
 import { ANTHROPIC_OAUTH_BETA, CLAUDE_CODE_SYSTEM_INSTRUCTION } from "../oauth/anthropic";
@@ -213,7 +214,7 @@ export async function describeImageAnthropic(
   const sidecarExit = sidecarEnter("vision");
   const startedAt = Date.now();
   try {
-    const res = await fetchWithResetRetry(
+    const res = await fetchSidecarModel(
       recovery => dispatch(url, applyUpstreamRecoveryInit({
         method: "POST",
         redirect: "manual",
@@ -221,7 +222,8 @@ export async function describeImageAnthropic(
         body: JSON.stringify(body),
         signal: linkedSignal.signal,
       }, recovery)),
-      { replaySafe: true, abortSignal: linkedSignal.signal, label: "vision-sidecar-anthropic" },
+      // 统一模型合同（2026-10-23）：独立 vision sidecar 调用，预算见 sidecar-model-retry。
+      { abortSignal: linkedSignal.signal, label: "vision-sidecar-anthropic", configuredRetries: settings.modelRequestMaxRetries, targetKey: () => url, retryAfterCeilingMs: settings.timeoutMs - (Date.now() - startedAt) },
     );
     if (!res.ok) {
       // The body is untrusted and only feeds one auth-failure message, so read a bounded prefix.

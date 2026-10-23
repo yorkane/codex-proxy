@@ -5,12 +5,14 @@ import { normalizeUpstreamHttpErrorResponse } from "./upstream-http-error";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { resolveClientRetryAfter } from "../lib/retry-after";
 import { parseRetryAfterMs } from "../combos";
+import { ownedModelSendsRemaining, runOwnedModelHttpRetry } from "../lib/owned-model-retry";
 import {
   SendBudgetExhaustedError,
   abortError,
   cancelResponseBodyBestEffort,
   fetchWithAttemptDeadline,
   isConnectionResetError,
+  markResponseNonReplayable,
   retryBackoffDelayMs,
   sleepWithAbort,
 } from "../lib/upstream-retry";
@@ -30,7 +32,12 @@ const ENDPOINT_ERROR_MARKERS = [
   "unsupported endpoint",
 ];
 const CONNECT_ERROR_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH"]);
-type KiroFetchContext = AdapterFetchContext & { allowGatewayRotation?: boolean };
+type KiroFetchContext = AdapterFetchContext & {
+  allowGatewayRotation?: boolean;
+  /** Unified HTTP lane backoff seams for tests; production keeps 400/5000ms. */
+  modelRetryBaseDelayMs?: number;
+  modelRetryMaxDelayMs?: number;
+};
 
 interface KiroThrottleProbe {
   token: symbol;
@@ -163,11 +170,16 @@ async function fetchWithResetRecovery(
   ctx: AdapterFetchContext,
   timeoutMs: number,
   notePhysicalSend: (reset: boolean) => void,
+  remaining: () => number,
 ): Promise<Response> {
   let lastError: unknown;
   let destination = url;
   let destinationRebased = false;
   for (let attempt = 0; attempt < RESET_ATTEMPTS; attempt++) {
+    // 统一预算守卫（fork 2026-10-23）：预算已尽时不再尝试下一发，抛与 ledger 拒绝完全
+    // 同款的 SendBudgetExhaustedError，保持既有「预算耗尽以类型化错误终结 ladder」的契约；
+    // 首发（attempt 0）永不在此拦截——它由共享 ledger 的 reserveDispatch 权威拒绝。
+    if (attempt > 0 && remaining() <= 0) throw new SendBudgetExhaustedError(destination);
     if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
     const executor = (ctx.executor ?? globalThis.fetch) as typeof globalThis.fetch & {
       waitForPacing?: (signal?: AbortSignal) => Promise<ProviderRequestSlot | void>;
@@ -298,34 +310,37 @@ async function fetchKiroAttempt(
   ctx: KiroFetchContext,
   timeoutMs: number,
   notePhysicalSend: (reset: boolean) => void,
+  remaining: () => number,
 ): Promise<Response> {
   const plannedUrl = request.url;
   let response: Response;
   try {
-    response = await fetchWithResetRecovery(request, plannedUrl, ctx, timeoutMs, notePhysicalSend);
+    response = await fetchWithResetRecovery(request, plannedUrl, ctx, timeoutMs, notePhysicalSend, remaining);
   } catch (error) {
     // The legacy host must mirror the CURRENT destination: a reset rebuild retargets the
     // request, and falling back to the original region would send its new credentials there.
     const currentLegacy = legacyUrl(request.url);
     if (!currentLegacy || !endpointConnectFailure(error)) throw error;
-    return fetchWithResetRecovery(request, currentLegacy, ctx, timeoutMs, notePhysicalSend);
+    return fetchWithResetRecovery(request, currentLegacy, ctx, timeoutMs, notePhysicalSend, remaining);
   }
 
   if (!response.ok && (response.status === 502 || response.status === 503 || response.status === 504)) {
     const baseUrl = response.url || request.url || plannedUrl;
-    const alternate = ctx.allowGatewayRotation === false ? undefined : legacyUrl(baseUrl);
+    // The rotation is one MORE physical send on the unified ledger: it is only affordable
+    // while the request still has a send left, so the final count never crosses the cap.
+    const alternate = ctx.allowGatewayRotation === false || remaining() < 1 ? undefined : legacyUrl(baseUrl);
     if (alternate) {
       cancelResponseBodyBestEffort(response);
-      return fetchWithResetRecovery(request, alternate, ctx, timeoutMs, notePhysicalSend);
+      return fetchWithResetRecovery(request, alternate, ctx, timeoutMs, notePhysicalSend, remaining);
     }
   }
   const currentLegacy = legacyUrl(request.url);
   if (currentLegacy && !response.ok) {
     const inspected = await inspectEndpointHttpFailure(response, ctx.abortSignal);
     response = inspected.response;
-    if (inspected.fallback) {
+    if (inspected.fallback && remaining() >= 1) {
       cancelResponseBodyBestEffort(response);
-      response = await fetchWithResetRecovery(request, currentLegacy, ctx, timeoutMs, notePhysicalSend);
+      response = await fetchWithResetRecovery(request, currentLegacy, ctx, timeoutMs, notePhysicalSend, remaining);
     }
   }
   return response;
@@ -335,6 +350,20 @@ async function fetchKiroAttempt(
  * Kiro owns replay-safe reset recovery, one endpoint fallback, and bounded process-wide transient
  * throttle recovery. The shared probe starts only after a 429, so healthy parallel traffic remains
  * parallel while a throttled account cannot burn every caller's independent retry budget (#532).
+ *
+ * 统一模型请求 lane（fork 2026-10-23 运维裁决）：外层再套一层 `runOwnedModelHttpRetry`，让真实
+ * 上游返回的任何 HTTP 4xx/5xx（含 quota 429、policy 403、invalid request 400——状态优先，
+ * 不看 `x-should-retry`，不看响应体文案）在统一预算内重试，默认每逻辑请求共 11 次物理
+ * 发送（env `OCX_MODEL_REQUEST_MAX_RETRIES` > config > 地板 10）。三层——外层统一 ladder、
+ * throttle 循环、内层 reset ladder——读**同一个**余量函数：每物理发送都经共享 ledger 的
+ * `reserveDispatch` 记账，`ownedModelSendsRemaining` 因此随每一发收缩，任何一层的循环上限都
+ * 被同一个绝对值相交封顶。Kiro 旧的 RESET 3 × THROTTLE 3（约 18 发/调用）因此不会被改写成
+ * 11 × 11——这是 #4546 明令禁止的相乘形态。
+ *
+ * 协议恢复保持原样并在同一预算内计价：429 throttle 的共享门与冷却、400/403 端点标记的
+ * legacy 回退、502/503/504 的一次 gateway rotation、连接重置的本地 replay-safe ladder。
+ * 本地拒绝（`SendBudgetExhaustedError`、caller abort、pacing 拒绝）不算模型错误：立即停，
+ * 不重试。最终非 2xx 以原有 safe format 交还（`returnRawErrors` 时原文），不隐藏。
  */
 export async function fetchKiroWithRetry(request: AdapterRequest, ctx: KiroFetchContext = {}): Promise<Response> {
   const timeoutMs = ctx.timeoutMs ?? 200_000;
@@ -351,49 +380,91 @@ export async function fetchKiroWithRetry(request: AdapterRequest, ctx: KiroFetch
       : throttleRound > 0 ? "rate-limit-429" : undefined;
     ctx.onPhysicalSend?.({ ordinal: physicalSends, ...(recovery ? { recovery } : {}) });
   };
+  // 统一余量视图：有 sendBudget 时读共享 ledger（本请求所有 leg 的消耗都算数），
+  // context-free 时以本次调用自己的物理发送计数为权威（一次闭包轮可含多物理发送）。
+  const budgetOptions = {
+    ...(ctx.sendBudget ? { sendBudget: ctx.sendBudget } : {}),
+    physicalSends: () => physicalSends,
+  };
+  const remaining = (): number => ownedModelSendsRemaining(budgetOptions);
+  // 抛给统一 scope 的错误终结整条 ladder（合同红线）：TimeoutError 按既有契约沉淀为 504，
+  // caller abort 原样上抛，其余原样。
+  const runLadder = (): Promise<Response> => fetchKiroLadder(
+    request, ctx, timeoutMs, notePhysicalSend, remaining,
+    () => probeToken,
+    (token: symbol | undefined) => { probeToken = token; },
+    (token: symbol | undefined) => { releaseKiroThrottleProbe(token); },
+    round => { throttleRound = round; },
+  ).catch(error => {
+    if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
+    if (error instanceof Error && error.name === "TimeoutError") {
+      // Locally synthesized (the upstream never answered): not an HTTP receipt, and the
+      // request may still be in flight upstream. Non-replayable by contract. The marker
+      // mutates in place and returns void, so the settlement response is returned on its
+      // own line - returning the marker call would type this branch as void.
+      const timeoutResponse = new Response("Kiro upstream gateway timeout", { status: 504 });
+      markResponseNonReplayable(timeoutResponse);
+      return timeoutResponse;
+    }
+    throw error;
+  });
+  const raw = await runOwnedModelHttpRetry(runLadder, {
+    ...(ctx.sendBudget ? { sendBudget: ctx.sendBudget } : {}),
+    physicalSends: () => physicalSends,
+    ...(ctx.modelRetryBaseDelayMs !== undefined ? { baseDelayMs: ctx.modelRetryBaseDelayMs } : {}),
+    ...(ctx.modelRetryMaxDelayMs !== undefined ? { maxDelayMs: ctx.modelRetryMaxDelayMs } : {}),
+    ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}),
+    ...(ctx.onRecoveryWithheld ? { onRecoveryWithheld: ctx.onRecoveryWithheld } : {}),
+    label: "kiro",
+  });
+  return ctx.returnRawErrors ? raw : normalizeFinalKiroHttpError(raw, ctx.abortSignal);
+}
+
+/**
+ * 一轮旧契约的执行体：throttle 门 + 一次 attempt（内含 reset ladder、gateway rotation 与
+ * 端点回退）。throttle 循环保留为有界恢复形态（共享冷却的语义见 #532），循环上限与 reset
+ * 层一样被统一余量相交封顶。非瞬态/瞬态 429 都原样返回，由外层统一 ladder 决定继续与否；
+ * 池形态（`kiroPreferAccountFailover`）把 429 直接交还，换账号由外层 ledger 的 alternate
+ * 语义约束，不在这里消耗。
+ */
+async function fetchKiroLadder(
+  request: AdapterRequest,
+  ctx: KiroFetchContext,
+  timeoutMs: number,
+  notePhysicalSend: (reset: boolean) => void,
+  remaining: () => number,
+  currentProbeToken: () => symbol | undefined,
+  setProbeToken: (token: symbol | undefined) => void,
+  releaseProbe: (token: symbol | undefined) => void,
+  noteThrottleRound: (round: number) => void,
+): Promise<Response> {
+  const loopCap = Math.max(1, Math.min(THROTTLE_ATTEMPTS, remaining()));
   try {
-    for (let attempt = 0; attempt < THROTTLE_ATTEMPTS; attempt++) {
-      throttleRound = attempt;
-      if (!probeToken) probeToken = await enterKiroThrottleGate(ctx.abortSignal);
+    for (let attempt = 0; attempt < loopCap; attempt++) {
+      noteThrottleRound(attempt);
+      if (!currentProbeToken()) setProbeToken(await enterKiroThrottleGate(ctx.abortSignal));
       else await waitForKiroCooldown(ctx.abortSignal);
 
-      const response = await fetchKiroAttempt(request, ctx, timeoutMs, notePhysicalSend);
+      const response = await fetchKiroAttempt(request, ctx, timeoutMs, notePhysicalSend, remaining);
       const throttle = await inspectKiroThrottle(response, ctx.abortSignal);
-      if (throttle && ctx.kiroPreferAccountFailover) {
-        releaseKiroThrottleProbe(probeToken);
+      if (throttle && ctx.kiroPreferAccountFailover) return throttle.response;
+      if (!throttle) return response;
+      if (!throttle.transient) {
+        // 配额/永久拒绝：交还外层结算（状态门上它仍是 4xx，统一 lane 继续重试）。
         return throttle.response;
       }
-      if (!throttle || !throttle.transient) {
-        releaseKiroThrottleProbe(probeToken);
-        const finalResponse = throttle?.response ?? response;
-        return ctx.returnRawErrors
-          ? finalResponse
-          : normalizeFinalKiroHttpError(finalResponse, ctx.abortSignal);
-      }
-
-      const claim = claimKiroThrottleProbe(throttle.delayMs, probeToken);
+      const claim = claimKiroThrottleProbe(throttle.delayMs, currentProbeToken());
       if (!claim.token) {
         cancelResponseBodyBestEffort(throttle.response);
         await waitWithAbort(claim.wait!, ctx.abortSignal);
-        probeToken = undefined;
+        setProbeToken(undefined);
         continue;
       }
-      probeToken = claim.token;
-      if (attempt === THROTTLE_ATTEMPTS - 1) {
-        releaseKiroThrottleProbe(probeToken);
-        return ctx.returnRawErrors
-          ? throttle.response
-          : normalizeFinalKiroHttpError(throttle.response, ctx.abortSignal);
-      }
-      cancelResponseBodyBestEffort(throttle.response);
+      // 本层循环用完或拿到了冷却所有权：交还这轮答案，由外层统一 ladder 继续。
+      return throttle.response;
     }
     throw new Error("Kiro throttle retry loop exhausted without a response");
-  } catch (error) {
-    releaseKiroThrottleProbe(probeToken);
-    if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
-    if (error instanceof Error && error.name === "TimeoutError") {
-      return new Response("Kiro upstream gateway timeout", { status: 504 });
-    }
-    throw error;
+  } finally {
+    releaseProbe(currentProbeToken());
   }
 }

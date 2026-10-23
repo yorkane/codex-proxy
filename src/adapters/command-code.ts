@@ -5,6 +5,7 @@ import { opendir } from "node:fs/promises";
 import type { AdapterEvent, OcxContentPart, OcxMessage, OcxParsedRequest, OcxProviderConfig, OcxTool, OcxUsage } from "../types";
 import { isAllowedToolChoice, namespacedToolName, resolveToolChoiceWireName, toolChoiceToolPredicate } from "../types";
 import type { AdapterFetchContext, AdapterRequest, ProviderAdapter } from "./base";
+import type { SendClass } from "../lib/request-execution-budget";
 import type { TranslatorBudget } from "../lib/translator-budget";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { debugDroppedFrame } from "../lib/debug";
@@ -13,8 +14,7 @@ import { commandCodeReasoningEfforts, refreshCommandCodeReasoningEfforts } from 
 import { identifyRoutedModel } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { parseDataUrl } from "./image";
-import { createAdapterPhysicalSend } from "./physical-send";
-import { SendBudgetExhaustedError } from "../lib/upstream-retry";
+import { fetchModelHttpResponseWithRetry } from "./model-http-retry";
 import { CommandCodeToolTextFilter, type CommandCodeDeclaredTools } from "./command-code-tool-text";
 import { EMPTY_COMMAND_CODE_PROJECT_CONTEXT, loadCommandCodeProjectContext } from "./command-code-project-context";
 
@@ -650,41 +650,54 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
       };
     },
     async fetchResponse(request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> {
-      const send = createAdapterPhysicalSend(ctx, executor);
-      const response = await send({ url: request.url, dispatch: physical => fetchCommandCode(request, ctx, physical) });
-      if (response.ok) return response;
-      const currentEffort = (() => {
-        try { return (JSON.parse(request.body) as { params?: { reasoning_effort?: unknown } }).params?.reasoning_effort; } catch { return undefined; }
-      })();
-      if (typeof currentEffort !== "string") return response;
-      let body = "";
-      try {
-        const observed = await readBoundedResponseBody(response.clone(), { signal: ctx?.abortSignal, maxBytes: 8 * 1024 });
-        if (!observed.displaySafe) return response;
-        body = observed.text;
-      } catch { return response; }
-      if (!isReasoningEffortRejection(response.status, body)) return response;
-      const modelId = (() => {
-        try { return (JSON.parse(request.body) as { params?: { model?: unknown } }).params?.model; } catch { return undefined; }
-      })();
-      if (typeof modelId !== "string") return response;
-      // An operator who wrote this ladder authorized the rung deliberately. Replaying the turn
-      // without it would answer at the provider default and hide a wrong configuration behind a
-      // successful-looking response, so the upstream rejection is what the caller gets. The
-      // downgrade below stays for the shipped table, where the rung was never the caller's idea.
-      if (operatorChoseCommandCodeLadder(provider, canonicalCommandCodeModelId(modelId))) return response;
-      const refreshed = await refreshCommandCodeReasoningEfforts(modelId, executor, currentEffort, provider.baseUrl);
-      if (!refreshed || refreshed.includes(currentEffort)) return response;
-      const retry = requestWithoutReasoningEffort(request);
-      if (!retry) return response;
-      try {
-        return await send({ url: retry.url, sendClass: "repair", recovery: "reasoning-effort-downgrade",
-          beforeDispatch: () => { try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ } },
-          dispatch: physical => fetchCommandCode(retry, ctx, physical) });
-      } catch (error) {
-        if (error instanceof SendBudgetExhaustedError) return response;
-        throw error;
-      }
+      // 统一模型重试 lane：任何上游 4xx/5xx 都在共享发送预算内重投（默认 11 发，env 可配）。
+      // 每轮恰一次模型物理发送；reasoning-effort 降档是「本轮解析 + 下轮换 body 重发」的
+      // 协议恢复，profile 刷新是支持流量不占模型账本，repair 全程至多布防一次。
+      let activeRequest = request;
+      let activeSendClass: SendClass | undefined;
+      let repairArmed = true;
+      return fetchModelHttpResponseWithRetry(async (send, lane) => {
+        const current = activeRequest;
+        const sendClass = activeSendClass;
+        activeSendClass = undefined;
+        const response = await send({ url: current.url, ...(sendClass ? { sendClass } : {}), dispatch: physical => fetchCommandCode(current, ctx, physical) });
+        if (response.ok) return response;
+        // Non-2xx travels back as the ORIGINAL response: the lane owns its lifecycle (cancel
+        // only when it decides to retry, body intact on the terminal return). The repair
+        // predicate below reads a bounded CLONE, so the original stays readable for the caller.
+        if (!repairArmed) return response;
+        const currentEffort = (() => {
+          try { return (JSON.parse(current.body) as { params?: { reasoning_effort?: unknown } }).params?.reasoning_effort; } catch { return undefined; }
+        })();
+        if (typeof currentEffort !== "string") return response;
+        let body = "";
+        try {
+          const observed = await readBoundedResponseBody(response.clone(), { signal: ctx?.abortSignal, maxBytes: 8 * 1024 });
+          if (!observed.displaySafe) return response;
+          body = observed.text;
+        } catch { return response; }
+        if (!isReasoningEffortRejection(response.status, body)) return response;
+        const modelId = (() => {
+          try { return (JSON.parse(current.body) as { params?: { model?: unknown } }).params?.model; } catch { return undefined; }
+        })();
+        if (typeof modelId !== "string") return response;
+        // An operator who wrote this ladder authorized the rung deliberately. Replaying the turn
+        // without it would answer at the provider default and hide a wrong configuration behind a
+        // successful-looking response, so the upstream rejection is what the caller gets. The
+        // downgrade below stays for the shipped table, where the rung was never the caller's idea.
+        if (operatorChoseCommandCodeLadder(provider, canonicalCommandCodeModelId(modelId))) return response;
+        // The repair spends one of the unified sends (the next round), so it is only armed when
+        // the ledger still has a send to spend; a refused repair keeps this round's answer.
+        if (lane.sendsRemaining() <= 0) return response;
+        repairArmed = false;
+        const refreshed = await refreshCommandCodeReasoningEfforts(modelId, executor, currentEffort, provider.baseUrl);
+        if (!refreshed || refreshed.includes(currentEffort)) return response;
+        const retry = requestWithoutReasoningEffort(current);
+        if (!retry) return response;
+        activeRequest = retry;
+        activeSendClass = "repair";
+        return response;
+      }, ctx ?? {}, { label: "command-code", fallback: executor });
     },
     async *parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
       let sawFinish = false;

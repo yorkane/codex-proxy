@@ -1,5 +1,6 @@
 import { effectiveAzureOutputBudget } from "../../adapters/azure";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
+import { modelRequestMaxAttempts } from "../../lib/model-request-retry";
 import { comboCooldownRetryAfterSeconds, type CodexAccountModelRefusal } from "../../combos/failover";
 import { fallbackTriggerForStatus, guardFallbackHop } from "../../routing/fallback-policy";
 import {
@@ -242,14 +243,29 @@ export function isAnthropicPoolLocalRefusal(
  * profile exactly, and a three-target combo whose every target fails hard reaches upstream six
  * times instead of the twelve #4546 measured.
  */
-export function comboExecutionBudgetPolicy(declaredTargets: number): RequestExecutionBudgetPolicy {
+export function comboExecutionBudgetPolicy(
+  declaredTargets: number,
+  configuredRetries?: number,
+): RequestExecutionBudgetPolicy {
   const targets = Math.max(1, Math.trunc(declaredTargets));
   const hops = targets - 1;
   const reserve = CODEX_TEXT_GUARDED_BUDGET_POLICY.finalRecoveryAllowance;
-  const total = COMBO_TARGET_BASE_SENDS + hops + reserve;
+  // 统一模型请求 lane（fork，root 2026-10-23 绝对总额裁决）：总额就是权威的绝对发送数
+  // `modelRequestMaxAttempts(configuredRetries)`（全局 modelRequestMaxRetries 换算，env
+  // 优先，默认 11）。旧公式 `COMBO_TARGET_BASE_SENDS + hops + reserve` 让 13 目标 combo
+  // 拿 16 送，突破配置的 10 次重试；新合同下 HTTP 4xx/5xx 的全部发送共用这一个总额，
+  // 耗尽即返回最后一次真实失败——大 combo 不再保证每个声明目标都被触及。目标数的影响
+  // 只剩下面两项 transition/alternate（约束「跳到哪」，不是「发几次」）。
+  //
+  // `baseSendAllowance = total`（root 裁决）：全部 11 送都是**普通阶梯可消费**的 base，
+  // 第 11 送不再要求 RESERVE_FUNDED_CLASSES。用户需求是「模型 4xx/5xx 至少重试 10 次」，
+  // 一个纯 503 串在 base=total-1 的形态下只能发 10 次，最后一送被 reserve 门挡在门外，
+  // 等于违约。reserve 字段保留原值仅作策略可读性；在 base=total 下它不可达（spent 达到
+  // total 时总额检查先拒），这正是「最低 10 次重试对普通错误生效」的算术表达。
+  const total = modelRequestMaxAttempts(configuredRetries);
   return {
     maxTotalModelSends: total,
-    baseSendAllowance: total - reserve,
+    baseSendAllowance: total,
     finalRecoveryAllowance: reserve,
     maxAlternateTargetSends: Math.max(1, hops),
     maxTargetTransitions: Math.max(1, hops),
@@ -302,7 +318,10 @@ export function comboTargetSendBudget(
   const ceiling = Math.max(1, policy.maxTotalModelSends - heldForLaterTargets);
   return deriveSendBudgetScope(comboScope, {
     maxTotalModelSends: policy.maxTotalModelSends,
-    baseSendAllowance: Math.min(ceiling, comboScope.used + COMBO_TARGET_BASE_SENDS),
+    // 统一模型 lane：per-target ladder 用派生 policy 的权威总额（默认 11），不再是常量
+    // COMBO_TARGET_BASE_SENDS=3——统一合同里一个目标自己的 4xx/5xx 阶梯要能烧到权威额；
+    // 后部目标各留 1 送的 holdback（ceiling）与共享 ledger 仍是绝对边界。
+    baseSendAllowance: Math.min(ceiling, comboScope.used + policy.maxTotalModelSends),
     finalRecoveryAllowance: policy.finalRecoveryAllowance,
     // Within one target the account-move shape is unchanged: three same-account sends plus one
     // alternate is the recovery live traffic depends on, and a combo does not widen it.
@@ -423,7 +442,7 @@ export async function executeComboResponses(
   // alternate-target ledgers come from the target list rather than from the single-target
   // account-move profile (#4546).
   const comboSendScope = isRequestExecutionBudget(options.sendBudget)
-    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(combo.targets.length))
+    ? deriveSendBudgetScope(options.sendBudget, comboExecutionBudgetPolicy(combo.targets.length, config.modelRequestMaxRetries))
     : undefined;
   // Expand previous_response_id before image policy and child dispatch so a
   // continuation that only references prior images still fails closed when

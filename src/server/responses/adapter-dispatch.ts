@@ -37,7 +37,6 @@ import { providerFetch, fetchWithHeaderTimeout, safeHostLabel } from "./fetch-he
 import { isAnthropicBillingKeyPool, rotateAnthropicBillingKeyOnResponse } from "../../providers/anthropic-billing-recovery";
 import {
   transientRetryPolicyFor,
-  resetReplayPolicyFor,
   rateLimitRetryPolicyFor,
   hasKeyPoolFailover,
   rotateProviderTransportOn401,
@@ -47,7 +46,6 @@ import {
 } from "../../providers/key-failover";
 import {
   fetchWithTransientRetry,
-  fetchWithResetRetry,
   applyUpstreamRecoveryInit,
   SendBudgetExhaustedError,
   UpstreamRetryEvidenceError,
@@ -189,6 +187,7 @@ export async function prepareAdapterExchange(
     | "targetSendsUsed"
     | "initialSendAllowance"
     | "noteInitialDispatch"
+    | "requestModelSendLimit"
   >,
 ) {
   const { options, config, logCtx, req } = requestContext;
@@ -401,9 +400,11 @@ export async function prepareAdapterExchange(
   const autoPauseEnabled = config.providers[route.providerName]?.accountAutoPause?.enabled === true;
   const billingPoolRequest = isAnthropicBillingKeyPool(route.provider);
   let billingRecoveryActive = false;
-  const genericRefetchCountsSends = () => options.comboAttempt === true || sendBudgetState.adapterSendBudget?.spendEnforced === true
-    || transientRetryPolicyFor(route.provider) !== null || resetReplayPolicyFor(route.provider) !== null
-    || billingPoolRequest || billingRecoveryActive || autoPauseEnabled;
+  // 统一模型请求 lane（fork 2026-10-23 用户裁决）：所有模型 HTTP 发送都走统一 ladder，
+  // 每一发都计入共享请求 ledger。「哪些发送计数」的旧条件门取消——省略计数正是旧契约里
+  // unconfigured provider 漏计、每条 recovery leg 拿新预算的入口。保留谓词形状恒真，
+  // 使 call site 的 permit/receipt 交互逐字不变。
+  const genericRefetchCountsSends = () => true;
   let handoffPermit: ResponsesSendBudget["pendingHopPermit"];
   try {
     if (transportState.activeAdapter.fetchResponse) {
@@ -436,10 +437,10 @@ export async function prepareAdapterExchange(
       // adapters keep reset-only retry so combo failover still hops on the first 5xx
       // instead of burning ~1.2s of same-target retries per hop.
       // #2643: an opted-in key-auth openai-chat provider also gets transient-5xx retry. The
-      // legacy direct-Google exception is preserved exactly; every other adapter still keeps
-      // reset-only semantics so combo failover hops on the first 5xx.
+      // 统一模型请求 lane（fork 2026-10-23 用户裁决）取消了上述全部豁免：这一族的每个
+      // 模型发送都走 fetchWithTransientRetry(modelRetryMode)，legacy 门只保留读取
+      // 配置用于 cap 抬升（transientRetryOn5xx.attempts 只可高于统一地板）。
       const transientPolicy = transientRetryPolicyFor(route.provider);
-      const resetPolicy = resetReplayPolicyFor(route.provider);
       // Rebook a native Copilot hop against the negotiated destination before dispatch.
       // Raw externally counted permits settle through the retry helper's send reporter.
       if (route.providerName === "github-copilot" && adapterSendBudget && sendBudgetState.pendingHopPermit
@@ -468,14 +469,18 @@ export async function prepareAdapterExchange(
       // Combo and emergency compaction admission already book this target's first send.
       // Its configured initial ceiling is target-local; the shared remainder below still
       // accounts for earlier targets without deducting their sends from this target twice.
-      const initialSendCap = transientPolicy || resetPolicy
-        || (options.comboAttempt && route.provider.adapter === "google")
-        ? transientSendCapFor(transientPolicy?.attempts,
-          (options.comboAttempt || compactPrepaid) ? 0 : sendBudgetState.sendsUsed)
-        : 1;
-      const fetchWithRetryPolicy = (route.provider.adapter === "google" || transientPolicy)
-        ? fetchWithTransientRetry
-        : fetchWithResetRetry;
+      // 统一模型请求 lane（fork）：generic 初始发送恒走 fetchWithTransientRetry 的
+      // modelRetryMode（真实上游 400..599 全重试、Retry-After 全下限、无 slow 早退）。
+      // 旧形态里无 transientPolicy 的 provider 走 fetchWithResetRetry + cap 1，一个 4xx
+      // 直接落到 combo/客户端；用户 2026-10-23 裁决取消该豁免。cap 的统一权威是本请求
+      // 预算的 requestModelSendLimit（ingress fund = modelRequestMaxAttempts，floor 11）；
+      // provider 的 transientRetryOn5xx.attempts 只可抬升不可压到地板下。物理总量仍由
+      // 共享 ledger（initialSendAllowance）相交封顶，leg cap 不放大总盘。
+      const modelSendAuthority = sendBudgetState.requestModelSendLimit;
+      const initialSendCap = transientSendCapFor(transientPolicy?.attempts,
+        (options.comboAttempt || compactPrepaid) ? 0 : sendBudgetState.sendsUsed,
+        modelSendAuthority);
+      const fetchWithRetryPolicy = fetchWithTransientRetry;
       const initialReporter = transientSendReporter(compactPrepaid ?? options.comboDispatchPermit);
       const deferredInitial = billingPoolRequest && !receiptMode ? deferPhysicalSendReporter(initialReporter) : undefined;
       try { upstreamResponse = await fetchWithRetryPolicy(
@@ -524,23 +529,16 @@ export async function prepareAdapterExchange(
           abortSignal: upstream.signal,
           label: safeHostLabel(builtInitialRequest.url),
           claimAmbiguousResend: claimPreHeaderResend,
-          ...(sendBudgetState.adapterSendBudget?.spendEnforced || options.comboDispatchPermit || transientPolicy || resetPolicy || compactPrepaid || options.comboAttempt
-            || billingPoolRequest || autoPauseEnabled
-            ? {
-              // A pending compaction permit already booked this leg's first physical send.
-              ...(transientPolicy || resetPolicy || compactPrepaid || options.comboAttempt || autoPauseEnabled
-                ? {
-                  attempts: Math.min(initialSendCap,
-                    sendBudgetState.initialSendAllowance(initialSendCap) + (compactPrepaid ? 1 : 0)),
-                }
-                : {}),
-              // Reporter path: direct requests and enforced spend. Receipt-mode sends are
-              // settled by `onPhysicalDispatch`, so a reporter here would count them twice.
-              ...(receiptMode
-                ? {}
-                : { onSendsConsumed: deferredInitial?.report ?? initialReporter }),
-            }
-            : {}),
+          // 统一 lane：modelRetryMode/attempts/reporter 恒传（receipt-mode 除外——其发送由
+          // onPhysicalDispatch 结算，reporter 会双计）。旧的省略分支取消后，unconfigured
+          // provider 不再拿 helper 缺省预算，一律吃统一权威。
+          modelRetryMode: true,
+          // A pending compaction permit already booked this leg's first physical send.
+          attempts: Math.min(initialSendCap,
+            sendBudgetState.initialSendAllowance(initialSendCap) + (compactPrepaid ? 1 : 0)),
+          ...(receiptMode
+            ? {}
+            : { onSendsConsumed: deferredInitial?.report ?? initialReporter }),
         },
       ); } finally { compactPrepaid?.release(); }
     }
@@ -741,14 +739,17 @@ export async function prepareAdapterExchange(
           // retryable 503 got no retry on the Responses path. Route it through the same
           // selection, and pass what is LEFT of the request-scoped budget rather than a
           // fresh one, so a recovery loop cannot multiply total upstream sends.
+          // 统一模型请求 lane（fork 2026-10-23）：recovery leg 与初始发送同一条合同——
+          // 真实上游 400..599 全部进统一 ladder（modelRetryMode），legacy google/
+          // transientPolicy 门取消。cap 权威 = 本请求 requestModelSendLimit，provider
+          // 配置只可抬升；物理总量仍由共享 ledger 相交（recoverySendAllowance）。
           const refetchTransientPolicy = transientRetryPolicyFor(route.provider);
-          const refetchWithPolicy = (route.provider.adapter === "google" || refetchTransientPolicy)
-            ? fetchWithTransientRetry
-            : fetchWithResetRetry;
+          const refetchWithPolicy = fetchWithTransientRetry;
           const helperCountsSends = genericRefetchCountsSends();
           const prepaid = sendBudgetState.pendingHopPermit;
           const configuredTotal = refetchTransientPolicy?.attempts;
-          const refetchCap = transientSendCapFor(configuredTotal, sendBudgetState.targetSendsUsed);
+          const refetchCap = transientSendCapFor(configuredTotal, sendBudgetState.targetSendsUsed,
+            sendBudgetState.requestModelSendLimit);
           // An exact total includes a booked hop, even when it consumed the last base slot.
           // Keep that funded send while forbidding the final reserve from widening the total.
           const prepaidLastSlot = helperCountsSends && configuredTotal !== undefined && prepaid
@@ -808,12 +809,11 @@ export async function prepareAdapterExchange(
                 abortSignal: upstream.signal,
                 label: safeHostLabel(retryRequest.url),
                 claimAmbiguousResend: claimPreHeaderResend,
-                ...(refetchAllowance
-                  ? {
-                    attempts: refetchAllowance.attempts,
-                    onSendsConsumed: deferredRefetch?.report ?? refetchReporter,
-                  }
-                  : {}),
+                // 统一 lane：helperCountsSends 恒真后 refetchAllowance 恒存在；modelRetryMode
+                // 让这条腿与初始发送共享同一状态门与预算权威。
+                modelRetryMode: true,
+                attempts: refetchAllowance?.attempts,
+                onSendsConsumed: deferredRefetch?.report ?? refetchReporter,
               },
             );
           } finally {

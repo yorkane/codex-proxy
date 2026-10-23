@@ -2560,10 +2560,10 @@
   "emitted-call-shape-repair.test.ts": "responses",
   "code-mode-helper-prefix-repair.test.ts": "responses",
   "code-mode-sandbox-prefix-production.test.ts": "responses",
-  "tool-name-repair-official-gate.test.ts": "responses",
-  "exec-envelope-repair.test.ts": "responses",
-  "undeclared-tool-phantom-allowlist.test.ts": "responses",
-  "namespace-leak-feedback.test.ts": "responses",
-  "openai-chat-output-ceiling.test.ts": "adapters/openai",
-  "exec-envelope-repair-patch-envelope.test.ts": "responses"
+  "tool-name-repair-official-gate.test.ts": "responses", "exec-envelope-repair.test.ts": "responses", "undeclared-tool-phantom-allowlist.test.ts": "responses", "namespace-leak-feedback.test.ts": "responses",
+  "openai-chat-output-ceiling.test.ts": "adapters/openai", "exec-envelope-repair-patch-envelope.test.ts": "responses", "responses-capacity-pre-output.test.ts": "responses", "model-request-retry.test.ts": "lib",
+  "sidecar-model-retry.test.ts": "lib", "model-request-retry-config.test.ts": "config", "native-model-retry.test.ts": "lib", "native-model-retry-ladder.test.ts": "responses",
+  "model-retry-scope.test.ts": "lib", "oauth-account-auto-pause-deferral.test.ts": "oauth", "responses-model-retry-adapter.test.ts": "responses", "google-http-model-retry.test.ts": "adapters/google",
+  "owned-model-retry.test.ts": "lib", "kiro-model-retry.test.ts": "providers/kiro",
+  "cursor-model-retry.test.ts": "providers/cursor", "model-request-http-retry.test.ts": "lib", "model-http-retry.test.ts": "adapters"
 }

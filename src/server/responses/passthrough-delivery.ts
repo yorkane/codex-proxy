@@ -752,6 +752,7 @@ export async function deliverPassthroughResponse(
             hostedTool: parsed._webSearch,
             describeImages: requiresVisionPreprocessing(config, route.provider, route.modelId, route.providerName),
             sidecar: config.webSearchSidecar,
+            modelRequestMaxRetries: config.modelRequestMaxRetries,
           }),
           // Snapshot the bound conversation, provider, model, destination, and credential. The
           // next turn must match every dimension before its hosted cell can recover this result.

@@ -4,7 +4,7 @@ import { createAdapterPhysicalSend } from "./physical-send";
 import type { SendClass } from "../lib/request-execution-budget";
 import type { AttemptRecoveryKind } from "../usage/log";
 import { debugProviderDiagnosticLazy } from "../lib/debug";
-import { isQuotaExhaustedBody, retryableGoogleStatus, safeGoogleHttpErrorMessage } from "./google-errors";
+import { safeGoogleHttpErrorMessage } from "./google-errors";
 import { repairGoogleInvalidRequestBodyWithReport } from "./google-wire-compiler";
 import type { GoogleToolSchemaPolicy, GoogleToolSchemaProfile } from "./google-tool-schema";
 import { normalizeUpstreamHttpErrorResponse, readDisplaySafeErrorPayloadText } from "./upstream-http-error";
@@ -16,9 +16,9 @@ import {
   retryBackoffDelayMs,
   sleepWithAbort,
   SendBudgetExhaustedError,
-  TRANSIENT_RETRY_MAX_ATTEMPTS,
   isConnectionResetError,
 } from "../lib/upstream-retry";
+import { modelRequestMaxAttempts } from "../lib/model-request-retry";
 
 const GOOGLE_RETRY_BASE_MS = 250;
 const GOOGLE_RETRY_MAX_MS = 2_000;
@@ -51,11 +51,17 @@ async function normalizeFinalGoogleError(label: string, res: Response, signal?: 
 }
 
 /**
- * Fetch a Google-family upstream with Kiro-style hardening: per-attempt timeout
- * (`AbortSignal.any([parent, timeout])`), bounded retry on transient status / network errors,
- * `Retry-After` honoring, jittered exponential backoff, and (unless raw mode is used) a
- * classified + redacted final error body. `label` is the provider-facing prefix used in error
- * messages.
+ * Fetch a Google-family upstream on the unified model retry lane (fork 2026-10-23):
+ * per-attempt timeout, ANY upstream HTTP 4xx/5xx retried (the quota-429
+ * veto and the 401/403/404 non-retryable gate are removed per the user's standing order),
+ * ladder cap = the request ledger's own `policy.maxTotalModelSends` when a send budget is
+ * present (an explicit caller cap is a HARD ceiling and is never widened by the global
+ * floor; each send is admitted through createAdapterPhysicalSend, so this inner ladder
+ * shares the ledger and multiplies nothing), else the unified leaf default (11).
+ * `Retry-After` is a lower bound (never send early; no local ceiling on the model lane —
+ * the caller's abort signal is the stop), jittered exponential backoff, and (unless raw
+ * mode is used) a classified + redacted final error body. The one-shot 400 repair replay
+ * is a physical send and counts against the same cap.
  */
 export async function fetchGoogleWithRetry(
   label: string,
@@ -68,6 +74,13 @@ export async function fetchGoogleWithRetry(
   const toolSchemaPolicy = opts.toolSchemaPolicy ?? "compatible";
   const timeoutMs = ctx.timeoutMs ?? 200_000;
   const send = createAdapterPhysicalSend(ctx);
+  // 统一 lane 的 ladder 上限：有账本时账本自己的 policy 是权威（外层 dispatch 每 leg 只发
+  // 一送，内层 ladder 由 reserveDispatch 封顶，两层不相乘）；无账本（窄调用方/单测）
+  // 用统一 leaf（11 起）。显式 caller cap 是硬上限，floor 只作用在缺省路径。
+  const ladderCap = ctx.sendBudget?.policy.maxTotalModelSends ?? modelRequestMaxAttempts();
+  // 物理发送计数（含 400 repair replay 与 reserve 被拒的尝试）：loop 以它封顶，
+  // repair 的 attempt-- 只回退 backoff 序号，不赎回发送额。
+  let sendsMade = 0;
   let lastError: unknown;
   let activeRequest = request;
   let compatibilityReplayUsed = false;
@@ -75,9 +88,10 @@ export async function fetchGoogleWithRetry(
   let retryDelayMs = 0;
   let sendClass: SendClass = "transient";
   let recovery: AttemptRecoveryKind | undefined;
-  for (let attempt = 0; attempt < TRANSIENT_RETRY_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 0; sendsMade < ladderCap; attempt++) {
     if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
     try {
+      sendsMade += 1;
       const res = await send({ url: activeRequest.url, sendClass, recovery,
         beforeDispatch: async () => {
           if (retryDelayMs > 0) await sleepWithAbort(retryDelayMs, ctx.abortSignal);
@@ -120,27 +134,23 @@ export async function fetchGoogleWithRetry(
           continue;
         }
       }
-      if (!retryableGoogleStatus(res.status) || attempt === TRANSIENT_RETRY_MAX_ATTEMPTS - 1) {
+      // 统一 lane：任何 4xx/5xx 都进重放（quota-exhausted 429 veto 按用户 2026-10-23 裁决
+      // 删除——「至少重试 10 次」不以响应体分类为门）。终态返回保持既有分类与脱敏形状。
+      if (res.status < 400) {
         return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
       }
-      // A 429 may be a transient rate limit (retry) or hard quota exhaustion (do NOT retry —
-      // it won't recover for hours and burns retries). Peek the body to tell them apart.
-      if (res.status === 429) {
-        const peekTarget = res.clone();
-        const peek = await readDisplaySafeErrorPayloadText(peekTarget, ctx.abortSignal);
-        if (isQuotaExhaustedBody(peek)) {
-          return ctx.returnRawErrors ? res : normalizeUpstreamHttpErrorResponse(res, {
-            signal: ctx.abortSignal,
-            formatMessage: payloadText => safeGoogleHttpErrorMessage(label, res.status, payloadText || peek),
-          });
-        }
+      if (sendsMade >= ladderCap) {
+        return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
       }
       pendingResponse = res;
-      recovery = res.status === 429 ? "rate-limit-429" : "transient-5xx";
+      recovery = res.status === 429 ? "rate-limit-429"
+        : res.status >= 500 ? "transient-5xx" : "model-error-retry";
       retryDelayMs = retryBackoffDelayMs(attempt, {
         baseDelayMs: GOOGLE_RETRY_BASE_MS,
         maxDelayMs: GOOGLE_RETRY_MAX_MS,
         headers: res.headers,
+        // 模型 lane：Retry-After 是下限，绝不提前发送；本地 max 只约束自研指数退避。
+        retryAfterIsLowerBound: true,
       });
     } catch (err) {
       if (ctx.abortSignal?.aborted) throw err;
@@ -156,7 +166,7 @@ export async function fetchGoogleWithRetry(
         throw err;
       }
       lastError = err;
-      if (attempt === TRANSIENT_RETRY_MAX_ATTEMPTS - 1) throw err;
+      if (sendsMade >= ladderCap) throw err;
       sendClass = "transient";
       recovery = isConnectionResetError(err) ? "connection-reset" : undefined;
       retryDelayMs = retryBackoffDelayMs(attempt, {
