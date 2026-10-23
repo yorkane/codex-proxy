@@ -17,7 +17,7 @@ import { SendBudgetExhaustedError } from "../../../src/lib/upstream-retry";
  * a real upstream HTTP 4xx/5xx is an authoritative refusal receipt, so the replay is allowed
  * even when the transport says the request was committed (the RunSSE registration never
  * happened on a non-200), the loop cap is the request budget's EXACT policy total (never a
- * fresh 11 for a spent request), and the emitted-output gate keeps its bite: a turn that has
+ * fresh unified-default ladder for a spent request), and the emitted-output gate keeps its bite: a turn that has
  * already streamed text is never replayed.
  */
 const realEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
@@ -57,7 +57,7 @@ function httpStatusTransport(status: number, opts: { committed?: boolean; events
 }
 
 describe("cursorTurnSendCap", () => {
-  test("a budget with policy 0 is a hard refusal, not a fallback to 11", () => {
+  test("a budget with policy 0 is a hard refusal, not a fallback to the unified default", () => {
     expect(cursorTurnSendCap({ sendBudget: createRequestExecutionBudget(policyOf(0)) })).toBe(0);
   });
   test("a guarded legacy budget of 3 keeps its shape", () => {
@@ -65,25 +65,26 @@ describe("cursorTurnSendCap", () => {
   });
   test("context-free falls to the unified leaf (env over default)", () => {
     // 用户真实 env 是 process.env；CursorTurnExecutionOptions 没有 env 字段，旧写法
-    // { env: {...} } 会被静默忽略（读成默认 11）。fixture 直接落 process.env。
+    // { env: {...} } 会被静默忽略（读成默认）。fixture 直接落 process.env。
+    // 2026-10-23 改约：默认 3 重试 = 4 送；env 越界（12 > 5）钳到上限 5 → 6 送。
     delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
-    expect(cursorTurnSendCap({})).toBe(11);
+    expect(cursorTurnSendCap({})).toBe(4);
     process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "12";
-    expect(cursorTurnSendCap({})).toBe(13);
+    expect(cursorTurnSendCap({})).toBe(6);
     delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
   });
 });
 
 describe("runCursorTurnWithRetry unified HTTP lane", () => {
   test("a committed transport refusing with HTTP 503 replays to the unified budget", async () => {
-    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "10";
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "3";
     const make = httpStatusTransport(503, { committed: true });
     const events: CursorServerMessage[] = [];
     await expect(runCursorTurnWithRetry(
       make, { provider: { adapter: "cursor" } } as never, request, undefined,
       message => events.push(message), { env: {} },
     )).rejects.toThrow("HTTP 503");
-    expect(make.calls()).toBe(11);
+    expect(make.calls()).toBe(4);
     expect(events).toEqual([]);
   });
 
@@ -98,14 +99,14 @@ describe("runCursorTurnWithRetry unified HTTP lane", () => {
     }
   });
 
-  test("a 9th-attempt success settles the turn with events intact", async () => {
-    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "10";
+  test("a 3rd-attempt success settles the turn with events intact", async () => {
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "3";
     let calls = 0;
     const events: CursorServerMessage[] = [];
     await runCursorTurnWithRetry(
       () => {
         calls++;
-        if (calls <= 8) return httpStatusTransport(502, { committed: true })();
+        if (calls <= 2) return httpStatusTransport(502, { committed: true })();
         return {
           async *run() { yield { type: "text", text: "late ok" } as CursorServerMessage; },
           writeClient() {}, close() {}, requestCommitted: () => true,
@@ -114,7 +115,7 @@ describe("runCursorTurnWithRetry unified HTTP lane", () => {
       { provider: { adapter: "cursor" } } as never, request, undefined,
       message => events.push(message), { env: {} },
     );
-    expect(calls).toBe(9);
+    expect(calls).toBe(3);
     expect(events).toEqual([{ type: "text", text: "late ok" }]);
   });
 
@@ -187,8 +188,8 @@ describe("runCursorTurnWithRetry unified HTTP lane", () => {
     )).rejects.toBeInstanceOf(CursorRootEnvelopeLimitError);
     expect(calls).toBe(1);
   });
-  test("the transient network lane keeps its old three attempts, not the unified eleven", async () => {
-    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "10";
+  test("the transient network lane keeps its old three attempts, not the unified default", async () => {
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "3";
     let calls = 0;
     await expect(runCursorTurnWithRetry(
       () => {

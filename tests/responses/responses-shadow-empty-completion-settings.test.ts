@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
+import { projectConfigRebaseProvenance } from "../../src/config/rebase-provenance";
 import { emptyCompletionRetryEnabled, EMPTY_COMPLETION_RETRY_ENV } from "../../src/server/responses/empty-completion-guard";
 import {
   EMPTY_COMPLETION_RETRY_MAX_ENV,
@@ -52,7 +53,8 @@ function fixtureConfig(): OcxConfig {
   return { port: 0, defaultProvider: "xai", providers: {} } as OcxConfig;
 }
 
-async function shadowApi(config: OcxConfig, method: "GET" | "PUT", body?: unknown): Promise<Response> {
+type ShadowDeps = Record<string, unknown>;
+async function shadowApi(config: OcxConfig, method: "GET" | "PUT", body?: unknown, deps?: ShadowDeps): Promise<Response> {
   // Management API enforces a same-origin gate; a browserless caller must look local.
   const headers: Record<string, string> = { origin: "http://127.0.0.1:10100", host: "127.0.0.1:10100" };
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -63,6 +65,7 @@ async function shadowApi(config: OcxConfig, method: "GET" | "PUT", body?: unknow
   });
   const res = await handleManagementAPI(req, new URL(req.url), config, {
     createManagementConvergeCodex: catalogConvergenceFactory(),
+    ...(deps ?? {}),
   });
   expect(res).not.toBeNull();
   return res!;
@@ -212,5 +215,142 @@ describe("shadow-call settings API emptyCompletionRetry", () => {
       emptyCompletionRetryMaxEnvOverride: true,
     });
     expect(config.emptyCompletionRetryMax).toBe(1);
+  });
+});
+
+// ---- 全局模型请求重试预算（modelRequestMaxRetries）投影到 Shadow 页（fork 新增） ----
+// 同一份全局 config.modelRequestMaxRetries（0..5，默认 3，0=关闭代理内模型 HTTP 错误重试）。
+// 这里钉住 Shadow 面独有的回归：GET 报默认与边界、PUT 严格写 + live 热生效 + 落盘、非法 400
+// 不改现场、null 清键回落 3、不带该键的 PUT 不删字段、env 覆盖时字段一致，以及保存失败时
+// 该字段的值与存在性一起回滚（不让 UI 宣称成功而 live 漂移）。
+describe("shadow-call settings API modelRequestMaxRetries", () => {
+  const ENV_KEY = "OCX_MODEL_REQUEST_MAX_RETRIES";
+  let previousModelEnv: string | undefined;
+  beforeEach(() => {
+    previousModelEnv = process.env[ENV_KEY];
+    delete process.env[ENV_KEY];
+  });
+  afterEach(() => {
+    if (previousModelEnv === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = previousModelEnv;
+  });
+
+  test("GET reports the default, the bounds and no env override", async () => {
+    const config = fixtureConfig();
+    expect(await settingsBody(config)).toMatchObject({
+      modelRequestMaxRetries: 3,
+      modelRequestMaxRetriesMin: 0,
+      modelRequestMaxRetriesLimit: 5,
+      modelRequestMaxRetriesDefault: 3,
+      modelRequestMaxRetriesEnvOverride: false,
+      modelRequestMaxRetriesEnvName: ENV_KEY,
+    });
+  });
+
+  test("PUT 0 and PUT 5 mutate the live config, persist, and answer with the same fields as GET", async () => {
+    const config = fixtureConfig();
+    for (const value of [0, 5] as const) {
+      const put = await shadowApi(config, "PUT", { modelRequestMaxRetries: value });
+      expect(put.status).toBe(200);
+      const body = await put.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        modelRequestMaxRetries: value,
+        modelRequestMaxRetriesConfigured: value,
+        modelRequestMaxRetriesMin: 0,
+        modelRequestMaxRetriesLimit: 5,
+        modelRequestMaxRetriesDefault: 3,
+        modelRequestMaxRetriesEnvOverride: false,
+      });
+      expect(config.modelRequestMaxRetries).toBe(value);
+      expect(persistedConfig().modelRequestMaxRetries).toBe(value);
+      // GET 与 PUT 回包字段一致。
+      expect(await settingsBody(config)).toMatchObject({ modelRequestMaxRetries: value });
+    }
+  });
+
+  test("PUT rejects 6, -1, 10, a fraction and a string with 400 and changes nothing", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { modelRequestMaxRetries: 2 });
+    // JSON 承载不了的坏值（NaN/Infinity 序列化即 null=清键语义）不属于 HTTP 写边界；
+    // 它们的直接校验在 validateConfigCandidate / leaf 单测里钉住。
+    for (const bad of [6, -1, 10, 1.5, "25", {}, []]) {
+      const res = await shadowApi(config, "PUT", { modelRequestMaxRetries: bad });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toContain("modelRequestMaxRetries must be an integer");
+    }
+    expect(config.modelRequestMaxRetries).toBe(2);
+    expect(persistedConfig().modelRequestMaxRetries).toBe(2);
+  });
+
+  test("a PUT without the key leaves the persisted budget alone", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { modelRequestMaxRetries: 4 });
+    const res = await shadowApi(config, "PUT", { enabled: false });
+    expect(res.status).toBe(200);
+    expect((await res.json()).modelRequestMaxRetries).toBe(4);
+    expect(config.modelRequestMaxRetries).toBe(4);
+    expect(persistedConfig().modelRequestMaxRetries).toBe(4);
+  });
+
+  test("null clears the key and the default 3 applies", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { modelRequestMaxRetries: 1 });
+    const cleared = await (await shadowApi(config, "PUT", { modelRequestMaxRetries: null })).json() as Record<string, unknown>;
+    expect(cleared.modelRequestMaxRetries).toBe(3);
+    expect(cleared.modelRequestMaxRetriesConfigured).toBeUndefined();
+    expect(Object.hasOwn(config, "modelRequestMaxRetries")).toBe(false);
+    expect(persistedConfig().modelRequestMaxRetries).toBeUndefined();
+    // 清键走 deleteConfigTopLevelKey：落盘的 rebase-provenance 记录这条删除意图（与 settings 同机制）。
+    expect((persistedConfig().configRebaseProvenance as { deletedTopLevelKeys?: string[] } | undefined)
+      ?.deletedTopLevelKeys ?? []).toContain("modelRequestMaxRetries");
+  });
+
+  test("a finite env value is reported as an override and wins over a saved 0", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { modelRequestMaxRetries: 0 });
+    process.env[ENV_KEY] = "3";
+    const body = await settingsBody(config);
+    expect(body).toMatchObject({
+      modelRequestMaxRetries: 3,
+      modelRequestMaxRetriesConfigured: 0,
+      modelRequestMaxRetriesEnvOverride: true,
+    });
+    // PUT 回包与 GET 一致地反映 env 覆盖。
+    const put = await (await shadowApi(config, "PUT", { enabled: false })).json() as Record<string, unknown>;
+    expect(put.modelRequestMaxRetries).toBe(3);
+    expect(put.modelRequestMaxRetriesEnvOverride).toBe(true);
+  });
+
+  test("an unparseable env value is not an override and changes nothing", async () => {
+    const config = fixtureConfig();
+    await shadowApi(config, "PUT", { modelRequestMaxRetries: 1 });
+    process.env[ENV_KEY] = "not-a-number";
+    expect(await settingsBody(config)).toMatchObject({
+      modelRequestMaxRetries: 1,
+      modelRequestMaxRetriesEnvOverride: false,
+    });
+  });
+
+  test("a failed save rolls the field back with its presence and pending delete intent", async () => {
+    const config = fixtureConfig();
+    // deps seam（root 授权）：注入抛错的 saveConfigPreservingClaudeCode，确定性地模拟保存
+    // 失败——路由 catch 后必须回滚 live 字段与 pending rebase 意图并继续上抛。chmod 权限 hack
+    // 不可靠（真实 writer 修目录后成功），删除；成功路径的持久化仍由真实 writer 的上面用例覆盖。
+    await shadowApi(config, "PUT", { modelRequestMaxRetries: 2 });
+    const failing = { saveConfigPreservingClaudeCode: () => { throw new Error("fixture-save-failed"); } };
+    const intent = (c: OcxConfig) => JSON.stringify(projectConfigRebaseProvenance(c).configRebaseProvenance ?? null);
+    const intentBefore = intent(config);
+    await expect(shadowApi(config, "PUT", { modelRequestMaxRetries: 0 }, failing)).rejects.toThrow("fixture-save-failed");
+    // live 值与存在性回到保存前，intent 逐字节不变，磁盘保持旧值：UI 不会看到「成功但漂移」。
+    expect(config.modelRequestMaxRetries).toBe(2);
+    expect(Object.hasOwn(config, "modelRequestMaxRetries")).toBe(true);
+    expect(persistedConfig().modelRequestMaxRetries).toBe(2);
+    expect(intent(config)).toBe(intentBefore);
+    // 清键失败同样回滚存在性 + 删除意图（capture restore 连 pending tombstone 一起还原）。
+    await expect(shadowApi(config, "PUT", { modelRequestMaxRetries: null }, failing)).rejects.toThrow("fixture-save-failed");
+    expect(config.modelRequestMaxRetries).toBe(2);
+    expect(Object.hasOwn(config, "modelRequestMaxRetries")).toBe(true);
+    expect(persistedConfig().modelRequestMaxRetries).toBe(2);
+    expect(intent(config)).toBe(intentBefore);
   });
 });

@@ -107,12 +107,13 @@ function sendBudgetFor(budget: ReturnType<typeof createRequestExecutionBudget>) 
  */
 describe("a configured ladder is bounded by the request budget", () => {
   test("an absent policy resolves to the unified authority, reduced by sends used", () => {
-    // root design 2026-10-23: the model lane floors every leg at the unified authority
-    // (modelRequestMaxAttempts: env OCX_MODEL_REQUEST_MAX_RETRIES > config > 10 retries +
-    // first send = 11). An absent provider policy no longer resolves to the old constant 3;
-    // it resolves to 11 - used, and the request ledger remains the absolute bound.
-    for (const used of [0, 1, 2, 3, 9]) {
-      expect(transientSendCapFor(undefined, used)).toBe(11 - used);
+    // root design 2026-10-23 (amended): the model lane floors every leg at the unified
+    // authority (modelRequestMaxAttempts: env OCX_MODEL_REQUEST_MAX_RETRIES > config >
+    // default 3 retries + first send = 4). An absent provider policy no longer resolves to
+    // the old constant 3; it resolves to 4 - used, and the request ledger remains the
+    // absolute bound.
+    for (const used of [0, 1, 2, 3, 4]) {
+      expect(transientSendCapFor(undefined, used)).toBe(Math.max(0, 4 - used));
     }
   });
 
@@ -129,7 +130,7 @@ describe("a configured ladder is bounded by the request budget", () => {
 
   test("a lower configured value cannot end the ladder the floor continues", () => {
     // root design 2026-10-23 inverts this row's old shape: `attempts: 1` no longer ends the
-    // request at one send -- the unified floor (11) wins over a provider row that asks for
+    // request at one send -- the unified default (4 sends) wins over a provider row that asks for
     // less, and exhaustion follows the shared ledger. The same request is fundable at one
     // send and refuses only when its ledger allowance is spent.
     const budget = createRequestExecutionBudget();
@@ -152,7 +153,7 @@ describe("a configured ladder is bounded by the request budget", () => {
     expect(state.remainingTransientSendBudget(transientSendCapFor(10, state.sendsUsed))).toBe(3);
     budget.used = 2;
     expect(state.remainingTransientSendBudget(transientSendCapFor(10, state.sendsUsed))).toBe(1);
-    // A narrower configured value no longer wins: the floor lifts its cap to 11, and the
+    // A narrower configured value no longer wins: the unified default lifts its cap to 4, and the
     // ledger's own remainder (3 base - 2 used = 1) is what bounds the send.
     expect(state.remainingTransientSendBudget(transientSendCapFor(2, state.sendsUsed))).toBe(1);
   });

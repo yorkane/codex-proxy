@@ -4,7 +4,8 @@
  * Kept in its own module so the shared config-routes.ts stays a one-line
  * delegation; upstream edits to that file never intersect this block again.
  */
-import { saveConfigPreservingClaudeCode } from "../../config";
+import { deleteConfigTopLevelKey, saveConfigPreservingClaudeCode } from "../../config";
+import { captureConfigTopLevelRollback } from "../../config/rebase-provenance";
 import {
   DEFAULT_PHANTOM_TOOL_ALLOWLIST,
   shadowPhantomToolList,
@@ -15,6 +16,14 @@ import {
   EMPTY_COMPLETION_RETRY_MAX_LIMIT,
   emptyCompletionRetryMax,
 } from "../../lib/empty-completion-budget";
+import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_ENV,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+  MODEL_REQUEST_MAX_RETRIES_MIN,
+  modelRequestMaxRetries,
+  modelRequestRetryEnvOverride,
+} from "../../lib/model-request-retry";
 import { EMPTY_COMPLETION_RETRY_ENV } from "../responses/empty-completion-guard";
 import { jsonResponse } from "../auth-cors";
 import { isPlainRecord } from "./shared";
@@ -27,7 +36,7 @@ import { shadowCallModelMapErrors, shadowCallTargetError } from "./shadow-call-v
  * a different endpoint (config-routes keeps the normal fall-through).
  */
 export async function handleShadowCallRoutes(ctx: ManagementContext): Promise<Response | null> {
-  const { req, url, config } = ctx;
+  const { req, url, config, deps } = ctx;
 if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
   const sci = config.shadowCallIntercept ?? {};
   return jsonResponse({
@@ -55,6 +64,17 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     // 全局明文 V2 协作消息总闸。与 provider 级同名字段是两层门：本页只编辑全局总闸，
     // provider 级 opt-in 仍由各自的 provider 配置面负责，故此处不投影 provider 字段。
     plaintextV2AgentMessages: config.plaintextV2AgentMessages === true,
+    // 全局模型请求重试预算（同一份 config.modelRequestMaxRetries，不是 Shadow 私有副本）：
+    // Shadow 页提供编辑面，解析口径与 GET /api/settings、/api/config 完全一致（env > config
+    // > 默认 3，0=关闭代理内模型 HTTP 错误重试）。EnvOverride 只在 env 是非空白有限数时为
+    // true；只回变量名，不带任何 secret。
+    modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
+    modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
+    modelRequestMaxRetriesMin: MODEL_REQUEST_MAX_RETRIES_MIN,
+    modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
+    modelRequestMaxRetriesDefault: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+    modelRequestMaxRetriesEnvOverride: modelRequestRetryEnvOverride(),
+    modelRequestMaxRetriesEnvName: MODEL_REQUEST_MAX_RETRIES_ENV,
   });
 }
 
@@ -62,7 +82,7 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
    let raw: unknown;
    try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
    if (!isPlainRecord(raw)) return jsonResponse({ error: "body must be a JSON object" }, 400);
-   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown; emptyCompletionRetryMax?: unknown; plaintextV2AgentMessages?: unknown };
+   const body = raw as { enabled?: unknown; model?: unknown; modelMap?: unknown; sourceModels?: unknown; phantomToolAllowlist?: unknown; phantomToolAllowlistEnabled?: unknown; phantomToolFeedbackMax?: unknown; emptyCompletionRetry?: unknown; emptyCompletionRetryMax?: unknown; plaintextV2AgentMessages?: unknown; modelRequestMaxRetries?: unknown };
    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
      return jsonResponse({ error: "enabled must be a boolean" }, 400);
    }
@@ -109,6 +129,16 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
        || body.phantomToolFeedbackMax < 0 || body.phantomToolFeedbackMax > 10)) {
      return jsonResponse({ error: "phantomToolFeedbackMax must be an integer 0-10" }, 400);
    }
+  // 全局模型重试预算的写边界与 PUT /api/settings 完全一致：严格 0..5 整数（0 合法=关闭），
+  // null 清键回落默认 3；越界（含旧 10）、小数、字符串 400 拒绝且不改 config。
+  if (body.modelRequestMaxRetries !== undefined && body.modelRequestMaxRetries !== null && !(
+    typeof body.modelRequestMaxRetries === "number"
+    && Number.isInteger(body.modelRequestMaxRetries)
+    && body.modelRequestMaxRetries >= MODEL_REQUEST_MAX_RETRIES_MIN
+    && body.modelRequestMaxRetries <= MODEL_REQUEST_MAX_RETRIES_LIMIT
+  )) {
+    return jsonResponse({ error: `modelRequestMaxRetries must be an integer from ${MODEL_REQUEST_MAX_RETRIES_MIN} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}` }, 400);
+  }
   const candidateModel = typeof body.model === "string"
     ? body.model
     : body.enabled === true
@@ -169,7 +199,23 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
   if (typeof body.plaintextV2AgentMessages === "boolean") {
     config.plaintextV2AgentMessages = body.plaintextV2AgentMessages;
   }
-  saveConfigPreservingClaudeCode(config);
+  // 与 emptyCompletionRetryMax 相同的 live 对象赋值：下一请求即生效，无需重启。null 清键
+  // 走 deleteConfigTopLevelKey（登记 rebase-provenance 删除意图，与 PUT /api/settings 同机制）。
+  // 保存失败用 captureConfigTopLevelRollback 回滚：字段值/存在性与 pending 删除意图一起还原，
+  // 不留失败保存的 tombstone 污染，也不让 UI 宣称成功而 live 配置漂移。
+  const restoreModelRetries = captureConfigTopLevelRollback(config, ["modelRequestMaxRetries"]);
+  if (typeof body.modelRequestMaxRetries === "number") {
+    config.modelRequestMaxRetries = body.modelRequestMaxRetries;
+  } else if (body.modelRequestMaxRetries === null) {
+    deleteConfigTopLevelKey(config, "modelRequestMaxRetries");
+  }
+  try {
+    // deps seam（与 config-routes 同模式）：测试注入失败保存，生产走真实 writer。
+    (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+  } catch (error) {
+    restoreModelRetries();
+    throw error;
+  }
   const sci = config.shadowCallIntercept;
   return jsonResponse({
     ok: true,
@@ -188,6 +234,14 @@ if (url.pathname === "/api/shadow-call-settings" && req.method === "GET") {
     emptyCompletionRetryMaxEnvOverride: process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== undefined
       && process.env[EMPTY_COMPLETION_RETRY_MAX_ENV] !== "",
     plaintextV2AgentMessages: config.plaintextV2AgentMessages === true,
+    // PUT 回包与 GET 字段一致（含 bounds/env-override/变量名），UI 保存后直接重渲染。
+    modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
+    modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
+    modelRequestMaxRetriesMin: MODEL_REQUEST_MAX_RETRIES_MIN,
+    modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
+    modelRequestMaxRetriesDefault: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+    modelRequestMaxRetriesEnvOverride: modelRequestRetryEnvOverride(),
+    modelRequestMaxRetriesEnvName: MODEL_REQUEST_MAX_RETRIES_ENV,
   });
 }
   return null;

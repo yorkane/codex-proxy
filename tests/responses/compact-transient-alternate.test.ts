@@ -31,8 +31,9 @@ import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-
  * The move is admitted under the alternate's identity, leaves the first answer intact when it is
  * refused, and records the first account once, as a transient failure.
  *
- * Unified model lane (fork): the ingress budget funds A's own ladder to the shared 11-send
- * authority, so a steady overload consumes the whole request there and the alternate is never
+ * Unified model lane (fork): the ingress budget funds A's own ladder to the shared 4-send
+ * authority (2026-10-23 default: 3 retries + first send), so a steady overload consumes the
+ * whole request there and the alternate is never
  * reached - that is the new contract, pinned below. The #6969 move shape stays proven through an
  * EXACT caller budget (the guarded 3+1 profile): the lane respects the funded cap verbatim, A
  * ladders 3, and B draws the single recovery reserve. A marked non-replayable 503 ends a ladder
@@ -181,16 +182,17 @@ function failures(accountId: string): number {
 }
 
 describe("native compact moves a surviving transient 5xx to one alternate account (#6969)", () => {
-  test("a steady overload consumes the shared 11-send authority on A and never moves", async () => {
+  test("a steady overload consumes the shared 4-send authority on A and never moves", async () => {
     // The unified contract: A's own ladder is funded to the request authority, so a pool that
-    // keeps refusing spends all eleven sends on the first account. B is not reached - the
+    // keeps refusing spends all four sends on the first account. B is not reached - the
     // alternate move survives as an early-end shape (below), not as a fourth send.
-    // root 2026-10-23：合同钉"每送都被拒"，脚本必须 11 送全过载，不能第 4 送藏成功。
-    upstream(...Array.from({ length: 11 }, () => overloaded()), compacted);
+    // root 2026-10-23（默认 4 送改约）：合同钉"每送都被拒"，脚本必须 4 送全过载，
+    // 不能尾部藏成功；compacted 只在预算越界时才会被摸到。
+    upstream(...Array.from({ length: 4 }, () => overloaded()), compacted);
     const { response, body } = await compact();
     expect(response.status).toBe(503);
     expect(body).toContain("server_is_overloaded");
-    expect(sends).toHaveLength(11);
+    expect(sends).toHaveLength(4);
     expect(sends.every(auth => auth === "Bearer work-access")).toBe(true);
     expect(failures(WORK)).toBe(1);
     expect(failures(OTHER)).toBe(0);
@@ -222,11 +224,11 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
   });
 
   test("a pinned account never moves", async () => {
-    // 同 steady overload：钉"永不移出的账号独自烧满预算"，11 送必须全被拒。
-    upstream(...Array.from({ length: 11 }, () => overloaded()), compacted);
+    // 同 steady overload：钉"永不移出的账号独自烧满预算"，4 送必须全被拒。
+    upstream(...Array.from({ length: 4 }, () => overloaded()), compacted);
     const { response } = await compact({ config: poolConfig({ codexAccountNamespaces: { side: WORK } }), model: "side/gpt-5.5" });
     expect(response.status).toBe(503);
-    expect(sends).toHaveLength(11);
+    expect(sends).toHaveLength(4);
     expect(sends.every(auth => auth === "Bearer work-access")).toBe(true);
   });
 
@@ -286,7 +288,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
     ...answers: Answer[]
   ) {
     // 调用方可覆盖预算：见下方 base-path 用例（root 2026-10-23：显式窄预算验证兄弟腿的
-    // 自有 identity 准入，不让默认 11 把 A 的第二物理发送先烧在 identity cap 上）。
+    // 自有 identity 准入，不让默认 4 把 A 的第二物理发送先烧在 identity cap 上）。
     const { createSpendReservationLedger, DEFAULT_SPEND_RESERVATION_POLICY } = await import("../../src/lib/spend-reservation-ledger");
     const { createRequestSpendTracker } = await import("../../src/server/responses/request-spend");
     const ledger = createSpendReservationLedger({ salt: "compact-6969", policy: {
@@ -309,7 +311,7 @@ describe("native compact moves a surviving transient 5xx to one alternate accoun
   test("on the base path the alternate is admitted against its own identity balance", async () => {
     // root 2026-10-23：base-path 兄弟准入用显式窄预算 total2/base1/reserve1——A 只花 1 送
     // （non-replayable 网关态终结阶梯），兄弟腿从 base 余量获得它的发送；identity cap 1
-    // 钉住"记账落在 B 自己的身份"这一验证点。默认 11 预算下 A 的第二物理发送会先在
+    // 钉住"记账落在 B 自己的身份"这一验证点。默认 4 预算下 A 的第二物理发送会先在
     // identity cap 上被拒，测的不是兄弟准入。
     const basePathBudget = (t: RequestSpendTracker) => createRequestExecutionBudget({
       maxTotalModelSends: 2, baseSendAllowance: 1, finalRecoveryAllowance: 1,

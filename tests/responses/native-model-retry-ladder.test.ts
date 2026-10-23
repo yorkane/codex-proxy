@@ -1,8 +1,8 @@
 /**
- * 三条 native 模型 lane 的统一 4xx/5xx 重放阶梯（fork 合同：至少 10 次重试 = 11 物理发送，
- * 一个逻辑请求一个预算）。真实计数：fixture fetch 逐次记账，验证恢复、耗尽、配置抬升
- * (env/config 12 -> 13)、caller abort 立停、本地预算拒绝 0 送、精确 caller cap 不被统一
- * 地板抬升。计时器经 spy 立即触发（只截退避/RA 等待，不截 connect deadline 长定时器），
+ * 三条 native 模型 lane 的统一 4xx/5xx 重放阶梯（fork 合同 2026-10-23 改约：默认 3 次重试 =
+ * 4 物理发送，范围 0..5，一个逻辑请求一个预算）。真实计数：fixture fetch 逐次记账，验证恢复、
+ * 耗尽、配置抬升 (env/config 5 -> 6)、caller abort 立停、本地预算拒绝 0 送、精确 caller cap
+ * 不被统一默认抬升。计时器经 spy 立即触发（只截退避/RA 等待，不截 connect deadline 长定时器），
  * Retry-After 作为下界被安排的事实由捕获的 delay 断言。
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
@@ -108,36 +108,36 @@ const chatOk = (): Response => Response.json({
 
 describe("native Chat unified ladder", () => {
   for (const status of [401, 503]) {
-    test(`every upstream ${status} replays to the shared 11-send ceiling`, async () => {
+    test(`every upstream ${status} replays to the shared 4-send ceiling`, async () => {
       const delays: number[] = [];
       scriptedUpstream([status], chatOk);
       immediateBackoff(delays);
       const response = await chatRequest();
-      expect(sends).toHaveLength(11);
+      expect(sends).toHaveLength(4);
       expect(response.status).toBe(status);
     });
   }
 
-  test("a recovery at send 5 serves the turn and stops the ladder", async () => {
-    scriptedUpstream([503, 503, 503, 503, 200], chatOk);
+  test("a recovery at send 3 serves the turn and stops the ladder", async () => {
+    scriptedUpstream([503, 503, 200], chatOk);
     immediateBackoff([]);
     const response = await chatRequest();
-    expect(sends).toHaveLength(5);
+    expect(sends).toHaveLength(3);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ choices: [{ message: { content: "answer" } }] });
   });
 
-  test("env 12 raises the whole ladder to 13 sends", async () => {
-    process.env[ENV_KEY] = "12";
+  test("env 5 raises the whole ladder to 6 sends", async () => {
+    process.env[ENV_KEY] = "5";
     scriptedUpstream([503], chatOk);
     immediateBackoff([]);
     await chatRequest();
-    expect(sends).toHaveLength(13);
+    expect(sends).toHaveLength(6);
   });
 
-  test("config 12 raises the ladder to 13 sends", async () => {
+  test("config 5 raises the ladder to 6 sends", async () => {
     const cfg = chatConfig();
-    (cfg as { modelRequestMaxRetries?: number }).modelRequestMaxRetries = 12;
+    (cfg as { modelRequestMaxRetries?: number }).modelRequestMaxRetries = 5;
     scriptedUpstream([503], chatOk);
     immediateBackoff([]);
     await handleChatCompletions(
@@ -148,7 +148,7 @@ describe("native Chat unified ladder", () => {
       cfg,
       { model: "", provider: "" },
     );
-    expect(sends).toHaveLength(13);
+    expect(sends).toHaveLength(6);
   });
 
   test("caller abort during a backoff stops every later send", async () => {
@@ -211,20 +211,20 @@ async function messagesRequest(signal?: AbortSignal): Promise<Response> {
 }
 
 describe("native Messages unified ladder", () => {
-  test("a steady 503 replays 11 times and answers overloaded", async () => {
+  test("a steady 503 replays 4 times and answers overloaded", async () => {
     scriptedUpstream([503], messagesOk);
     immediateBackoff([]);
     const response = await messagesRequest();
-    expect(sends).toHaveLength(11);
+    expect(sends).toHaveLength(4);
     expect(response.status).toBe(529);
     expect(await response.json()).toMatchObject({ error: { type: "overloaded_error" } });
   });
 
-  test("a steady 401 replays 11 times on a single-key provider", async () => {
+  test("a steady 401 replays 4 times on a single-key provider", async () => {
     scriptedUpstream([401], messagesOk);
     immediateBackoff([]);
     const response = await messagesRequest();
-    expect(sends).toHaveLength(11);
+    expect(sends).toHaveLength(4);
     expect(response.status).toBe(401);
   });
 
@@ -261,11 +261,11 @@ async function compactRequest(budget?: ReturnType<typeof createRequestExecutionB
 
 describe("native compact unified ladder", () => {
   for (const status of [401, 503]) {
-    test(`a steady ${status} ladder stops at the shared 11-send ceiling`, async () => {
+    test(`a steady ${status} ladder stops at the shared 4-send ceiling`, async () => {
       scriptedUpstream([status], compactOk);
       immediateBackoff([]);
       const response = await compactRequest();
-      expect(sends).toHaveLength(11);
+      expect(sends).toHaveLength(4);
       expect(response.status).toBe(status);
     });
   }
@@ -282,7 +282,7 @@ describe("native compact unified ladder", () => {
     expect(await response.json()).toMatchObject({ error: { code: "request_send_budget_exhausted" } });
   });
 
-  test("an exact caller cap of 2 sends twice, not widened by the unified floor", async () => {
+  test("an exact caller cap of 2 sends twice, not widened by the unified default", async () => {
     scriptedUpstream([503], compactOk);
     immediateBackoff([]);
     const exact = createRequestExecutionBudget({

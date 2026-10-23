@@ -77,7 +77,7 @@ const request: AdapterRequest = {
 };
 
 function mockFetch(responses: Array<Response | Error | (() => Response | Error)>): { calls: RequestInit[] } {
-  // 统一 lane 的 ladder 会打到 11 送：单元素脚本被重复消费时，重试路径会 cancel 掉被丢弃
+  // 统一 lane 的 ladder 会打到默认预算（4 送）：单元素脚本被重复消费时，重试路径会 cancel 掉被丢弃
   // 的响应体，之后复用同一 Response（连 clone 都不行——原体已 disturbed）就报 Body already
   // used（旧 3 送合同在 cancel 之前收场，掩盖了这一点）。首次投递交付原对象——身份断言与
   // body 钩子挂在它身上——并在投递前捕获体/状态/头规格；之后的重复投递按规格新建独立
@@ -135,7 +135,7 @@ describe("vertex retry fetch", () => {
     }) as typeof fetch;
     await expect(fetchVertexWithRetry(request, { executor, timeoutMs: 1 })).rejects.toBe(original);
     waits.mockRestore();
-    // 统一模型 lane（2026-10-23）：无 caller 账本时 ladder 上限是统一预算（11 起），不再是 3。
+    // 统一模型 lane（2026-10-23 改约）：无 caller 账本时 ladder 上限是统一预算（默认 4 送），不再是 3。
     expect(sends).toBe(modelRequestMaxAttempts());
   });
 

@@ -1,5 +1,11 @@
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
-import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT, modelRequestMaxRetries } from "../../lib/model-request-retry";
+import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+  MODEL_REQUEST_MAX_RETRIES_MIN,
+  modelRequestMaxRetries,
+  modelRequestRetryEnvOverride,
+} from "../../lib/model-request-retry";
 import { resolveMainAccountHardLockThresholds } from "../../codex/main-account-hard-lock";
 import { getMainAccountExternalUsageWarning } from "../../codex/main-account-external-usage";
 import { getObservedMainQuotaIdentityKey } from "../../codex/main-account-cache";
@@ -443,13 +449,16 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
       codexClientCompaction: config.codexClientCompaction === true,
       // The unified model-request retry budget as the running process resolves it (env first,
-      // then config, then the 10-retry floor), so the dashboard reads the effective number
-      // rather than what config.json happens to say. The accepted range travels with it; a
-      // malformed env value is not reported as an override because it changes nothing.
+      // then config, then default 3; 0 disables proxy-side model HTTP retries), so the
+      // dashboard reads the effective number rather than what config.json happens to say.
+      // Min/Limit/Default travel with it; a malformed env value is not reported as an override
+      // because it changes nothing.
       modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
       modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
-      modelRequestMaxRetriesMin: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+      modelRequestMaxRetriesMin: MODEL_REQUEST_MAX_RETRIES_MIN,
       modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
+      modelRequestMaxRetriesDefault: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+      modelRequestMaxRetriesEnvOverride: modelRequestRetryEnvOverride(),
       codexDesktopSwitches: describeCodexDesktopSwitches(config, await observedCodexDesktopSwitchApply()),
       compactionRouting: config.compactionRouting ?? null,
       compactionRecovery: config.compactionRecovery ?? null,
@@ -678,21 +687,24 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     )) {
       return jsonResponse({ error: `appOwnedMemoryBudgetMb must be an integer from ${MIN_APP_OWNED_MEMORY_BUDGET_MB} to ${MAX_APP_OWNED_MEMORY_BUDGET_MB}` }, 400);
     }
-    // The write boundary for the unified model-request retry budget is strict: a 5, a 999, a
-    // 1.5, a "25" or a 0 is refused with the accepted range, never silently widened to the 10
-    // floor. The read-time floor stays in the leaf (a hand-edited disk value still retries at
-    // least 10 times); the API refuses to persist a number that would not mean what it says.
-    // `null` is the documented clear: it deletes the key and the shipped floor applies, so it
-    // is accepted here and handled in the mutation block.
+    // The write boundary for the unified model-request retry budget is strict: 0-5 integers
+    // only. A 6, a 999, a 1.5, a "25" or a legacy 10 is refused with the accepted range and
+    // never silently widened or clamped into the config. 0 is a legitimate value: it disables
+    // proxy-side model HTTP error retries (the first send still goes out). The API refuses to
+    // persist a number that would not mean what it says. `null` is the documented clear: it
+    // deletes the key and the shipped default 3 applies, so it is accepted here and handled
+    // in the mutation block.
     if (body.modelRequestMaxRetries !== undefined && body.modelRequestMaxRetries !== null && !(
       typeof body.modelRequestMaxRetries === "number"
       && Number.isInteger(body.modelRequestMaxRetries)
-      && body.modelRequestMaxRetries >= DEFAULT_MODEL_REQUEST_MAX_RETRIES
+      && body.modelRequestMaxRetries >= MODEL_REQUEST_MAX_RETRIES_MIN
       && body.modelRequestMaxRetries <= MODEL_REQUEST_MAX_RETRIES_LIMIT
     )) {
-      return jsonResponse({ error: `modelRequestMaxRetries must be an integer from ${DEFAULT_MODEL_REQUEST_MAX_RETRIES} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}` }, 400);
+      return jsonResponse({ error: `modelRequestMaxRetries must be an integer from ${MODEL_REQUEST_MAX_RETRIES_MIN} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}` }, 400);
     }
-    const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention"]);
+    // modelRequestMaxRetries 进 capture：catch 里最后 restore 会连同 pending 删除意图一起还原，
+    // 清键失败的 tombstone 不泄漏。previousSettings 的手写还原仍在（先跑），capture 覆盖为终态。
+    const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention", "modelRequestMaxRetries"]);
     const previousSettings = {
       codexAutoStart: config.codexAutoStart,
       hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
@@ -782,8 +794,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Null clears both phases; the GUI sends that when neither row names a model.
       if (memoryModels === null) deleteConfigTopLevelKey(config, "memoryModels");
       else if (memoryModels?.success) config.memoryModels = memoryModels.data;
-      // Absent/default is the floor, so the default is persisted by deleting the key; an
-      // explicit number inside the accepted range is stored verbatim.
+      // Absent resolves to the default 3, so the default is persisted by deleting the key; an
+      // explicit number inside 0-5 (including 0) is stored verbatim.
       if (typeof body.modelRequestMaxRetries === "number") {
         config.modelRequestMaxRetries = body.modelRequestMaxRetries;
       } else if (body.modelRequestMaxRetries === null) {
@@ -905,8 +917,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       compactionRecovery: config.compactionRecovery ?? null,
       modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
       modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
-      modelRequestMaxRetriesMin: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+      modelRequestMaxRetriesMin: MODEL_REQUEST_MAX_RETRIES_MIN,
       modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
+      modelRequestMaxRetriesDefault: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+      modelRequestMaxRetriesEnvOverride: modelRequestRetryEnvOverride(),
       reasoningRetention: config.reasoningRetention ?? null,
       // The panel re-reads its own save response, so a missing block would render both
       // phases as "Off" while the server kept them.

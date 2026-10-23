@@ -1,11 +1,16 @@
 /**
  * 统一模型重试 leaf 算术（src/server/native-model-retry.ts）：一个逻辑请求一个发送上限，
- * funded 精确合同不被抬、地板统一 11、env/config 只能上抬、跨 leg 扣减单调。
+ * funded 精确合同不被抬、无账本缺省走统一默认（2026-10-23 改约：3 重试 + 首发 = 4 送，
+ * 范围 0..5）、env/config 只能在范围内抬升、跨 leg 扣减单调。
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import { createRequestExecutionBudget, CODEX_TEXT_GUARDED_BUDGET_POLICY } from "../../src/lib/request-execution-budget";
 import { nativeModelAuthorityAttempts, nativeModelSendsRemaining } from "../../src/server/native-model-retry";
-import { modelRequestMaxAttempts } from "../../src/lib/model-request-retry";
+import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+  modelRequestMaxAttempts,
+} from "../../src/lib/model-request-retry";
 
 const ENV_KEY = "OCX_MODEL_REQUEST_MAX_RETRIES";
 let previousEnv: string | undefined;
@@ -26,8 +31,8 @@ describe("nativeModelAuthorityAttempts", () => {
     expect(nativeModelAuthorityAttempts(budget)).toBe(11);
   });
 
-  test("an exact caller budget keeps its hard cap: a funded 4 is never raised to the 11 floor", () => {
-    // The floor lives at the ingress fund (createInferenceSendBudget). A caller that hands the
+  test("an exact caller budget keeps its hard cap: a funded 4 is never raised by the default", () => {
+    // The default lives at the ingress fund (createInferenceSendBudget). A caller that hands the
     // lane its OWN precise policy (fixtures, exact-cap providers) is a hard contract: the lane
     // must respect 4 sends, not widen them.
     setEnv(undefined);
@@ -36,13 +41,20 @@ describe("nativeModelAuthorityAttempts", () => {
     expect(nativeModelAuthorityAttempts(budget)).toBe(4);
   });
 
-  test("env raises the authority a fresh ingress budget will fund", () => {
-    setEnv("20");
+  test("env raises the authority a fresh ingress budget will fund (0 -> 1; env above the range clamps to 5)", () => {
+    // 2026-10-23 改约：0 是合法设置（只首发），env 20 越界钳到上限 5 → 6 送。
+    setEnv("0");
     const attempts = modelRequestMaxAttempts();
-    expect(attempts).toBe(21);
+    expect(attempts).toBe(1);
     expect(nativeModelAuthorityAttempts(
       createRequestExecutionBudget({ ...CODEX_TEXT_GUARDED_BUDGET_POLICY, maxTotalModelSends: attempts, baseSendAllowance: attempts }),
-    )).toBe(21);
+    )).toBe(1);
+    setEnv("20");
+    const clamped = modelRequestMaxAttempts();
+    expect(clamped).toBe(MODEL_REQUEST_MAX_RETRIES_LIMIT + 1);
+    expect(nativeModelAuthorityAttempts(
+      createRequestExecutionBudget({ ...CODEX_TEXT_GUARDED_BUDGET_POLICY, maxTotalModelSends: clamped, baseSendAllowance: clamped }),
+    )).toBe(MODEL_REQUEST_MAX_RETRIES_LIMIT + 1);
   });
 });
 
@@ -76,7 +88,8 @@ describe("nativeModelSendsRemaining", () => {
   test("a provider-configured attempts may raise the cap and never lower it", () => {
     setEnv(undefined);
     const budget = createRequestExecutionBudget({ ...CODEX_TEXT_GUARDED_BUDGET_POLICY, maxTotalModelSends: 11, baseSendAllowance: 11 });
-    // explicit attempts:3 is the pre-fork narrow ladder; the user floor (>=10 retries) wins.
+    // explicit attempts:3 is the pre-fork narrow ladder; a provider row can only RAISE the
+    // lane to the funded authority, never lower it below the request-wide ledger's cap.
     expect(nativeModelSendsRemaining(budget, 0, 3)).toBe(11);
     // Root ruling: the unified authority is the hard absolute. A legacy provider ladder
     // configured ABOVE it (30 > 11) must not widen the model cap: a 30 here would be a

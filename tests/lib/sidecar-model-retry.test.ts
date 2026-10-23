@@ -9,7 +9,11 @@ import {
   markResponseNonReplayable,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
 } from "../../src/lib/upstream-retry";
-import { MODEL_REQUEST_MAX_RETRIES_ENV } from "../../src/lib/model-request-retry";
+import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+  MODEL_REQUEST_MAX_RETRIES_ENV,
+} from "../../src/lib/model-request-retry";
 
 const warnSpies: Array<ReturnType<typeof spyOn>> = [];
 afterEach(() => { for (const spy of warnSpies.splice(0)) spy.mockRestore(); jest.useRealTimers(); });
@@ -40,14 +44,16 @@ async function flushLadder(pending: Promise<Response>, ms = 600_000): Promise<Re
 }
 
 describe("sidecarModelRetryAttempts", () => {
-  test("地板 10 次重试 = 11 次总发送；env 与 configured 只可在 [10,100] 内抬升", () => {
-    expect(sidecarModelRetryAttempts()).toBe(11);
-    expect(sidecarModelRetryAttempts(12)).toBe(13);
-    expect(sidecarModelRetryAttempts(3)).toBe(11);
+  test("默认 3 次重试 = 4 次总发送；configured 越界回落默认，env 越界钳到上限 5", () => {
+    // 2026-10-23 改约：接受范围 0..5。旧默认 config 10 越界 → 回落默认 3 → 4 送；
+    // env 10/50 越界钳到上限 5 → 6 送。
+    expect(sidecarModelRetryAttempts()).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
+    expect(sidecarModelRetryAttempts(12)).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
+    expect(sidecarModelRetryAttempts(3)).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
     const previous = process.env[MODEL_REQUEST_MAX_RETRIES_ENV];
     process.env[MODEL_REQUEST_MAX_RETRIES_ENV] = "50";
     try {
-      expect(sidecarModelRetryAttempts(12)).toBe(51);
+      expect(sidecarModelRetryAttempts(12)).toBe(MODEL_REQUEST_MAX_RETRIES_LIMIT + 1);
     } finally {
       if (previous === undefined) delete process.env[MODEL_REQUEST_MAX_RETRIES_ENV];
       else process.env[MODEL_REQUEST_MAX_RETRIES_ENV] = previous;
@@ -56,16 +62,16 @@ describe("sidecarModelRetryAttempts", () => {
 });
 
 describe("fetchSidecarModel", () => {
-  test("真实 4xx 与 5xx 都重试到统一预算（默认 11），耗尽后返回最后的真实响应", async () => {
+  test("真实 4xx 与 5xx 都重试到统一预算（默认 4），耗尽后返回最后的真实响应", async () => {
     silenceWarnings();
     jest.useFakeTimers();
     let sends = 0;
     const pending = fetchSidecarModel(async () => {
       sends += 1;
-      return statusResponse(sends === 11 ? 400 : 503);
+      return statusResponse(sends === 4 ? 400 : 503);
     }, { label: "test-sidecar" });
     const res = await flushLadder(pending);
-    expect(sends).toBe(11);
+    expect(sends).toBe(4);
     expect(res.status).toBe(400);
   });
 
@@ -73,12 +79,13 @@ describe("fetchSidecarModel", () => {
     silenceWarnings();
     jest.useFakeTimers();
     const previous = process.env[MODEL_REQUEST_MAX_RETRIES_ENV];
+    // 旧 env 12 在新范围外 → 钳上限 5 → 6 送（意图不变：env 抬升生效）。
     process.env[MODEL_REQUEST_MAX_RETRIES_ENV] = "12";
     try {
       let sends = 0;
       const pending = fetchSidecarModel(async () => { sends += 1; return statusResponse(503); }, { label: "test-sidecar" });
       await flushLadder(pending);
-      expect(sends).toBe(13);
+      expect(sends).toBe(6);
     } finally {
       if (previous === undefined) delete process.env[MODEL_REQUEST_MAX_RETRIES_ENV];
       else process.env[MODEL_REQUEST_MAX_RETRIES_ENV] = previous;

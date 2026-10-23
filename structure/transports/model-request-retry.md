@@ -6,35 +6,40 @@ something the client already received. The persisted field and its schema live i
 [Config Surface](../config.md); the dispatch wiring stays with the owners named below. Every area listed
 here is also described by the docs that already describe it - shared transport and config areas keep
 their existing owners - and this doc is the single statement of the retry contract, so a dependent
-links here instead of restating it.
+links here instead of restating it. The Shadow dashboard section of the GUI is the operator's edit
+surface for the budget (see
+[GUI And Management API](../gui-and-management-api.md)); `PUT /api/settings` carries the same key.
 
 ## The contract
 
-Every model request that receives a real upstream HTTP 4xx/5xx is retried within one configured budget,
-with a floor of 10 retries. The floor is the requirement, not a validation: any parsable configured
-number below 10 (including 0 and negatives) resolves to 10, and no caller can obtain fewer than 10
-retries. The ceiling is 100, matching the Codex client's own read-side clamp so both layers agree.
-The configured value counts **retries**, excluding the first send; the send budget is retries + 1
-(`modelRequestMaxAttempts`), so the shipped default is 11 physical sends per logical request.
+Every model request that receives a real upstream HTTP 4xx/5xx is retried within one configured budget:
+an integer from 0 to 5, defaulting to 3. No positive minimum is imposed; `0` is a first-class setting that
+disables proxy model HTTP retries: the request makes at most its initial send and no second proxy send, and
+the upstream answer is reported as-is. The configured value
+counts **retries**, excluding the first send; the send budget is retries + 1 (`modelRequestMaxAttempts`),
+so the shipped default is 4 physical sends per logical request and a `0` allows at most 1. The 2026-10-23
+user ruling that set a floor of 10 / ceiling 100 is superseded for the budget; it survives in released
+history only.
 
 Resolution is single-sourced in `src/lib/model-request-retry.ts`, a pure leaf with no `src/config/**`
 or `src/server/**` import: environment `OCX_MODEL_REQUEST_MAX_RETRIES` over the caller-supplied
 configured value over the default. Fractions floor. An empty/whitespace environment value is unset; a
 non-empty value that is not a number is not a switch — it falls back to the configured value and then
-to the floor, because a malformed environment must not disable retry protection. The authority for
+to the default, because a malformed environment must not silently change the retry budget. The authority for
 the per-request total has exactly three tiers: environment > global `modelRequestMaxRetries`
-> default 10. Ingress funds `maxTotalModelSends` and `baseSendAllowance` with
+> default 3. Ingress funds `maxTotalModelSends` and `baseSendAllowance` with
 `modelRequestMaxAttempts(configured)` in the inference context;
 `transientRetryOn5xx.attempts` on a provider row is not a tier of that authority.
 `transientSendCapFor` keeps it as the legacy per-leg cap candidate only:
 max(authority, provider attempts) minus sends already used, intersected per leg with the shared
 ledger. A provider value can widen one leg above the authority but cannot raise the logical
-request's total past it (attempts 12 on an 11-funded request still ends at 11 physical sends),
+request's total past it (attempts 12 on a 4-funded request still ends at 4 physical sends),
 and a low provider value cannot press the authority down. The read/write boundary is asymmetric
 and is documented on [the config surface](../config.md): a hand-edited config value outside
-10-100, a fraction, a negative or a string is malformed, degrades to absent at load, and
-resolves to the default 10 (never clamped to 100); an environment value, once parsed as a number,
-floors fractions and clamps into 10-100. Candidate writes reject the malformed values.
+0-5 - including a value in the legacy 10-100 window - a fraction, a negative or a string is
+malformed, degrades to absent at load, and resolves to the default 3; an environment value, once
+parsed as a number, floors fractions and clamps into 0-5, and `0` is honoured. Candidate writes
+reject the malformed values. A legacy persisted value such as 10 therefore loads as 3, never as 10.
 
 The configured value is a top-level key of the **proxy's own `config.json`**. It is not the injected
 `config.toml` pair `request_max_retries` / `stream_max_retries` that bounds the Codex client's own
@@ -60,20 +65,24 @@ Focused test files cover every layer named above (
 test slot, not claimed here. This page defines the contract's behavior and invariants; it carries
 no dynamic publication, deployment, or production state - those facts live in the dated
 operations report of the proxy workspace (`doc/model-request-retry-20261023.md`), not
-here. No path is promised to issue exactly 11 sends: the floor is a minimum, and the limitations
-named below cut against full-path exactness.
+here. No path is promised to issue exactly 4 sends: the budget is a ceiling, and the limitations
+named below cut against full-path exactness. A configured `0` does get one promise on model lanes:
+funded `maxTotalModelSends = 1`, so the shared ledger admits no second send - see the budget-`0`
+note under Counting. The initial send itself happens only when the request is admitted to send: an
+explicit caller budget of 0, a caller abort, or a local refusal can still mean zero sends.
 
 ## One ledger, no multiplication
 
 The budget belongs to **one logical request**. Same-account ladder steps, 429 same-key resends,
 key/OAuth rotation, and alternate-account moves all draw from the same ledger, so there is no
-per-account 11 and no layer-by-layer multiplication. `src/lib/owned-model-retry.ts` states the rule
+per-account 4 and no layer-by-layer multiplication. `src/lib/owned-model-retry.ts` states the rule
 the fork already convicted (#4546: an outer 3 over an inner 3 became 9): the shell counts rounds and
 never books sends itself, and every physical send goes through the existing accounting boundary.
 
 - `src/lib/model-request-retry.ts` — the arithmetic: `modelRequestMaxRetries`,
-  `modelRequestMaxAttempts`, `DEFAULT_MODEL_REQUEST_MAX_RETRIES` (10),
-  `MODEL_REQUEST_MAX_RETRIES_LIMIT` (100), `MODEL_REQUEST_MAX_RETRIES_ENV`.
+  `modelRequestMaxAttempts`, `DEFAULT_MODEL_REQUEST_MAX_RETRIES` (3),
+  `MODEL_REQUEST_MAX_RETRIES_MIN` (0), `MODEL_REQUEST_MAX_RETRIES_LIMIT` (5),
+  `MODEL_REQUEST_MAX_RETRIES_ENV`.
 - `src/lib/upstream-retry.ts` — the shared dispatch lane. With `modelRetryMode` set, the transient and
   connection-reset layers share one attempts total read from the leaf, the status gate is the whole
   400..599 set (upstream `x-should-retry` hints do not exempt a local obligation), the
@@ -82,7 +91,7 @@ never books sends itself, and every physical send goes through the existing acco
   Responses compact). `nativeModelAuthorityAttempts` takes the funded
   `budget.policy.maxTotalModelSends` as authoritative and falls back to the leaf only when that value
   is malformed; an explicitly smaller caller/combo-derived ceiling (e.g. 4) is a precise contract and
-  is never raised by the floor. `nativeModelSendsRemaining` deducts the greater of the lane's own
+  is never raised toward a larger total. `nativeModelSendsRemaining` deducts the greater of the lane's own
   counter and `budget.used`, so two accountings cannot each spend the whole budget.
 - `src/lib/owned-model-retry.ts` — the budget shell for adapters that own their ladder: Kiro
   (`src/adapters/kiro-retry.ts`, reset + throttle) and Cursor (`src/adapters/cursor/transport-retry.ts`,
@@ -96,8 +105,8 @@ never books sends itself, and every physical send goes through the existing acco
   `fetchWithTransientRetry` in `modelRetryMode` (full 400..599 gate, complete `Retry-After` lower-bound
   wait, caller-abort veto, shared retry scope) rather than inventing a second loop. The budget
   authority is the shared `RequestExecutionBudget` policy total: an explicit cap, **including 0**, is
-  honoured as-is and never raised by the floor; a context-free call creates a budget capped at the
-  unified leaf total (default 11) inside the shell. Each physical send goes through
+  honoured as-is (including 0, which the shell refuses before the first send); a context-free call
+  creates a budget capped at the unified leaf total (default 4) inside the shell. Each physical send goes through
   `createAdapterPhysicalSend` → `reserveDispatch`, so nesting cannot exceed the absolute total, and
   `modelHttpRetryAttempts` is the exported seam that pins both rules. Protocol recovery (401 token
   refresh, 400 ladder downgrade) is parsed inside the round and the resend is left to the next round,
@@ -200,12 +209,19 @@ closing them needs an owner-level restart-protocol decision.
 - **Nothing after committed output is replayed** (§Boundaries). A refusal that follows delivered output
   ends the request on the delivered stream.
 
-Consequently no path claims exactly 11 sends: 11 is the funded ceiling, the floor applies to the
-configured count, and the limits above plus local refusals and aborts end runs earlier.
+Consequently no path claims exactly 4 sends: 4 is the funded ceiling at the default, and the limits
+above plus local refusals and aborts end runs earlier. A configured `0` disables model HTTP retries:
+ingress funds `maxTotalModelSends = 1`, and every lane - dispatch, native, owned shells, sidecars -
+takes its cap from that funded ledger, so the roster expansion (`min(roster, funded)`) and the
+provider-attempt leg widening (`max(authority, attempts)` intersected with the ledger) cannot lift a
+spent budget; the shared ledger refuses any second physical send. `0` therefore promises "no second
+send", not "exactly one send": a request that is never admitted (an explicit caller budget of 0, a
+caller abort, a local refusal before dispatch) makes zero sends. Provider `transientRetryOn5xx.attempts`
+is not a route back above the budget: it widens a leg loop at most and the ledger caps the total.
 
 ## Counting
 
 The budget counts the model upstream requests issued **inside one logical proxy request** (first send
-plus retries, default ceiling 11). It is not the number of requests a session exchanges with the proxy:
+plus retries, default ceiling 4; a `0` budget disables model HTTP retries - at most the initial send, no second). It is not the number of requests a session exchanges with the proxy:
 multi-turn conversations, tool-loop continuations, sub-agent concurrency, and the client's own retries
 each count separately. Reading capacity benefit across those layers multiplies and overstates.

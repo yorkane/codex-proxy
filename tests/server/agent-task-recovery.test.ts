@@ -29,6 +29,7 @@ import {
   SECOND_FERNET_TASK,
 } from "../helpers/agent-task-recovery";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
 
 // Direct handler dispatch never takes the writer lease that startServer would take, so it is refused.
 let releaseSpendHome: (() => void) | undefined;
@@ -125,16 +126,20 @@ describe("agent task recovery (opt-in, default off)", () => {
     test(`typed recovery classifies ${name} and preserves false without retrying`, async () => {
       const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
       const config = routedConfig();
+      // 本用例的合同是**分类与输入保全**，不是预算形状：显式 modelRequestMaxRetries: 0 关闭
+      // 代理内重试，保持「without retrying」的原语义（默认 3 后若不钉 0，可重试类 fixture 会
+      // 自然重试到预算耗尽，分类断言被计时放大）。
+      const options = { modelRequestMaxRetries: 0 } as const;
       let fetches = 0;
       globalThis.fetch = (async () => { fetches += 1; return response(); }) as typeof fetch;
       const input = encryptedInput();
       const original = structuredClone(input);
-      expect(await recoverEncryptedAgentTaskWithResult(req, input, {}, config))
+      expect(await recoverEncryptedAgentTaskWithResult(req, input, { ...options }, config))
         .toEqual({ recovered: false, reason });
       expect(input).toEqual(original);
       expect(fetches).toBe(1);
       expect(restoreCachedEncryptedAgentTasks(req, encryptedInput(), config)).toBe(0);
-      expect(await recoverEncryptedAgentTask(req, input, {}, config)).toBe(false);
+      expect(await recoverEncryptedAgentTask(req, input, { ...options }, config)).toBe(false);
       expect(fetches).toBe(2); // One request per explicit invocation; no internal retry.
       expect(input).toEqual(original);
     });
@@ -153,8 +158,9 @@ describe("agent task recovery (opt-in, default off)", () => {
       },
     }, { highWaterMark: 0 }), { status: 503 })) as typeof fetch;
     try {
+      // 合同是「拒绝即时交还、不等 body 取消」：钉 0 预算，一次发送，cancels 恒 1。
       const result = await recoverEncryptedAgentTaskWithResult(
-        new Request("http://localhost/v1/responses", { headers: codexHeaders() }), encryptedInput(), {}, routedConfig(),
+        new Request("http://localhost/v1/responses", { headers: codexHeaders() }), encryptedInput(), { modelRequestMaxRetries: 0 }, routedConfig(),
       );
       expect(result).toEqual({ recovered: false, reason: "recovery_http_rejected" });
       expect(cancels).toBe(1);
@@ -845,6 +851,8 @@ describe("agent task recovery (opt-in, default off)", () => {
 
   test("fails closed after a single failed combo recovery pass", async () => {
     const config = routedConfig();
+    // 分类合同（单次 pass 即交还）：显式 0 预算关掉统一重试，与默认 3 的预算形状无关。
+    config.modelRequestMaxRetries = 0;
     config.combos = {
       routed: {
         strategy: "failover",
@@ -1123,7 +1131,8 @@ describe("bounded multipart encrypted task recovery", () => {
   test("multipart backend 503 is still one attempt with bounded diagnostics", async () => {
     let sends = 0;
     globalThis.fetch = (async () => { sends++; return new Response("private failure", { status: 503 }); }) as typeof fetch;
-    const result = await recoverEncryptedAgentTaskWithResult(new Request("http://localhost/v1/responses", { headers: codexHeaders() }), multipart(), {}, routedConfig());
+    // 「one attempt」合同由显式 0 预算钉住（默认 3 下 503 属统一 lane 必重试）。
+    const result = await recoverEncryptedAgentTaskWithResult(new Request("http://localhost/v1/responses", { headers: codexHeaders() }), multipart(), { modelRequestMaxRetries: 0 }, routedConfig());
     expect(result).toEqual({ recovered: false, reason: "recovery_http_rejected" });
     expect(sends).toBe(1);
   });
@@ -1308,15 +1317,28 @@ describe("agent task recovery transient retry (#3661)", () => {
       .toEqual({ type: "input_text", text: "Recovered after outage." });
   });
 
-  test.each([400, 401, 403, 404, 429] as const)("a %d refusal stays terminal under a configured retry budget", async status => {
+  test.each([400, 401, 403, 404, 429] as const)("a %d refusal is retried to the budget and stays the terminal answer", async status => {
     let fetches = 0;
     globalThis.fetch = (async () => {
       fetches += 1;
       return new Response("private failure", { status });
     }) as typeof fetch;
-    expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2 }, routedConfig()))
-      .toEqual({ recovered: false, reason: "recovery_http_rejected" });
-    expect(fetches).toBe(1);
+    // 统一模型合同（2026-10-23）：400..599 全集都是重试对象，本地不再按状态码分「terminal 类」。
+    // 本用例钉住的新合同：全局预算 2 用尽后，最终答案仍是这个 4xx 的 recovery_http_rejected，
+    // 输入原样、缓存不落。退避计时用 immediate-backoff helper（只拦 sleepWithAbort 栈）。
+    const delays: number[] = [];
+    immediateBackoff(delays);
+    try {
+      const input = encryptedInput();
+      const original = structuredClone(input);
+      expect(await recoverEncryptedAgentTaskWithResult(req(), input, { modelRequestMaxRetries: 2 }, routedConfig()))
+        .toEqual({ recovered: false, reason: "recovery_http_rejected" });
+      expect(fetches).toBe(3); // 1 initial + 2 unified retries
+      expect(delays.length).toBe(2);
+      expect(input).toEqual(original);
+    } finally {
+      restoreImmediateBackoff();
+    }
   });
 
   test("persistent transient rejections exhaust the bounded retry budget", async () => {
@@ -1325,20 +1347,41 @@ describe("agent task recovery transient retry (#3661)", () => {
       fetches += 1;
       return new Response("private failure", { status: 503 });
     }) as typeof fetch;
-    expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2 }, routedConfig()))
+    // 统一预算权威 = 传入的全局配置值（modelRequestMaxRetries: 2）；legacy retries 不再抬升它。
+    expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2, modelRequestMaxRetries: 2 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_http_rejected" });
     expect(fetches).toBe(3); // 1 initial + 2 retries
   });
 
-  test("an over-budget retries value is clamped to the same bound", async () => {
+  test("a legacy retries value beyond the unified budget no longer expands it", async () => {
     let fetches = 0;
     globalThis.fetch = (async () => {
       fetches += 1;
       return new Response("private failure", { status: 503 });
     }) as typeof fetch;
+    // 统一 leaf（无 env、无传入配置 => 默认 3）是硬上限；legacy retries: 99 不再扩预算。
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 99 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_http_rejected" });
-    expect(fetches).toBe(3);
+    expect(fetches).toBe(4); // 1 initial + 3 unified retries, not 100
+  });
+
+  test.each([
+    // 全局 0（关闭代理内模型 HTTP 重试）+ 既有 legacy retries=2 => 只有首发 1 送。
+    // 旧算术 max(unified, legacy) 在这里会重试 2 次（3 送），正是被本裁决封死的漏口。
+    { global: 0, legacy: 2, sends: 1 },
+    // 全局 3 + legacy 0 => 统一预算 3 次重试，共 4 送；legacy 0 也不下压统一预算。
+    { global: 3, legacy: 0, sends: 4 },
+    // 全局 1 + legacy 2 => 2 送：legacy 既不能抬也不能压统一权威。
+    { global: 1, legacy: 2, sends: 2 },
+  ] as const)("global modelRequestMaxRetries=$global with legacy retries=$legacy sends exactly $sends", async ({ global, legacy, sends }) => {
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response("private failure", { status: 503 });
+    }) as typeof fetch;
+    expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: legacy, modelRequestMaxRetries: global }, routedConfig()))
+      .toEqual({ recovered: false, reason: "recovery_http_rejected" });
+    expect(fetches).toBe(sends);
   });
 
   test("transport failures retry while invalid recovery output stays terminal", async () => {
@@ -1359,7 +1402,7 @@ describe("agent task recovery transient retry (#3661)", () => {
       fetches += 1;
       throw new TypeError("private transport failure");
     }) as typeof fetch;
-    expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2 }, routedConfig()))
+    expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2, modelRequestMaxRetries: 2 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_transport_error" });
     expect(fetches).toBe(3);
   });

@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
 import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+} from "../../src/lib/model-request-retry";
+import {
   fetchWithTransientRetry,
   markResponseNonReplayable,
   SendBudgetExhaustedError,
@@ -10,8 +14,8 @@ import {
  *
  * 现场动机：ChatGPT 后端 503 server_is_overloaded 以 SSE 终态终结回合，代理零重放，
  * 客户端读不到帧内建议时直接 "Selected model is at capacity"。2026-10-23 用户合同：
- * 模型请求的真实上游 HTTP 4xx/5xx 一律在统一预算内重试，默认 10 次（11 送，含首发），
- * env `OCX_MODEL_REQUEST_MAX_RETRIES` 可配（地板 10 / 上限 100）。
+ * 模型请求的真实上游 HTTP 4xx/5xx 一律在统一预算内重试，默认 3 次（4 送，含首发），
+ * env `OCX_MODEL_REQUEST_MAX_RETRIES` 可配（0..5：0 = 只首发不重试，越界钳到 5）。
  *
  * 本文件钉 helper 层形状（全状态门、绝对预算、env 边界、RA 下界、abort/non-replayable
  * 一票否决、显式 attempts 精确性）；ledger/派发层形状在
@@ -64,41 +68,41 @@ function scripted(
 
 describe("fetchWithTransientRetry modelRetryMode", () => {
   test.each([400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504, 507, 599])(
-    "a persistent %i is retried to the unified 11-send ceiling and the last answer is returned",
+    "a persistent %i is retried to the unified send ceiling and the last answer is returned",
     async status => {
       const s = scripted(() => new Response("busy", { status, headers: { "retry-after": "0" } }));
       const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
       await drain();
       const response = await run;
       expect(response.status).toBe(status);
-      expect(s.sends()).toBe(11);
+        expect(s.sends()).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
     },
   );
 
-  test("the unified default is 11 total sends: 10 retries + first send", async () => {
+  test("the unified default is 4 total sends: 3 retries + first send", async () => {
     const s = scripted(() => new Response("", { status: 503, headers: { "retry-after": "0" } }));
     const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
     await drain();
     await run;
-    expect(s.sends()).toBe(11);
+    expect(s.sends()).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
   });
 
-  test("env OCX_MODEL_REQUEST_MAX_RETRIES=12 raises the ceiling to 13 total sends", async () => {
-    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "12";
+  test("env above the accepted range clamps to the ceiling: 10 means 5 retries = 6 sends", async () => {
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "10";
     const s = scripted(() => new Response("", { status: 500, headers: { "retry-after": "0" } }));
     const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
     await drain();
     await run;
-    expect(s.sends()).toBe(13);
+    expect(s.sends()).toBe(MODEL_REQUEST_MAX_RETRIES_LIMIT + 1);
   });
 
-  test("env below the floor is clamped up: 1 means 10 retries = 11 sends", async () => {
-    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "1";
+  test("env 0 is a valid setting: first send only, no replay", async () => {
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0";
     const s = scripted(() => new Response("", { status: 503, headers: { "retry-after": "0" } }));
     const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
     await drain();
     await run;
-    expect(s.sends()).toBe(11);
+    expect(s.sends()).toBe(1);
   });
 
   test("a malformed env value falls back to the default, never to zero sends", async () => {
@@ -107,18 +111,18 @@ describe("fetchWithTransientRetry modelRetryMode", () => {
     const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
     await drain();
     await run;
-    expect(s.sends()).toBe(11);
+    expect(s.sends()).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
   });
 
-  test("a recovery inside the ladder wins: 3 failures then 200 is sent 4 times", async () => {
-    const s = scripted(n => n >= 4
+  test("a recovery inside the ladder wins: 2 failures then 200 is sent 3 times", async () => {
+    const s = scripted(n => n >= 3
       ? new Response("ok", { status: 200 })
       : new Response("busy", { status: 503, headers: { "retry-after": "0" } }));
     const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
     await drain();
     const response = await run;
     expect(response.status).toBe(200);
-    expect(s.sends()).toBe(4);
+    expect(s.sends()).toBe(3);
   });
 
   test("an upstream x-should-retry:false does not veto the model lane", async () => {
@@ -128,7 +132,7 @@ describe("fetchWithTransientRetry modelRetryMode", () => {
     const run = fetchWithTransientRetry(s.doFetch, { modelRetryMode: true });
     await drain();
     await run;
-    expect(s.sends()).toBe(11);
+    expect(s.sends()).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
   });
 
   test("a non-replayable verdict stops the lane at one send", async () => {

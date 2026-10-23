@@ -153,11 +153,11 @@ describe("native Chat candidates in a combo", () => {
   test("distributed 401 recovery stays bounded and avoids the failed key on subsequent requests", async () => {
     const keys: string[] = [];
     // 统一 lane（root 2026-10-23 对同族用例的裁决）：401 进同 key ladder，脚本必须恒 401
-    // 才测得出"首 key 烧满预算、请求内不换 key、失败持久化、下一请求避开"。旧脚本第二送
-    // 就 200，ladder 直接满足，钉不到 11 送终 401 的新形态。
+    // 才测得出"首 key 烧满预算、请求内不换 key、失败持久化、下一请求避开"。脚本恒 401：
+    // 钉默认预算（2026-10-23 改约：3 重试 + 首发 = 4 送）烧满终 401 的形态。
     const a = upstream((_body, hit, headers) => {
       keys.push(headers.get("authorization")!);
-      return hit <= 11 ? Response.json({ error: { message: "invalid key" } }, { status: 401 }) : twoChoiceCompletion();
+      return Response.json({ error: { message: "invalid key" } }, { status: 401 });
     });
     const row = provider("openai-chat", a.baseUrl, { apiKey: "synthetic-first",
       apiKeyPool: [{ id: "first", key: "synthetic-first" }, { id: "second", key: "synthetic-second" }],
@@ -165,22 +165,23 @@ describe("native Chat candidates in a combo", () => {
     const config = comboConfig({ a: row }, [{ provider: "a", model: "m1" }], NATIVE_ON);
     immediateBackoff();
     const first = await send(config, { stream: false });
-    // Unified model lane (root 2026-10-23: combo per-target = 10, logical total stays 11):
-    // the child's 401 rides the SAME-key ladder to the per-target cap of ten; the eleventh
-    // send is the rotation hop spending the one held-back send - rotation no longer
-    // interrupts a ladder, it follows a spent one. The request ends on the recorded 401 and
+    // Unified model lane (root 2026-10-23 amended: default authority = 4 sends, per-target
+    // holdback keeps one send for rotation): the child's 401 rides the SAME-key ladder to
+    // the per-target cap of three; the fourth send is the rotation hop spending the one
+    // held-back send - rotation no longer interrupts a ladder, it follows a spent one.
+    // The request ends on the recorded 401 and
     // the NEXT request avoids the failed key.
     expect(first.response.status).toBe(401);
-    expect(a.bodies).toHaveLength(11);
-    expect(keys.slice(0, 10)).toEqual(Array(10).fill("Bearer synthetic-first"));
-    expect(keys[10]).toBe("Bearer synthetic-second");
+    expect(a.bodies).toHaveLength(4);
+    expect(keys.slice(0, 3)).toEqual(Array(3).fill("Bearer synthetic-first"));
+    expect(keys[3]).toBe("Bearer synthetic-second");
     // 统一 lane 的持久后果（root 2026-10-23 授权的 newstrategy 更新）：rotation hop 让
     // 兄弟 key 也在本请求内吃了真实 401，两把 key 都被记为失败。下一请求面对全失败池
     // 走 exhausted-pool 合同：零上游发送、本地 503 拒绝（与 messages-native 的同名用例
     // 同形）。配置的 active key 不被轮换改写。
     const second = await send(config, { stream: false });
     expect(second.response.status).toBe(503);
-    expect(a.bodies).toHaveLength(11);
+    expect(a.bodies).toHaveLength(4);
     expect(config.providers.a!.apiKey).toBe("synthetic-first");
   });
   test("a native candidate receives the caller's own Chat body, n and logprobs included", async () => {
@@ -250,10 +251,10 @@ describe("native Chat candidates in a combo", () => {
   });
 
   test("a failed native candidate fails over to the bridge within the shared send budget", async () => {
-    // The provider asks for five ladder sends and the unified floor would allow eleven, but
-    // the combo's per-target budget holds one send back for the second declared target: the
-    // native child reaches its upstream ten times, and the bridge sibling still gets the
-    // send the holdback reserved for it.
+    // The provider asks for five ladder sends and the unified default would allow four, but
+    // the combo's per-target budget holds the sibling's reserve back: the native child
+    // reaches its upstream twice (base 3 - 1 held for B), and the bridge sibling still gets
+    // the send the holdback reserved for it.
     immediateBackoff();
     const a = upstream(() => Response.json({ error: { message: "fixture outage", type: "server_error" } }, { status: 503 }));
     const b = upstream(() => responsesStream("recovered on the bridge"));
@@ -270,11 +271,11 @@ describe("native Chat candidates in a combo", () => {
 
     expect(response.status).toBe(200);
     expect(text).toContain("recovered on the bridge");
-    // 实测（本轮日志）：per-target=总11-兄弟reserve1=10 的 base 里，共享 ledger 的 base
-    // 允许量把 A 的 ladder 恰好收在 9 送，reserve 留给 B——B 的合法发送在 11 内完成，
-    // "at least 10 retries" 的下界由 ladder 合同在 11 权威上守住，per-target holdback 是
-    // 上层权威（#4546）。断言按实测 9+B=1 钉住，spend sends=11 不变。
-    expect(a.bodies).toHaveLength(9);
+    // 实测（D6-baseline 日志）：默认权威 4 送下 base=4-1(final reserve)=3，per-target 再扣
+    // 兄弟 reserve 1，A 的 ladder 收在 2 送，reserve 留给 B——B 的合法发送在 4 内完成。
+    // "共享预算内 failover" 的下界由 ladder 合同在 4 权威上守住，per-target holdback 是
+    // 上层权威（#4546）。断言按实测 2+B=1 钉住。
+    expect(a.bodies).toHaveLength(2);
     for (const body of a.bodies) expect(body).toMatchObject({ n: 2, messages: MESSAGES });
     expect(b.bodies).toHaveLength(1);
     // The bridge candidate got a Responses body, built from the source rather than from A's.
@@ -282,9 +283,9 @@ describe("native Chat candidates in a combo", () => {
     expect(b.bodies[0]).not.toHaveProperty("messages");
     expect(rows).toHaveLength(1);
     expect(rows[0]!.attempts?.map(attempt => attempt.status)).toEqual([503, 200]);
-    // 实测（本轮）：A 的 ladder 收在 9（per-target base），B 的合法发送是第 10 送；
-    // 共享权威 11 内完成 failover，settled=10。
-    expect(rows[0]!.spend).toMatchObject({ sends: 10, unresolved: 0 });
+    // 实测：A 的 ladder 收在 2（per-target base），B 的合法发送是第 3 送；
+    // 共享权威 4 内完成 failover，settled=3。
+    expect(rows[0]!.spend).toMatchObject({ sends: 3, unresolved: 0 });
     expect(rows[0]!.protocolTrace).toMatchObject({
       inbound: "chat",
       requestPath: ["chat", "responses"],
@@ -298,6 +299,7 @@ describe("native Chat candidates in a combo", () => {
   test("Chat reasoning intent survives an empty-ladder first target and reaches failover", async () => {
     // 统一 lane 下 A 要烧满 per-target 阶梯（10 送）才到 failover：真实退避合计 >30s，
     // 用栈过滤 fast-timer helper 秒过退避，验证点（failover 抵达 + reasoning 保住）不变。
+    // 默认权威 4 送：A 的阶梯为 per-target 3 送（4 - 兄弟 reserve 1）。
     immediateBackoff();
     const a = upstream(() => Response.json({ error: { message: "fixture outage" } }, { status: 503 }));
     const b = upstream(() => responsesStream("reasoned fallback"));
@@ -313,9 +315,9 @@ describe("native Chat candidates in a combo", () => {
 
     expect(response.status).toBe(200);
     expect(text).toContain("reasoned fallback");
-    // 统一 lane：A 的 ladder 花满 per-target 授权（11 总 - 兄弟 reserve 1 = 10）才 failover
+    // 统一 lane：A 的 ladder 花满 per-target 授权（4 总 - 兄弟 reserve 1 = 3）才 failover
     // 到 B；验证点（空 ladder 目标后 reasoning 意图在兄弟上存活）不变。
-    expect(a.bodies).toHaveLength(10);
+    expect(a.bodies).toHaveLength(3);
     for (const body of a.bodies) {
       expect((body.reasoning as Rec | undefined)?.effort).toBeUndefined();
     }
@@ -325,7 +327,7 @@ describe("native Chat candidates in a combo", () => {
 
   test("Chat policy fallback strips only the empty-ladder attempt's reasoning effort", async () => {
     // The bridge lane runs the unified ladder now (the anthropic provider has no opt-in knob to
-    // stop at three); fast timers keep the 11-send floor from costing wall time.
+    // stop it short); fast timers keep the 4-send default from costing wall time.
     immediateBackoff();
     const a = upstream(() => Response.json({ error: { message: "fixture outage" } }, { status: 503 }));
     const b = upstream(() => responsesStream("reasoned policy fallback"));

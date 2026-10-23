@@ -8,6 +8,10 @@ import {
 } from "../../src/lib/owned-model-retry";
 import { createRequestExecutionBudget, type RequestExecutionBudgetPolicy } from "../../src/lib/request-execution-budget";
 import { SendBudgetExhaustedError, markResponseNonReplayable } from "../../src/lib/upstream-retry";
+import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+} from "../../src/lib/model-request-retry";
 import { markAccountAutoPaused, markPermanentAccountRefusal, wasAccountAutoPaused, wasPermanentAccountRefusal } from "../../src/lib/account-auto-pause-response";
 
 function policyOf(sends: number): RequestExecutionBudgetPolicy {
@@ -27,16 +31,17 @@ afterEach(() => {
 });
 
 describe("ownedModelSendTotal: exact policy authority, no fallback", () => {
-  test("policy 0 is a hard refusal, never a fallback to 11", () => {
+  test("policy 0 is a hard refusal, never a fallback to the unified default", () => {
     expect(ownedModelSendTotal({ sendBudget: createRequestExecutionBudget(policyOf(0)) })).toBe(0);
   });
   test("policy 3 is honored exactly (guarded legacy budgets keep their shape)", () => {
     expect(ownedModelSendTotal({ sendBudget: createRequestExecutionBudget(policyOf(3)) })).toBe(3);
   });
-  test("context-free falls to the unified leaf default 11", () => {
+  test("context-free falls to the unified leaf default; env above the range clamps to the ceiling", () => {
     delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
-    expect(ownedModelSendTotal({})).toBe(11);
-    expect(ownedModelSendTotal({ env: { OCX_MODEL_REQUEST_MAX_RETRIES: "12" } })).toBe(13);
+    expect(ownedModelSendTotal({})).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
+    // 2026-10-23 改约：接受范围 0..5，旧默认 env 10 越界钳到 5 → 6 送。
+    expect(ownedModelSendTotal({ env: { OCX_MODEL_REQUEST_MAX_RETRIES: "10" } })).toBe(MODEL_REQUEST_MAX_RETRIES_LIMIT + 1);
   });
 });
 
@@ -58,7 +63,7 @@ describe("runOwnedModelHttpRetry", () => {
       return new Response("quota", { status: 429 });
     }, { baseDelayMs: 0, maxDelayMs: 0, env: {} });
     expect(final.status).toBe(429);
-    expect(calls).toBe(11);
+    expect(calls).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
   });
 
   test("shared ledger shrinks the loop across legs (one ledger, no multiplication)", async () => {
@@ -83,12 +88,12 @@ describe("runOwnedModelHttpRetry", () => {
     expect(calls).toBe(0);
   });
 
-  test("a closure that admits each physical send spends the unified budget exactly: 11, never 12", async () => {
+  test("a closure that admits each physical send spends the unified budget exactly, never over", async () => {
     // root 裁决 2026-10-23：入口门语义是「剩余 ≤0 才不发」，轮内多发的准入是**闭包自己**
     // 的契约（生产里 Kiro reset ladder 每 attempt 查 remaining、经 reserveDispatch 准入）。
-    // 旧写法让闭包每轮黑盒 +3 并断言 9，是把 opaque batch 当生产合同：按当前实现它会跑到
-    // 12（入口剩 2>0 仍发），9 既不成立也不是「至少 10 次重试」的证据。这里用真正逐发准入
-    // 的闭包钉住共享账本：3+3+3+2=11，第四轮只准入账本剩下的 2，第五轮入口剩 0 结算。
+    // 闭包必须逐发准入而不是黑盒批量：这里用真正逐发准入的闭包钉住共享账本。统一默认
+    // 预算（3 重试 + 首发 = 4 送）下：第一轮准入 min(3, 4) = 3 送，第二轮账本只剩 1 只
+    // 准入 1 送，第三轮入口剩 0 结算——总发送恰等于权威预算，一次不多，恢复被 withheld 一次。
     delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
     let sends = 0;
     let withheld = 0;
@@ -104,7 +109,7 @@ describe("runOwnedModelHttpRetry", () => {
       onRecoveryWithheld: () => { withheld++; },
     });
     expect(final.status).toBe(503);
-    expect(sends).toBe(11);
+    expect(sends).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
     expect(withheld).toBe(1);
   });
 

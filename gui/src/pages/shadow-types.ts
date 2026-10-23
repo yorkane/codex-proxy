@@ -39,6 +39,20 @@ export interface ShadowCallSettings extends ShadowCallData {
   /** True while OCX_EMPTY_COMPLETION_RETRY_MAX overrides the persisted budget. */
   emptyCompletionRetryMaxEnvOverride?: boolean;
   /**
+   * Top-level model-request retry budget for proxy-internal 4xx/5xx replays. The GET reports
+   * the value as the SERVER resolved it (an environment override is visible, not papered over);
+   * the persisted config value is reported separately as modelRequestMaxRetriesConfigured.
+   */
+  modelRequestMaxRetries?: number;
+  /** Persisted field; the server reports it even while an environment override is in effect. Absent only when unset/cleared. */
+  modelRequestMaxRetriesConfigured?: number;
+  /** Accepted range and default; the server rejects anything outside it with 400. */
+  modelRequestMaxRetriesMin?: number;
+  modelRequestMaxRetriesLimit?: number;
+  modelRequestMaxRetriesDefault?: number;
+  /** True only while OCX_MODEL_REQUEST_MAX_RETRIES holds a valid numeric value. */
+  modelRequestMaxRetriesEnvOverride?: boolean;
+  /**
    * 全局明文 V2 协作消息总闸（顶层 config 键）。本页是该总闸的唯一编辑面；
    * provider 级同名 opt-in 字段不在本页配置，第三方 provider 需各自单独开启。
    */

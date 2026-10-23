@@ -2,7 +2,8 @@
  * Google 家族 owned ladder 在统一模型请求 lane 上的合同（fork 2026-10-23 用户裁决）。
  *
  * 钉五件事：
- * 1. 无 caller 账本时 ladder 上限是统一预算 modelRequestMaxAttempts()（默认 11），任何
+ * 1. 无 caller 账本时 ladder 上限是统一预算 modelRequestMaxAttempts()（默认 4；2026-10-23
+ *    改约：默认 3 重试、范围 0..5），任何
  *    4xx/5xx（含 400/401/403/429 quota 耗尽体）都进重放，旧 quota veto 与非重放白名单取消。
  * 2. 有 caller 账本时 ladder 上限 = 账本自己的 policy.maxTotalModelSends——显式 caller cap
  *    是硬上限，统一 floor 只作用在无账本缺省路径；ladder 与请求 ledger 共享（每发送经
@@ -56,7 +57,7 @@ describe("google unified model lane", () => {
   test.each([400, 401, 403, 429, 500, 503])(
     "no budget: a plain %i is retried exactly to the unified cap",
     async status => {
-      // 统一 ladder 的 11 次发送只钉计数：真实指数退避（400ms 起、5s 封顶）会让整行
+      // 统一 ladder 的默认预算发送只钉计数：真实指数退避（400ms 起、5s 封顶）会让整行
       // 花掉 ~30s，超预算。spy 只吃掉后退计时器，发送次数与响应形状断言原样保留。
       const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
       try {
