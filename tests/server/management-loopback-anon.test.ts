@@ -18,6 +18,14 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
+import {
+  createManagementSessionControl,
+  managementPrincipal,
+  requireManagementAuth,
+  type LocalManagementAuthContext,
+  type ManagementAuthState,
+} from "../../src/server/management-auth";
+import { publishAccountSelection } from "../../src/lib/account-selection-events";
 import { findAvailablePort } from "../../src/server/ports";
 import type { OcxConfig } from "../../src/types";
 import { SERVER_BUDGET_MS } from "../helpers/test-budget";
@@ -394,6 +402,325 @@ describe("non-loopback bind keeps every existing contract", () => {
       expect((await fetch(`http://127.0.0.1:${loopbackPort}/v1/models`)).status).toBe(200);
       // And the public listener on the same box is unchanged.
       expect((await fetch(`http://127.0.0.1:${server.port}/api/config`)).status).toBe(401);
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+});
+
+describe("anonymous loopback SSE over a real listener", () => {
+  // The stream is the shape that the admission cache cannot serve: /api/accounts/events
+  // revalidates on every frame through createManagementSessionControl().isCurrent, and the
+  // anonymous principal has no credential to re-check. A 401 on the first frame here is the
+  // shipped P2 regression; the flag flip closing a live stream is the fix's other half.
+  const sse = (port: number, headers: Record<string, string> = {}) =>
+    fetch(`http://127.0.0.1:${port}/api/accounts/events`, {
+      headers: { accept: "text/event-stream", ...headers },
+    });
+
+  async function readFrame(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<string> {
+      const read = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => reject(new Error("SSE frame deadline (12s) exceeded")), 12_000);
+          timer.unref?.();
+        }),
+      ]);
+      if (read.done) throw new Error("SSE stream closed before a frame arrived");
+      return new TextDecoder().decode(read.value);
+    }
+
+  test("no credential: 200 event-stream, first frame ready, clean cancel and stop", async () => {
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const response = await sse(server.port);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toStartWith("text/event-stream");
+      const reader = response.body!.getReader();
+      try {
+        expect(await readFrame(reader)).toContain("event: ready");
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+
+  test("an admitted stream dies when the same caller PUTs the flag strictly true", async () => {
+    // Hot flip over the wire, then a server-side publish: the pending read must resolve done,
+    // i.e. the stream closed without leaking the post-revocation frame.
+    saveConfig(config());
+    const server = startServer(0);
+    const base = `http://127.0.0.1:${server.port}`;
+    try {
+      const response = await sse(server.port);
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      try {
+        expect(await readFrame(reader)).toContain("event: ready");
+        const flip = await fetch(`${base}/api/settings`, {
+          method: "PUT", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ loopbackManagementAuth: true }),
+        });
+        expect(flip.status).toBe(200);
+        expect(await flip.json()).toMatchObject({ loopbackManagementAuth: true });
+        const pending = reader.read();
+        publishAccountSelection("loopback-anon-fixture", "api-key");
+        await expect(pending).resolves.toMatchObject({ done: true });
+        // The lock is real: a fresh anonymous SSE on the same server is refused.
+        expect((await sse(server.port)).status).toBe(401);
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+
+  test("a forged Host never opens the stream, and the strict flag keeps its 401", async () => {
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      expect((await sse(server.port, { Host: "attacker.example" })).status).toBe(401);
+      expect((await sse(server.port, { Origin: "https://evil.example" })).status).toBe(401);
+      expect((await sse(server.port, { "x-forwarded-for": "127.0.0.1" })).status).toBe(200); // local peer: XFF is not the peer
+    } finally {
+      await server.stop(true);
+    }
+    saveConfig(config({ loopbackManagementAuth: true }));
+    const strict = startServer(0);
+    try {
+      const response = await sse(strict.port);
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "opencodex admin token required" });
+    } finally {
+      await strict.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+});
+
+// ===========================================================================
+// Anonymous loopback SSE: the admission recorded at the gate must survive the
+// per-frame revalidation in createManagementSessionControl(state).isCurrent.
+//
+// The stream route revalidates every frame against sessionControl.isCurrent(req, config).
+// Before the fix an anonymous loopback request had no credential to re-check, so isCurrent
+// fell through to requestManagementCredential -> null -> false, and a freshly admitted
+// stream died on its first frame. That is the production symptom: GET /api/accounts/events
+// answers 401 on a loopback bind with the flag unset, while every other management read on
+// the same socket answers 200.
+//
+// The unit group builds the (req, state, local) triple directly and pins the contract
+// without a listener. The server group proves it over a real socket, including the hot flag
+// flip that must kill a stream that is already open.
+// ===========================================================================
+
+describe("anonymous loopback SSE revalidation (isCurrent, by construction)", () => {
+  const UNIT_PORT = 10100;
+
+  function unitLocal(overrides: Partial<LocalManagementAuthContext> = {}): LocalManagementAuthContext {
+    return {
+      attestationSecret: "A".repeat(43),
+      pid: process.pid,
+      port: UNIT_PORT,
+      peerAddress: "127.0.0.1",
+      trustedLoopbackIngress: true,
+      ...overrides,
+    } as LocalManagementAuthContext;
+  }
+
+  function availableState(): ManagementAuthState {
+    return { available: true, token: ADMIN_TOKEN, source: "environment", sessions: new Map(), pairingGrants: new Map() };
+  }
+
+  function unavailableState(): ManagementAuthState {
+    return { available: false, reason: "injected unavailable state" };
+  }
+
+  function sseRequest(headers: Record<string, string> = {}): Request {
+    return new Request(`http://127.0.0.1:${UNIT_PORT}/api/accounts/events`, {
+      headers: { Host: `127.0.0.1:${UNIT_PORT}`, ...headers },
+    });
+  }
+
+  test("an admitted anonymous request is current against the config that admitted it", () => {
+    const cfg = config();
+    const state = availableState();
+    const req = sseRequest();
+    expect(requireManagementAuth(req, state, cfg, unitLocal())).toBeNull();
+    expect(managementPrincipal(req, state, cfg, unitLocal())).toBe("loopback-anonymous");
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(true);
+  });
+
+  test("a hot flag flip to true drops the admitted anonymous request", () => {
+    const cfg = config();
+    const state = availableState();
+    const req = sseRequest();
+    expect(requireManagementAuth(req, state, cfg, unitLocal())).toBeNull();
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(true);
+    // Same Request object, same cached admission, strict flag: the revalidation re-runs the
+    // leaf against the current config instead of replaying the cached answer.
+    expect(createManagementSessionControl(state).isCurrent(req, config({ loopbackManagementAuth: true }))).toBe(false);
+  });
+
+  test("a non-loopback peer records no evidence, so the request is never current", () => {
+    const cfg = config();
+    const state = availableState();
+    const req = sseRequest();
+    expect(requireManagementAuth(req, state, cfg, unitLocal({ peerAddress: "10.0.0.5" }))?.status).toBe(401);
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(false);
+  });
+
+  test("an untrusted ingress records no evidence, so the request is never current", () => {
+    const cfg = config();
+    const state = availableState();
+    const req = sseRequest();
+    expect(requireManagementAuth(req, state, cfg, unitLocal({ trustedLoopbackIngress: false }))?.status).toBe(401);
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(false);
+  });
+
+  test("an unavailable admin token keeps the anonymous request current; the flag still drops it", () => {
+    // The branch that admits a request with no credential must not be revalidated by a
+    // credential check: on a box whose secret store is broken, its own console stays live.
+    const cfg = config();
+    const state = unavailableState();
+    const req = sseRequest();
+    expect(requireManagementAuth(req, state, cfg, unitLocal())).toBeNull();
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(true);
+    expect(createManagementSessionControl(state).isCurrent(req, config({ loopbackManagementAuth: true }))).toBe(false);
+  });
+
+  test("a request that never passed the gate is not current", () => {
+    // Same headers, same config, no admission call: isCurrent keys on the recorded admission,
+    // not on a request that merely looks admissible.
+    const cfg = config();
+    expect(createManagementSessionControl(availableState()).isCurrent(sseRequest(), cfg)).toBe(false);
+  });
+
+  test("the admin-token path revalidates exactly as before", () => {
+    const cfg = config();
+    const state = availableState();
+    const req = sseRequest({ "x-opencodex-api-key": ADMIN_TOKEN });
+    expect(requireManagementAuth(req, state, cfg, unitLocal())).toBeNull();
+    expect(managementPrincipal(req, state, cfg, unitLocal())).toBe("admin-token");
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(true);
+  });
+
+  test("the Origin participates in revalidation, so it is not a cache read", () => {
+    const cfg = config();
+    const state = availableState();
+    const req = sseRequest({ Origin: `http://127.0.0.1:${UNIT_PORT}` });
+    expect(requireManagementAuth(req, state, cfg, unitLocal())).toBeNull();
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(true);
+    req.headers.set("Origin", "https://evil.example");
+    expect(createManagementSessionControl(state).isCurrent(req, cfg)).toBe(false);
+  });
+});
+
+describe("anonymous loopback SSE: frame-level revalidation over a real listener", () => {
+  /** Reads chunks until the first frame boundary, so assertions see whole SSE frames. */
+  function readFrame(reader: ReadableStreamDefaultReader<Uint8Array>, timeoutMs = 2_000): Promise<{ text: string; done: boolean }> {
+    const decoder = new TextDecoder();
+    return new Promise((resolve, reject) => {
+      let buffer = "";
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (fn: () => void) => { if (timer !== undefined) clearTimeout(timer); fn(); };
+      const pump = () => {
+        reader.read().then(result => {
+          if (result.done) { settle(() => resolve({ text: buffer, done: true })); return; }
+          buffer += decoder.decode(result.value, { stream: true });
+          if (buffer.includes("\n\n")) settle(() => resolve({ text: buffer, done: false }));
+          else pump();
+        }, error => settle(() => reject(error)));
+      };
+      timer = setTimeout(() => settle(() => reject(new Error(`no SSE frame within ${timeoutMs}ms`))), timeoutMs);
+      pump();
+    });
+  }
+
+  /** Resolves the next read, bounded so a stream that ignores revocation fails loudly. */
+  function nextReadOutcome(reader: ReadableStreamDefaultReader<Uint8Array>, timeoutMs = 3_000): Promise<{ done: boolean; errored: boolean }> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`stream still open after ${timeoutMs}ms`)), timeoutMs);
+      reader.read().then(
+        result => { clearTimeout(timer); resolve({ done: result.done === true, errored: false }); },
+        () => { clearTimeout(timer); resolve({ done: true, errored: true }); },
+      );
+    });
+  }
+
+  test("anonymous: 200 text/event-stream, a ready frame, then a selection frame", async () => {
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/accounts/events`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type") ?? "").toContain("text/event-stream");
+      const reader = response.body!.getReader();
+      try {
+        expect((await readFrame(reader)).text).toContain("event: ready");
+        publishAccountSelection("test", "oauth");
+        const frame = await readFrame(reader);
+        expect(frame.done).toBe(false);
+        expect(frame.text).toContain("event: account-selection");
+        expect(frame.text).toContain('"provider":"test"');
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+
+  test("flag true: anonymous 401, admin token 200 with a ready frame", async () => {
+    saveConfig(config({ loopbackManagementAuth: true }));
+    const server = startServer(0);
+    try {
+      const anonymous = await fetch(`http://127.0.0.1:${server.port}/api/accounts/events`);
+      expect(anonymous.status).toBe(401);
+      await anonymous.body?.cancel();
+      const authorized = await fetch(`http://127.0.0.1:${server.port}/api/accounts/events`, {
+        headers: { "x-opencodex-api-key": ADMIN_TOKEN },
+      });
+      expect(authorized.status).toBe(200);
+      const reader = authorized.body!.getReader();
+      try {
+        expect((await readFrame(reader)).text).toContain("event: ready");
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  }, SERVER_BUDGET_MS);
+
+  test("a flag flip through the API terminates an open anonymous stream", async () => {
+    // The stream is admitted with the flag unset, so the ready frame proves the anonymous
+    // path was live. The flip is a real management write, and the next frame must find the
+    // leaf refusing: that is the property the GUI relies on when the operator locks the box.
+    saveConfig(config());
+    const server = startServer(0);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const response = await fetch(`${base}/api/accounts/events`);
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      try {
+        expect((await readFrame(reader)).text).toContain("event: ready");
+        const flip = await fetch(`${base}/api/settings`, {
+          method: "PUT",
+          headers: { "content-type": "application/json", "x-opencodex-api-key": ADMIN_TOKEN },
+          body: JSON.stringify({ loopbackManagementAuth: true }),
+        });
+        expect(flip.status).toBe(200);
+        const pending = nextReadOutcome(reader);
+        publishAccountSelection("test", "oauth");
+        expect((await pending).done).toBe(true);
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
     } finally {
       await server.stop(true);
     }
