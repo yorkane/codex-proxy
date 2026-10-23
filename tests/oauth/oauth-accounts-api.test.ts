@@ -120,6 +120,10 @@ afterEach(() => {
 
 describe("multiauth accounts API", () => {
   test("selection events require management authentication", async () => {
+    // Strict fixture: the anonymous loopback branch (default off-flag) admits a local
+    // credential-free caller by design — pinned in tests/server/management-loopback-anon.test.ts.
+    // This pins the historical rule: with the surface shut, the stream demands a credential.
+    saveConfig({ ...baseConfig(), loopbackManagementAuth: true });
     const server = startServer(0);
     try {
       const response = await originalFetch(new URL("/api/accounts/events", server.url));

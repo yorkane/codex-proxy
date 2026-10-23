@@ -89,6 +89,14 @@ const GUI_PAIR_REPLAY_LIMIT = 256;
 const consumedGuiPairCapabilities = new Map<string, number>();
 const admittedGuiPairRequests = new WeakSet<Request>();
 const admittedManagementRequests = new WeakMap<Request, ManagementPrincipal>();
+/**
+ * Kernel-observed ingress evidence recorded when a request was admitted as
+ * loopback-anonymous. Long-lived SSE revalidation (isCurrent) reads it back so the leaf runs
+ * fresh against the current flag/Host/Origin, and the peer it checks is the one the listener
+ * observed — never a header-rebuilt peer. Only the two fields the leaf reads are kept.
+ */
+type AdmittedLoopbackEvidence = Pick<LocalManagementAuthContext, "peerAddress" | "trustedLoopbackIngress">;
+const admittedLoopbackLocalContexts = new WeakMap<Request, AdmittedLoopbackEvidence>();
 
 export type ManagementAuthState =
   | {
@@ -302,6 +310,14 @@ export function createManagementSessionControl(state: ManagementAuthState): Mana
   }
   return {
     isCurrent(req: Request, config: OcxConfig): boolean {
+      // Anonymous loopback SSE has no credential to re-check, so revalidate it through the
+      // same leaf the gate used, against the context recorded when it was admitted. This
+      // runs before the token-state check: the anonymous path stays live on a box whose
+      // admin token is unavailable, and a flag flip to true must drop the stream.
+      if (admittedManagementRequests.get(req) === "loopback-anonymous") {
+        const local = admittedLoopbackLocalContexts.get(req);
+        return local !== undefined && isLoopbackManagementRequestAllowed(req, config, local);
+      }
       if (!state.available) return false;
       const credential = requestManagementCredential(req);
       if (!credential) return false;
@@ -588,7 +604,15 @@ function resolveManagementAdmission(
     }
     else if (config && authorizeGuiSessionRequest(req, config, state).ok) principal = "gui-session";
   }
-  if (!principal && config && isLoopbackManagementRequestAllowed(req, config, local)) principal = "loopback-anonymous";
+  if (!principal && config && local && isLoopbackManagementRequestAllowed(req, config, local)) {
+    principal = "loopback-anonymous";
+    // Copy the kernel-observed ingress evidence only: the leaf reads nothing else, and a
+    // snapshot cannot be widened by a later mutation of the listener-owned object.
+    admittedLoopbackLocalContexts.set(req, {
+      peerAddress: local.peerAddress,
+      trustedLoopbackIngress: local.trustedLoopbackIngress,
+    });
+  }
   if (principal) admittedManagementRequests.set(req, principal);
   return principal;
 }

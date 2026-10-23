@@ -20,6 +20,7 @@ import { describe, expect, test } from "bun:test";
 import { opencodeCatalogToken } from "../../src/lib/admin-secrets";
 import {
   initializeManagementAuthState,
+  createManagementSessionControl,
   managementPrincipal,
   requireManagementAuth,
   type LocalManagementAuthContext,
@@ -240,5 +241,85 @@ describe("the gate's own answers stay shaped as before", () => {
       if (home === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = home;
     }
+  });
+});
+
+describe("SSE revalidation (isCurrent) for the anonymous loopback principal", () => {
+  function admittedAnon(cfg: OcxConfig, state: ManagementAuthState, ctx: LocalManagementAuthContext): Request {
+    const req = request("GET");
+    expect(admitted(req, cfg, state, ctx)).toBeNull();
+    return req;
+  }
+
+  test("an admitted anonymous request is current and impersonates no session authority", () => {
+    // The live SSE stream revalidates through this call, so the anonymous admission must
+    // answer "current" with no credential to re-check — while the session-only answers
+    // (pairing provenance, key reveal) stay refused, exactly as the gate's principal check.
+    const cfg = config();
+    const state = availableState();
+    const req = admittedAnon(cfg, state, local());
+    const control = createManagementSessionControl(state);
+    expect(control.isCurrent(req, cfg)).toBe(true);
+    expect(control.isPaired(req, cfg)).toBe(false);
+    expect(control.canRevealDataKeys?.(req, cfg)).toBe(false);
+  });
+
+  test("flipping the flag to strict drops a live admitted request on the next revalidation", () => {
+    // The stream must die when the operator shuts the anonymous surface, without waiting
+    // for the request's cached admission to expire — admission memoization is per-Request,
+    // currency is re-derived from the current flag every time.
+    const cfg = config();
+    const state = availableState();
+    const req = admittedAnon(cfg, state, local());
+    const control = createManagementSessionControl(state);
+    expect(control.isCurrent(req, cfg)).toBe(true);
+    expect(control.isCurrent(req, config({ loopbackManagementAuth: true }))).toBe(false);
+    // Deny is flag-driven and reversible, not sticky: clearing it revives the same Request.
+    expect(control.isCurrent(req, config())).toBe(true);
+  });
+
+  test("mutating the listener-owned context after admission cannot widen the copy", () => {
+    const cfg = config();
+    const state = availableState();
+    const ctx = local();
+    const req = admittedAnon(cfg, state, ctx);
+    const control = createManagementSessionControl(state);
+    expect(control.isCurrent(req, cfg)).toBe(true);
+    ctx.peerAddress = "10.0.0.9";
+    expect(control.isCurrent(req, cfg)).toBe(true);
+  });
+
+  test("a request that was never admitted is not current, forged Host and XFF included", () => {
+    const cfg = config();
+    const control = createManagementSessionControl(availableState());
+    const forged = request("GET", { Host: `127.0.0.1:${PORT}`, "x-forwarded-for": "127.0.0.1" });
+    expect(control.isCurrent(forged, cfg)).toBe(false);
+    // A remote peer is refused at admission, so it can never become "current" afterwards.
+    const refused = request("GET");
+    expect(admitted(refused, cfg, availableState(), local({ peerAddress: "10.0.0.9" }))).toBe(401);
+    expect(control.isCurrent(refused, cfg)).toBe(false);
+  });
+
+  test("an unavailable admin token keeps the anonymous path current", () => {
+    // The anonymous branch runs before the token-state check on purpose: a box whose admin
+    // token cannot initialize keeps serving its own loopback dashboard, including SSE.
+    const cfg = config();
+    const state = unavailableState();
+    const req = admittedAnon(cfg, state, local());
+    const control = createManagementSessionControl(state);
+    expect(control.isCurrent(req, cfg)).toBe(true);
+    expect(control.isCurrent(request("GET"), cfg)).toBe(false);
+  });
+
+  test("the token path keeps its pre-feature currency contract", () => {
+    // GUI-session expiry/logout currency is pinned in tests/oauth/oauth-accounts-api.test.ts;
+    // this pins only that the new anonymous branch did not disturb the admin-token answer.
+    const cfg = config({ loopbackManagementAuth: true });
+    const state = availableState();
+    const req = request("GET", { "x-opencodex-api-key": ADMIN_TOKEN });
+    expect(admitted(req, cfg, state, local())).toBeNull();
+    const control = createManagementSessionControl(state);
+    expect(control.isCurrent(req, cfg)).toBe(true);
+    expect(control.isCurrent(request("GET", { "x-opencodex-api-key": "wrong" }), cfg)).toBe(false);
   });
 });
