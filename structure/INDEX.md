@@ -134,6 +134,7 @@ Background service, docs, release, and design discipline.
 | [`desktop-start-at-login.md`](desktop-start-at-login.md) | macOS tray Start at Login judgment shared with Startup safety, its parity fixture, click rules, and the guarded launch-origin migration. |
 | [`ops/service-and-sidecars.md`](ops/service-and-sidecars.md) | Service install/repair, platform launchers, tray, and sidecar processes. |
 | [`ops/service-logging.md`](ops/service-logging.md) | Service-only console timestamps and bounded copy-truncate log retention. |
+| [`ops/deployment-lessons.md`](ops/deployment-lessons.md) | Procedure invariants for installing, upgrading and accepting the fork's direct-start portable proxy package on a fleet box. |
 | [`ops/service-health-recovery.md`](ops/service-health-recovery.md) | Opt-in sentinel that turns a hung but listening managed service proxy into an exit its manager restarts. |
 | [`ops/update-supervised-recovery.md`](ops/update-supervised-recovery.md) | Manager-first recovery after a failed post-update service refresh, and the non-zero unsupervised fallback. |
 | [`ops/plugins.md`](ops/plugins.md) | Plugin loading from OPENCODEX_HOME/plugins and the upstream rewrite slot plugins attach to. |
@@ -151,7 +152,7 @@ A source area can be described by more than one doc, because these docs are orga
 | --- | --- |
 | `.github/` | [`ops/docs-and-release.md`](ops/docs-and-release.md) |
 | `app/` | [`overview.md`](overview.md)<br>[`companion.md`](companion.md) |
-| `bin/` | [`runtime.md`](runtime.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
+| `bin/` | [`runtime.md`](runtime.md)<br>[`ops/deployment-lessons.md`](ops/deployment-lessons.md)<br>[`ops/docs-and-release.md`](ops/docs-and-release.md) |
 | `desktop/` | [`desktop-shell.md`](desktop-shell.md)<br>[`companion.md`](companion.md) |
 | `desktop/src-tauri/src/cli_command.rs` | [`desktop-terminal-command.md`](desktop-terminal-command.md) |
 | `desktop/src-tauri/src/cli_command_posix.rs` | [`desktop-terminal-command.md`](desktop-terminal-command.md) |
