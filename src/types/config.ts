@@ -1132,6 +1132,14 @@ export interface OcxConfig {
    */
   codexClientCompaction?: boolean;
   /**
+   * wdev fork 定制字段（非上游 OpenCodex 配置）：本机 loopback 管理面匿名放行开关。
+   * false/缺省=本机 loopback 管理请求免 token 匿名放行（authz simulate_local 因此无需 token
+   * rewrite）；true=本机管理面仍强制 token。非 loopback 对端一律认证，不受本键影响。
+   * 运行时 strict guard（任何非 false/缺省的值按 true fail-closed）由 core 在
+   * src/server/loopback-management-auth.ts 判定；本文件只声明配置形状。
+   */
+  loopbackManagementAuth?: boolean;
+  /**
    * Label Codex shows for the injected `opencodex` provider. Defaults to `OpenCodex Proxy`.
    *
    * Presentation only. Routing is keyed on the provider id `opencodex` — the root

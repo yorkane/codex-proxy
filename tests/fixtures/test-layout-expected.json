@@ -2565,5 +2565,5 @@
   "sidecar-model-retry.test.ts": "lib", "model-request-retry-config.test.ts": "config", "native-model-retry.test.ts": "lib", "native-model-retry-ladder.test.ts": "responses",
   "model-retry-scope.test.ts": "lib", "oauth-account-auto-pause-deferral.test.ts": "oauth", "responses-model-retry-adapter.test.ts": "responses", "google-http-model-retry.test.ts": "adapters/google",
   "owned-model-retry.test.ts": "lib", "kiro-model-retry.test.ts": "providers/kiro",
-  "cursor-model-retry.test.ts": "providers/cursor", "model-request-http-retry.test.ts": "lib", "model-http-retry.test.ts": "adapters"
+  "cursor-model-retry.test.ts": "providers/cursor", "model-request-http-retry.test.ts": "lib", "model-http-retry.test.ts": "adapters", "config-loopback-management-auth.test.ts": "config", "loopback-management-auth-admission.test.ts": "server", "loopback-management-auth-predicate.test.ts": "server", "management-loopback-anon.test.ts": "server"
 }

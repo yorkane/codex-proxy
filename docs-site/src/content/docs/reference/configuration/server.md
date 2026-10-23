@@ -22,6 +22,7 @@ runs helper features around provider requests.
 | `oauthOpenBrowser?` | `boolean` | `true` | Whether a login may open a browser on the machine running the proxy. Absent and `true` both open, so an existing install is unchanged; only an explicit `false` declines. Decline when you need the authorization link in a different browser profile, or when the dashboard is not on the proxy's machine — the login still starts and the URL is still returned and displayed. `POST /api/oauth/login` and `POST /api/codex-auth/login` accept a per-request `openBrowser` boolean that overrides this, and the dashboard exposes the same choice beside the login button. Both routes report the outcome as `browserLaunch`: `started`, `failed` (nothing could be opened; the dashboard says so), or `skipped`. Device-code flows never open a browser either way. |
 | `connectTimeoutMs?` | `number` | `200000` | Per-attempt DNS/TCP/TLS/final-header deadline; it ends before body generation. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
+| `loopbackManagementAuth?` | `boolean` | `false` | **wdev fork customization (not an upstream OpenCodex field).** When false or absent, the management plane (`/api/*`) admits requests whose real socket peer is loopback (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`) on a trusted loopback listener, with a strict loopback Host/Origin, with no admin token and no GUI session; the principal is `loopback-anonymous`, which never impersonates a `gui` session and never satisfies session-only or consent-bound routes such as `/api/keys/reveal`. Forwarded headers (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, …) never participate: a request cannot claim loopback by header. Set true to restore strict management auth on loopback (every credential-less request 401s, byte-identical to the pre-change behavior); a malformed value fails closed to true. Non-loopback peers always require a credential. Hot-reloads on the normal config path; it changes request-time admission only, never the socket bind. |
 | `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. Complete-input requests may reuse an upstream connection within the same selected credential, account, thread and turn; changed handshake policy or missing identity keeps requests on separate connections. This does not trim HTTP input or create previous-response IDs. |
 | `codexNativeSteering?` | `boolean` | `false` | Experimental, native-only mid-turn steering on the Responses WebSocket endpoint. Requires `websockets: true`, a compatible upstream/client, and a pinned account/model/tool surface. Validated generation settings can change in explicit saved-result continuations. Does not enable translated models or HTTP fallback. See [native steering](/guides/codex-integration/#experimental-native-mid-turn-steering). |
 | `codexNativeInjection?` | `boolean` | `false` | Experimental saved function-result injection on compatible native multi-agent WebSocket turns. Requires `websockets: true`, explicit `multi_agent.enabled`, and an eligible provider. Separate from steering; no automatic tool rerun or recovery create. See [native injection](/guides/codex-integration/#experimental-native-function-result-injection). |
@@ -311,6 +312,23 @@ Any proxy admission secret placed in those provider headers is removed before fo
 A `0.0.0.0` bind exposes the proxy and configured provider access to the LAN. Use it only on trusted
 networks with a strong token.
 :::
+
+### Loopback management admission (wdev fork)
+
+**Fork customization — this section describes wdev-proxy behavior, not upstream OpenCodex.**
+The upstream management plane has no loopback exemption; this fork adds one behind
+`loopbackManagementAuth` (default `false` = anonymous local admission). The admission needs three
+things at once: the request landed on a loopback listener the process itself bound, the kernel
+peer address is loopback, and Host/Origin are loopback-strict. None of those can be manufactured by
+a client header, so `X-Forwarded-*` spoofing never opens the management plane, and non-loopback
+peers keep requiring a credential regardless of bind. A same-machine reverse proxy configured to
+rewrite Host/Origin to loopback (authz `simulate_local`) intentionally presents its external visitors
+as local callers — that is an operator-made delegation of trust to that gateway, enforced by its
+guest policy. `unauthenticatedLoopbackListener` is unrelated: it is data-plane-only (`/api/*`,
+`/healthz`, `/readyz` and the dashboard 404 there), its companion form is illegal on a
+`127.0.0.1` bind, and enabling it is not how this fork opens management. The admin token chain is
+unchanged and outranks the anonymous principal; set `loopbackManagementAuth: true` to fence
+management closed on loopback again.
 
 ### Local clients that cannot receive the token
 

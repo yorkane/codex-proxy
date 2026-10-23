@@ -82,6 +82,9 @@ export function getDefaultConfig(): OcxConfig {
     websockets: false,
     codexAutoStart: true,
     codexShimAutoRestore: true,
+    // wdev fork 定制：fresh install 显式写 false（本机 loopback 管理匿名放行），与缺省等价；
+    // 磁盘畸形值由 schema fail-closed 到 true。
+    loopbackManagementAuth: false,
   };
 }
 

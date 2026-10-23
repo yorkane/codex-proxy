@@ -168,9 +168,7 @@ transport so environment HTTP proxies cannot observe or fabricate the exchange.
 
 > Decision record: [ADR-0073](decisions/ADR-0073-authentication-boundaries.md)
 
-Management authentication never has a loopback bypass. If no management credential is available, or
-management token creation, validation, or permission hardening fails, `/api/*` requests without a
-valid scoped capability return 503 while `/v1/*` and unauthenticated `/healthz` continue to operate.
+Management authentication has one fork-owned exemption: `loopbackManagementAuth` (default false) admits a request on a trusted loopback listener whose kernel peer is loopback (`127.0.0.1`/`::1`/`::ffff:127.0.0.1`) with loopback-strict Host/Origin, as principal `loopback-anonymous` (`src/server/loopback-management-auth.ts`; context carries `peerAddress`/`trustedLoopbackIngress`) — ranked below admin token and GUI sessions, never satisfying session-only or consent-bound routes. Forwarded headers never participate; non-loopback peers always need a credential; `true` restores the old fence byte-for-byte; a malformed value fails closed to `true`. Where no exemption applies, a credential-less `/api/*` request returns 401, and when management token creation, validation, or permission hardening fails it returns 503 while `/v1/*` and unauthenticated `/healthz` continue to operate.
 Windows ACL hardening results must be checked explicitly because an `icacls` timeout is a soft failure in the shared secret helper.
 
 Local dashboard page entry requires a loopback binding, a valid parseable loopback `Host`, and an

@@ -1353,6 +1353,9 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     // historical auto-open behavior.
     oauthOpenBrowser: config.oauthOpenBrowser !== false,
     showCodexCredits: config.showCodexCredits === true,
+    // wdev fork 定制：effective 布尔回显。缺省=匿名（false）；磁盘畸形值已在 schema 层
+    // fail-closed 为 true，这里不做二次降级。
+    loopbackManagementAuth: config.loopbackManagementAuth === true,
     // The unified model-request retry budget: the effective value as this process resolves it
     // (env > config > default 3; 0 disables proxy-side model HTTP retries) beside what is
     // persisted, so a read of the safe config reports the number the pipeline will use rather

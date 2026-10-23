@@ -448,6 +448,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexDesktopAuthless: config.codexDesktopAuthless === true,
       // Absent keeps Design B remote compaction; true selects the dedicated provider identity.
       codexClientCompaction: config.codexClientCompaction === true,
+      // wdev fork 定制：本机 loopback 管理匿名放行开关的 effective 布尔。缺省=匿名(false)，
+      // 磁盘畸形值已由 schema fail-closed 为 true。
+      loopbackManagementAuth: config.loopbackManagementAuth === true,
       // The unified model-request retry budget as the running process resolves it (env first,
       // then config, then default 3; 0 disables proxy-side model HTTP retries), so the
       // dashboard reads the effective number rather than what config.json happens to say.
@@ -559,6 +562,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexMainAccountHardLockFallback?: unknown;
       codexDesktopAuthless?: unknown;
       codexClientCompaction?: unknown;
+      loopbackManagementAuth?: unknown;
       compactionRouting?: unknown;
       compactionRecovery?: unknown;
       memoryModels?: unknown;
@@ -579,12 +583,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexMainAccountHardLockFallback === undefined
       && body.codexDesktopAuthless === undefined
       && body.codexClientCompaction === undefined
+      && body.loopbackManagementAuth === undefined
       && body.compactionRouting === undefined
       && body.compactionRecovery === undefined
       && body.reasoningRetention === undefined
       && body.memoryModels === undefined
       && body.modelRequestMaxRetries === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, compactionRouting, compactionRecovery, reasoningRetention, memoryModels, or modelRequestMaxRetries" }, 400);
+      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexCredits, ultraFastTier, fastRows, codexMainAccountHardLock, codexMainAccountHardLockThresholds, codexMainAccountHardLockFallback, codexDesktopAuthless, codexClientCompaction, loopbackManagementAuth, compactionRouting, compactionRecovery, reasoningRetention, memoryModels, or modelRequestMaxRetries" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -641,6 +646,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.codexClientCompaction !== undefined && typeof body.codexClientCompaction !== "boolean") {
       return jsonResponse({ error: "codexClientCompaction boolean is required" }, 400);
+    }
+    // wdev fork 定制：本机 loopback 管理匿名开关。写入边界严格：只接受 true/false，
+    // 与 codexDesktopAuthless 同形；null 不是合法清空（false 已是缺省，清空即 delete）。
+    if (body.loopbackManagementAuth !== undefined && typeof body.loopbackManagementAuth !== "boolean") {
+      return jsonResponse({ error: "loopbackManagementAuth boolean is required" }, 400);
     }
     const compactionRouting = body.compactionRouting == null
       ? body.compactionRouting
@@ -704,7 +714,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     // modelRequestMaxRetries 进 capture：catch 里最后 restore 会连同 pending 删除意图一起还原，
     // 清键失败的 tombstone 不泄漏。previousSettings 的手写还原仍在（先跑），capture 覆盖为终态。
-    const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention", "modelRequestMaxRetries"]);
+    const restoreCompactionRouting = captureConfigTopLevelRollback(config, ["compactionRouting", "compactionRecovery", "memoryModels", "reasoningRetention", "modelRequestMaxRetries", "loopbackManagementAuth"]);
     const previousSettings = {
       codexAutoStart: config.codexAutoStart,
       hasCodexAutoStart: Object.hasOwn(config, "codexAutoStart"),
@@ -736,6 +746,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
       codexClientCompaction: config.codexClientCompaction,
       hasCodexClientCompaction: Object.hasOwn(config, "codexClientCompaction"),
+      loopbackManagementAuth: config.loopbackManagementAuth,
+      hasLoopbackManagementAuth: Object.hasOwn(config, "loopbackManagementAuth"),
       modelRequestMaxRetries: config.modelRequestMaxRetries,
       hasModelRequestMaxRetries: Object.hasOwn(config, "modelRequestMaxRetries"),
     };
@@ -785,6 +797,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       if (body.codexClientCompaction === true) config.codexClientCompaction = true;
       else if (body.codexClientCompaction === false) deleteConfigTopLevelKey(config, "codexClientCompaction");
+      // Off deletes the key: absent is the documented anonymous default, so a persisted
+      // `false` would record a decision nobody made. Hot-applies via the request-time guard.
+      if (body.loopbackManagementAuth === true) config.loopbackManagementAuth = true;
+      else if (body.loopbackManagementAuth === false) deleteConfigTopLevelKey(config, "loopbackManagementAuth");
       if (compactionRouting === null) deleteConfigTopLevelKey(config, "compactionRouting");
       else if (compactionRouting?.success) config.compactionRouting = compactionRouting.data;
       if (compactionRecovery === null) deleteConfigTopLevelKey(config, "compactionRecovery");
@@ -857,6 +873,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasCodexClientCompaction) {
         config.codexClientCompaction = previousSettings.codexClientCompaction;
       } else deleteConfigTopLevelKey(config, "codexClientCompaction");
+      if (previousSettings.hasLoopbackManagementAuth) {
+        config.loopbackManagementAuth = previousSettings.loopbackManagementAuth;
+      } else deleteConfigTopLevelKey(config, "loopbackManagementAuth");
       if (previousSettings.hasModelRequestMaxRetries) {
         config.modelRequestMaxRetries = previousSettings.modelRequestMaxRetries;
       } else deleteConfigTopLevelKey(config, "modelRequestMaxRetries");
@@ -912,6 +931,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       fastRows: config.fastRows !== false,
       codexDesktopAuthless: authlessIsEnabled,
       codexClientCompaction: clientCompactionIsEnabled,
+      loopbackManagementAuth: config.loopbackManagementAuth === true,
       codexDesktopSwitches,
       compactionRouting: config.compactionRouting ?? null,
       compactionRecovery: config.compactionRecovery ?? null,
