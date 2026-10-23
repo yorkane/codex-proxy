@@ -324,6 +324,9 @@ export const configSchema = z.object({
   codexShimAutoRestore: z.boolean().optional(),
   codexDesktopAuthless: z.boolean().optional().catch(undefined),
   codexClientCompaction: z.boolean().optional().catch(undefined),
+  // wdev fork 定制（注释见 types/config.ts）：缺省 undefined 等价 false（本机匿名放行）；
+  // 磁盘畸形值 fail-closed 到 true（强制本机管理认证），live 写入在 diagnostics 严格拒绝非布尔。
+  loopbackManagementAuth: z.boolean().optional().catch(true),
   // Presentation-only label for the injected provider. A malformed value degrades to undefined
   // and the default label is emitted, rather than failing the parse or writing a config Codex
   // would refuse to load — the provider id routing depends on is never derived from it.

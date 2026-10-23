@@ -172,6 +172,9 @@ describe("management and data-plane credential separation", () => {
       setDraining: () => {},
     });
     const unavailable = { available: false, reason: "injected unavailable state" } as const;
+    // The new anonymous loopback default must not relax this capability-strictness
+    // contract: opt this fixture into the enforced management gate.
+    saveConfig({ ...remoteConfig(), loopbackManagementAuth: true });
     const server = startServer(0, {
       localAttestationSecret: secret,
       managementAuthState: unavailable,
@@ -251,6 +254,8 @@ describe("management and data-plane credential separation", () => {
     const secret = "A".repeat(43);
     const nonce = "B".repeat(43);
     const unavailable = { available: false, reason: "injected unavailable state" } as const;
+    // Same as above: the replay/mismatch 503 contract requires the enforced gate.
+    saveConfig({ ...remoteConfig(), loopbackManagementAuth: true });
     const server = startServer(0, {
       localAttestationSecret: secret,
       managementAuthState: unavailable,
@@ -1029,6 +1034,7 @@ describe("management and data-plane credential separation", () => {
   test("deferred Codex validation requires a same-origin mutation session with CSRF", async () => {
     const config = remoteConfig();
     config.hostname = "127.0.0.1";
+    config.loopbackManagementAuth = true;
     const accountId = "consent-wire";
     config.codexAccounts = [{ id: accountId, isMain: false, plan: "pro" }];
     saveConfig(config);
@@ -1874,6 +1880,7 @@ describe("codex app-server restart routes ride the management gate", () => {
   // reason: the route terminates the user's Codex app-servers, so it must be
   // unreachable without management credentials and from a foreign origin.
   test("both routes reject an unauthenticated caller and a cross-origin caller", async () => {
+    saveConfig({ ...remoteConfig(), loopbackManagementAuth: true });
     const server = startServer(0);
     try {
       const stateUrl = new URL(CODEX_APP_SERVER_STATE_PATH, server.url);
@@ -1903,6 +1910,7 @@ describe("codex app-server restart routes ride the management gate", () => {
   test("the data-plane token does not authorize the restart route", async () => {
     // The data token is handed to Codex itself. It must never be able to restart
     // the app-servers it belongs to.
+    saveConfig({ ...remoteConfig(), loopbackManagementAuth: true });
     const server = startServer(0);
     try {
       const response = await fetch(new URL(CODEX_RESTART_PATH, server.url), {

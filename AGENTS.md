@@ -306,7 +306,9 @@ bun install && (cd gui && bun install)
 
 Run the proxy with `bun run src/cli/index.ts start --port <port>`. `/healthz`
 reports status, `/` serves the dashboard, and the management API requires the
-admin token the server writes to `$OPENCODEX_HOME/admin-api-token` at startup.
+admin token the server writes to `$OPENCODEX_HOME/admin-api-token` at startup
+(wdev fork: on a loopback bind, local peers are admitted anonymously by default —
+`loopbackManagementAuth`, see `structure/gui-and-management-api.md`).
 
 `bun run test` has five known environment-only failures in such containers.
 They are not regressions; do not re-investigate them:

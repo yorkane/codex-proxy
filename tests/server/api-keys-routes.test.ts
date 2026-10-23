@@ -195,6 +195,9 @@ describe("POST /api/keys", () => {
   test("a raw pairing grant cannot authorize the key route", async () => {
     saveConfig({
       ...baseConfig(),
+      // Preserve the enforced-gate contract under the new anonymous loopback default:
+      // this case asserts the route rejects a raw pairing grant, not that the gate admits it.
+      loopbackManagementAuth: true,
       runtimeRole: "hub",
       hub: { managementPublicOrigin: "https://hub.example.test" },
     });
@@ -333,7 +336,7 @@ describe("GET /api/keys", () => {
 
 describe("POST /api/keys/reveal", () => {
   async function operatorServer() {
-    const config = { ...baseConfig(), hostname: "127.0.0.1", port: await findAvailablePort(0, "127.0.0.1") };
+    const config = { ...baseConfig(), hostname: "127.0.0.1", loopbackManagementAuth: true, port: await findAvailablePort(0, "127.0.0.1") };
     saveConfig(config);
     const state = initializeManagementAuthState(config);
     if (!state.available) throw new Error("expected fixture management state");

@@ -74,6 +74,7 @@ import {
 import { hasLocalDesktopSnapshotCapability } from "./local-desktop-snapshot-auth";
 import { hasLocalAccountSwitchCapability } from "./local-account-switch-auth";
 import { authorizationCredential } from "../lib/authorization-scheme";
+import { isLoopbackManagementRequestAllowed } from "./loopback-management-auth";
 export type { GuiSessionBootstrap, GuiSessionRequestContext } from "./gui-session";
 
 const LOCAL_READ_REPLAY_LIMIT = 256;
@@ -348,12 +349,15 @@ export type ManagementPrincipal =
   | "local-account-switch-capability"
   | "local-provider-reload-capability"
   | "local-aside-sync-capability"
-  | "system-restart-capability";
+  | "system-restart-capability"
+  | "loopback-anonymous";
 
 export interface LocalManagementAuthContext {
   attestationSecret: string;
   pid: number;
   port: number;
+  peerAddress?: string | null;
+  trustedLoopbackIngress?: boolean;
 }
 
 function hasSystemRestartCapability(
@@ -584,6 +588,7 @@ function resolveManagementAdmission(
     }
     else if (config && authorizeGuiSessionRequest(req, config, state).ok) principal = "gui-session";
   }
+  if (!principal && config && isLoopbackManagementRequestAllowed(req, config, local)) principal = "loopback-anonymous";
   if (principal) admittedManagementRequests.set(req, principal);
   return principal;
 }

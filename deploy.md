@@ -104,19 +104,26 @@ fresh 出厂默认（`getDefaultConfig`，src/config/proxy-env.ts）：`defaultP
 引擎无托管集成面：部署层与引擎的交互只剩两条通道——systemd 单元生命周期与 EnvironmentFile 注入的
 配置（§6）；`wdev-proxy` CLI 是部署层自带的 shim，不由本仓库提供。
 
-两道认证门：
+认证（2026-10-23 口径；fork 定制 `loopbackManagementAuth`，合同见
+fork 运维层 [doc/2026-10-23-loopback-management-auth.md](../doc/2026-10-23-loopback-management-auth.md)）：
 
-1. **进程内**：`/api/*` 一律要凭据，无 loopback 免认证分支。令牌优先级 env `OPENCODEX_ADMIN_AUTH_TOKEN` >
+1. **进程内**：`/api/*` 默认对**本机 loopback 匿名放行**（`loopbackManagementAuth` 缺省 `false`；判定 =
+   可信 loopback listener + 真 socket peer `127.0.0.1/::1/::ffff:127.0.0.1` + 严格 Host/Origin，
+   `X-Forwarded-*` 一律不参与；principal `loopback-anonymous` 不冒充 `gui`，`session-only` 路由仍拒）。
+   `loopbackManagementAuth: true`（strict）恢复强制凭据、逐字节旧行为；畸形值 fail-closed 按 `true`。
+   **仅非 loopback 必须认证**，与 `hostname` 绑定值无关。令牌优先级 env `OPENCODEX_ADMIN_AUTH_TOKEN` >
    文件 `~/.opencodex/admin-api-token`（文件态强制 `ocx_admin_` 前缀生成值，手写明文判非法→503；
    真源是 env，文件仅作回落）。令牌为部署时本地强随机（例 `openssl rand -hex 24`），只落该实例 env 与 authz
-   注入配置；文档/报告不携带值。非 loopback 绑定时数据面另需独立凭据（`OPENCODEX_API_AUTH_TOKEN` 或
+   注入配置（strict / 非 loopback 形态用）；文档/报告不携带值。非 loopback 绑定时数据面另需独立凭据（`OPENCODEX_API_AUTH_TOKEN` 或
    `config.apiKeys`，不得与管理令牌同值；只用 `x-opencodex-api-key` 头提交）。
-2. **authz 边缘注入**：`cc` 前缀域名绑定回源本机 proxy（235 绑定 id 7，`simulate_local=1`），
-   `request_rewrite.headers` 覆盖式注入 `x-opencodex-api-key`——走 `cc-*` 入口免带令牌（覆盖发生在授权之后，
-   绕不过门 1）。轮换 admin token 后必须同步绑定注入值（`PATCH /_authz/api/applications/7`），否则外部入口
-   整体 401 而 127.0.0.1 正常。
-   `simulate_local` 入口的 `/opencodex-session` 自铸会话有管理配置读面，按需把 `/api/*`、`/opencodex-session`
-   排除出绑定（只放行 `/v1/*`、`/healthz`）。
+2. **authz 边缘授权**：`cc` 前缀域名绑定回源本机 proxy（235 绑定 id 7，`simulate_local=1`），
+   guest 策略只放行该 proxy 端口路径（本轮=完整 app 入口全方法）。authz 与 proxy 同机 + host 网络时
+   proxy 看到的 kernel peer 是真 `127.0.0.1`，匿名准入由第 1 条的策略给出；`request_rewrite` 注入
+   `x-opencodex-api-key` **不再必须**（移除时只删该 header 单项、保留其余字段，不发 `null`），
+   降级为 strict / 非 loopback 形态的可选旧通道。该形态下轮换 admin token 后必须同步绑定注入值
+   （`PATCH /_authz/api/applications/7`），否则外部入口整体 401 而 127.0.0.1 正常。
+   已知代价（用户已接受）：`simulate_local` 入口的 `/opencodex-session` 自铸会话管理配置读面即主要暴露面，
+   Shadow UI 对外可读写；收窄手段（strict、guest 收窄 `/v1/*`+`/healthz`、绑定路径排除）本轮不启用。
 
 ```bash
 TOKEN=$(sed -n 's/^OPENCODEX_ADMIN_AUTH_TOKEN=//p' ~/.wdev/proxy.env)
@@ -173,7 +180,7 @@ systemctl show -p NRestarts --value wdev-proxy.service     # 验收窗口内不�
 P=http://127.0.0.1:10100; TOKEN=$(sed -n 's/^OPENCODEX_ADMIN_AUTH_TOKEN=//p' ~/.wdev/proxy.env)
 curl -s --noproxy '*' $P/healthz | head -c 400             # status:"ok"（liveness）
 curl -s --noproxy '*' $P/readyz                            # status:"ready"（readiness）
-curl -s -o /dev/null -w '%{http_code}\n' $P/api/config                               # 401（认证生效）
+curl -s -o /dev/null -w '%{http_code}\n' $P/api/config                               # 默认 200（本机匿名放行）；loopbackManagementAuth=true 时 401
 curl -s -o /dev/null -w '%{http_code}\n' -H "x-opencodex-api-key: $TOKEN" $P/api/config  # 200
 curl -s -o /dev/null -w '%{http_code}\n' -H "x-opencodex-api-key: $TOKEN" $P/api/wdev/components
 #   恒 404（Unknown endpoint，随模块删除；任何机器都是 404 —— 这是预期，不是故障）

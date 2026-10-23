@@ -52,6 +52,16 @@ pairing grant; each authorized request extends it. Otherwise a remote operator a
 the raw admin token, and the dashboard asks for it again after a reload because the session lives
 only in page memory. See [Remote hub](/guides/remote-hub/).
 
+:::note[wdev fork: loopback management admission]
+This fork adds `loopbackManagementAuth` (default `false`): on a trusted loopback listener, a request
+whose real socket peer is loopback (Host/Origin loopback-strict; forwarded headers never count) is
+admitted to `/api/*` with no admin token and no session, as principal `loopback-anonymous` — below
+admin-token and session authority, so session-only and consent-bound routes still refuse it.
+Set it to `true` to restore the strict chain above on loopback (credential-less requests 401);
+malformed values fail closed to `true`. Non-loopback peers always require a credential.
+See [server configuration](/reference/configuration/server/#loopback-management-admission-wdev-fork).
+:::
+
 ## Common errors
 
 All endpoint rows below inherit these boundary errors. The “Notable errors” column lists additional

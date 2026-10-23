@@ -698,6 +698,8 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           attestationSecret: localAttestationSecret,
           pid: process.pid,
           port: ctx.boundPort ?? requestServer.port ?? listenPort,
+          peerAddress: requestServer.requestIP(req)?.address ?? null,
+          trustedLoopbackIngress: trustedLoopbackForIngress(ingress, config.hostname ?? "127.0.0.1"),
         };
         const apiAuthError = requireManagementAuth(req, managementAuth, config, localManagementAuth);
         if (apiAuthError) return withManagementCors(apiAuthError, req, config);

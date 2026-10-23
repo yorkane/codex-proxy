@@ -567,6 +567,14 @@ function showCodexCreditsError(value: unknown): string | null {
   return "schema_invalid: showCodexCredits: must be a boolean or omitted";
 }
 
+function loopbackManagementAuthError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "loopbackManagementAuth")) return null;
+  const enabled = raw.loopbackManagementAuth;
+  if (enabled === undefined || typeof enabled === "boolean") return null;
+  return "schema_invalid: loopbackManagementAuth: must be a boolean or omitted";
+}
+
 function creditCodexAccountIdsError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw || !Object.hasOwn(raw, "creditCodexAccountIds")) return null;
@@ -807,6 +815,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? modelRequestMaxRetriesError(value)
     ?? oauthOpenBrowserError(value)
     ?? showCodexCreditsError(value)
+    ?? loopbackManagementAuthError(value)
     ?? creditCodexAccountIdsError(value)
     ?? remainingQuotaAccountIdsError(value)
     ?? runtimeRoleError(value)
