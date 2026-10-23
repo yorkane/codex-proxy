@@ -258,7 +258,9 @@ def main():
         "assert r.returncode==0 and 'opencodex' in r.stdout, r.stdout+ r.stderr",
         "b=os.path.join(root,'node_modules','bun','bin','bun.exe')",
         "rb=subprocess.run([b,'--version'],capture_output=True,text=True,timeout=30)",
-        "assert rb.returncode==0 and rb.stdout.strip()=='1.4.2', rb.stdout",
+        "import json as _j",
+        "pin=_j.load(open(os.path.join(root,'package.json')))['dependencies']['bun']",
+        "assert rb.returncode==0 and rb.stdout.strip()==pin, (rb.stdout, pin)",
         "print('CONTRACT_CHAIN_OK engine_root=' + ('' if os.path.realpath(root)==os.path.realpath(tmp) else os.path.relpath(root,tmp)))",
     ])
     chain_out = sh([sys.executable, "-c", code])
