@@ -906,6 +906,13 @@
       "documents": ["src/service/logging.ts"]
     },
     {
+      "path": "ops/deployment-lessons.md",
+      "tier": 6,
+      "title": "Deployment Lessons",
+      "scope": "Procedure invariants for installing, upgrading and accepting the fork's direct-start portable proxy package on a fleet box.",
+      "documents": ["bin/"]
+    },
+    {
       "path": "ops/service-health-recovery.md",
       "tier": 6,
       "title": "Service Health Recovery",
