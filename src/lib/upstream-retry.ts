@@ -830,7 +830,12 @@ async function transientRetryRun(
   for (let attempt = 0; sent < budget; attempt++) {
     // A non-replayable gateway status was settled after the request body had already left
     // for the origin; retrying it here is the automatic resend the marker exists to forbid.
-    if (res.ok || !isRetryableStatus(res.status) || isNonReplayableResponse(res)) return res;
+    // 上游 #7538 的 no-retry 门只约束窄瞬态 lane；模型 lane 的重试义务（fork 合同
+    // 「模型 4xx/5xx 至少重试 10 次」，2026-10-23 用户裁决）不被上游提示豁免——
+    // x-should-retry 从来不是模型 lane 的输入（该 lane 只读 Retry-After）。
+    if (res.ok || !isRetryableStatus(res.status) || isNonReplayableResponse(res)
+      || (opts.modelRetryMode !== true
+        && res.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE)) return res;
     // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
     // a response whose body we just cancelled.
     if (opts.abortSignal?.aborted) return res;
