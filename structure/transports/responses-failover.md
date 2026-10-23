@@ -322,14 +322,13 @@ number. `src/lib/codex-retry-budget.ts` is the single resolver: `OCX_CODEX_REQUE
 `OCX_CODEX_STREAM_MAX_RETRIES` read per key, `0` legitimate (= no retry), malformed counts as
 unset, decimals floor, env values above 100 clamp to 100. Precedence is env, then a user-claimed
 value in the table, then 10. The claim is durable across the wholesale table rewrite because the
-journal records the pair the injection wrote, per key whether env forced it, and the user's
-claimed pair; `resolveCodexRetryKey` merges that evidence with the file's own lines before
-`removeOcxSection` runs. A file line differing from the recorded injected pair is the user
-claiming it, and a claim is carried verbatim across the rewrite, including above 100, because
-clamping that value is the client's job on read. env overrides a claim only while set for that
-key and returns it when removed. `ocx restore` clears the journal, which un-claims.
-`tests/codex-integration/codex-retry-budget-injection.test.ts` pins the parse table, the
-written lines, idempotence, restore, and the precedence ladder.
+journal records the pair the injection wrote, per key whether env forced it, and the user's claimed
+pair; `resolveCodexRetryKey` merges that evidence with the file's own lines before
+`removeOcxSection` runs. A file line differing from the recorded injected pair is the user claiming
+it, and a claim is carried verbatim across the rewrite, including above 100, because clamping is the
+client's job on read. env overrides a claim only while set for that key and returns it when removed;
+`ocx restore` clears the journal, which un-claims.
+`tests/codex-integration/codex-retry-budget-injection.test.ts` pins parse, written lines, idempotence, restore, precedence.
 
 **A pre-header fetch rejection this proxy refuses to replay is a refusal this proxy made.**
 `src/lib/upstream-retry.ts` returns a marked **429** carrying its own code,
