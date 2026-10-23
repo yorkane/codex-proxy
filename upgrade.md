@@ -109,6 +109,7 @@ tar -tzf "/data/tmp/wdev-release-pull/<portable包名>" | head
 - 历史口径留档：241.t 对 2.89.0 包的实测口径 = **七场景回归 + 直启验收通过**（直启单元 active、NRestarts=0、
   healthz ok 2.89.0、readyz ready、认证 401/200、`/api/wdev/components` 带 token 404），
   **不宣称过了 241 正式门/托管门族**。
-- web 组件（gateway deb / 3737）是**独立发布线**：其安装与跨机推广合同以公共仓的
-  [wdev-deploy.md](https://gitlab.ai-t.wtvdev.com/yorkane/wdev-suit/-/raw/main/wdev-deploy.md)
-  web 章节为当前权威（2026-10-22 起组件独立发布）；本文不定义 web 生命周期，proxy 直启线与它互不牵连。
+- web 组件（gateway deb / 3737）是**独立发布线**：其安装与跨机推广合同以公共仓
+  [wdev-proxy/wdev-deploy.md](https://gitlab.ai-t.wtvdev.com/yorkane/wdev-suit/-/raw/main/wdev-proxy/wdev-deploy.md)
+  的 web 章节（§7 web 安装 / §8 验收）为当前权威（2026-10-22 起组件独立发布）；本文不定义 web
+  生命周期，proxy 直启线与它互不牵连。
