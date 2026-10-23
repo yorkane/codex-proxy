@@ -45,9 +45,9 @@ export function getDefaultConfig(): OcxConfig {
     port: 10100,
     emptyCompletionRetry: false,
     dropCodexSafetyBuffering: false,
-    // The unified model-request retry budget: every model request that fails with a 4xx/5xx
-    // retries at least this many times. Written explicitly (the floor value) so a fresh install
-    // records the mandated minimum on disk instead of leaving it to be inferred.
+    // The unified model-request retry budget (0..5 retries, 0 = disabled). Written explicitly
+    // (the default value) so a fresh install records the mandated default on disk instead of
+    // leaving it to be inferred.
     modelRequestMaxRetries: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
     fastRows: true,
     managementUsageMaxReadBytes: 64 * 1024 * 1024,

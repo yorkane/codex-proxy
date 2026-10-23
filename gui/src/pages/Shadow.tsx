@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import { createBoundedFetch } from "../bounded-fetch";
 import { modelVisible, fetchSelectedModels, type ProviderModelMap } from "../model-visibility";
-import { Switch, Select, Tooltip, ToastNotice } from "../ui";
+import { Switch, Select, Tooltip, ToastNotice, type SelectOption } from "../ui";
 import {
   shadowCallModelOptions,
   type ModelInfo,
@@ -96,6 +96,10 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
 
   const saveShadowCall = async (patch: Partial<ShadowCallSettings>) => {
     if (!shadowCall || saving) return;
+    // Snapshot taken before the optimistic merge, so every unconfirmed write goes back to the
+    // last value the server actually reported. A refetch alone cannot do this: when the proxy is
+    // unreachable the refetch fails too, and the preview number would stay on screen.
+    const previous = shadowCall;
     setSaving(true);
     setShadowCall({ ...shadowCall, ...patch });
     try {
@@ -110,8 +114,30 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
         let msg = "Save failed";
         try { const d = await r.json(); if (d && typeof d.error === "string" && d.error) msg = d.error; } catch { /* non-JSON error body */ }
         setFeedback({ ok: false, message: msg });
-        void loadShadowCall();
+        setShadowCall(previous);
+        await loadShadowCall();
+        return;
       }
+      // The PUT echoes the settings DTO, so the optimistic value is replaced by what the server
+      // resolved - an environment override then becomes visible instead of lingering as a number
+      // the operator saved and the proxy ignores. Merged, not swapped wholesale: this page only
+      // sends numbers/switches, and a partial echo must not clear fields the server did not repeat.
+      const echoed = await readJsonIfOk<ShadowCallSettings>(r);
+      if (echoed) {
+        setShadowCall(prev => (prev ? { ...prev, ...echoed } : prev));
+      } else {
+        // 200 with no usable body leaves the write unconfirmed, so it is handled like a failure:
+        // the screen goes back to the confirmed values first, then the refetch tries to refresh.
+        setFeedback({ ok: false, message: "Save failed: the proxy returned no settings" });
+        setShadowCall(previous);
+        await loadShadowCall();
+      }
+    } catch (err) {
+      // Network reject: the optimistic merge above never got confirmation, so say so and pull the
+      // server's answer back rather than leaving a value on screen that was never stored.
+      setFeedback({ ok: false, message: err instanceof Error && err.name === "AbortError" ? "Save timed out" : "Save failed: cannot reach the proxy" });
+      setShadowCall(previous);
+      await loadShadowCall();
     } finally {
       setSaving(false);
     }
@@ -169,6 +195,26 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
   const emptyCompletionRetryOn = shadowCall?.emptyCompletionRetry === true;
   // 明文 V2 总闸同样是顶层 config 字段，不依赖影子拦截开关，因此本节与拦截状态无关。
   const plaintextV2On = shadowCall?.plaintextV2AgentMessages === true;
+  // The proxy-internal model-request retry budget is TOP-LEVEL config like the replay guard, so
+  // its card renders independently of the shadow intercept switch. The server-resolved value is
+  // shown, never a locally invented default: the accepted bounds are the handshake that tells an
+  // older server (which reports neither field) apart from a new one.
+  const retriesMin = shadowCall?.modelRequestMaxRetriesMin;
+  const retriesLimit = shadowCall?.modelRequestMaxRetriesLimit;
+  const retriesKnown = retriesMin !== undefined && retriesLimit !== undefined;
+  const retriesEnvOverride = shadowCall?.modelRequestMaxRetriesEnvOverride === true;
+  const retriesEffective = retriesKnown
+    ? Math.min(retriesLimit, Math.max(retriesMin, Math.trunc(shadowCall?.modelRequestMaxRetries ?? retriesMin)))
+    : 0;
+  // Six bounded choices beat a free-form number box here: every option is one the server accepts,
+  // so no invalid draft state (or blur-snap-back machinery) is reachable from the keyboard.
+  const retriesOptions: SelectOption[] = [];
+  if (retriesKnown) {
+    for (let v = retriesMin; v <= retriesLimit; v++) {
+      retriesOptions.push({ value: String(v), label: v === 0 ? "0 — no retries" : String(v) });
+    }
+  }
+  const retriesControlDisabled = !shadowCall || saving || !retriesKnown || retriesEnvOverride;
   // The budget comes from the server's resolved value, so it may already reflect the environment
   // override rather than config.json. Clamped to the bounds the server reported; an older server
   // that reports neither bound still gets the historical 1..3 window.
@@ -445,6 +491,57 @@ export default function Shadow({ apiBase }: { apiBase: string }) {
             </div>
           </>
         )}
+        <div className="models-phantom-section shadow-page-section">
+          <h3 className="shadow-page-heading">Model request retries</h3>
+          <div className="models-shadow-row row muted text-control">
+            <span className="models-shadow-label">
+              Proxy retries{" "}
+              <Tooltip
+                content="Model HTTP 4xx/5xx retries inside the proxy. Applies to every routed request, with the shadow intercept on or off."
+                side="top"
+                maxWidth={320}
+              >
+                <span style={{ cursor: "help" }} aria-label="Proxy retries help">ⓘ</span>
+              </Tooltip>
+            </span>
+            <div style={{ marginLeft: "auto" }}>
+              <Select
+                value={retriesKnown ? String(retriesEffective) : ""}
+                options={retriesKnown
+                  ? retriesOptions
+                  : [{ value: "", label: "Unavailable" }]}
+                onChange={v => {
+                  const value = Number(v);
+                  if (!retriesKnown || !Number.isInteger(value) || value < retriesMin || value > retriesLimit) return;
+                  if (value === retriesEffective) return;
+                  void saveShadowCall({ modelRequestMaxRetries: value });
+                }}
+                disabled={retriesControlDisabled}
+                label="Proxy retries"
+                align="right"
+                placement="below"
+                style={{ minWidth: "8rem" }}
+              />
+            </div>
+          </div>
+          {retriesEnvOverride ? (
+            <p className="muted text-control">
+              Set by the service environment OCX_MODEL_REQUEST_MAX_RETRIES:{" "}
+              {retriesEffective === 0
+                ? "0 retries (one send)"
+                : `${retriesEffective} retries (${retriesEffective + 1} sends)`}
+              {" Saved value: " + (shadowCall?.modelRequestMaxRetriesConfigured ?? "unset") + "."}
+            </p>
+          ) : !retriesKnown ? (
+            <p className="muted text-control">Needs a newer proxy to edit.</p>
+          ) : retriesEffective === 0 ? (
+            <p className="muted text-control">No proxy retries: first send only.</p>
+          ) : null}
+          <p className="muted text-control">
+            Retry model HTTP 4xx/5xx errors up to N times (N+1 sends). Set 0 for one send only.
+            Client retries are separate. Default 3.
+          </p>
+        </div>
         <div className="models-phantom-section shadow-page-section">
           <h3 className="shadow-page-heading">Empty completion replay</h3>
           <div className="models-shadow-row row muted text-control">

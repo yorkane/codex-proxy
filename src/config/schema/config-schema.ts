@@ -1,5 +1,5 @@
 import { MAIN_ACCOUNT_HARD_LOCK_MIN_PERCENT } from "../../codex/quota-types";
-import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT } from "../../lib/model-request-retry";
+import { MODEL_REQUEST_MAX_RETRIES_LIMIT, MODEL_REQUEST_MAX_RETRIES_MIN } from "../../lib/model-request-retry";
 import { EMPTY_COMPLETION_RETRY_MAX_LIMIT } from "../../lib/empty-completion-budget";
 import { validRemainingQuotaAccountIds } from "../../codex/account-use-remaining";
 import * as z from "zod/v4";
@@ -264,13 +264,14 @@ export const configSchema = z.object({
   // to undefined, which resolves to the historical auto-open behavior.
   oauthOpenBrowser: z.boolean().optional().catch(undefined),
   showCodexCredits: z.boolean().optional().catch(false),
-  // The unified model-request retry budget. The accepted range is the resolution range: a
-  // malformed hand edit (a string, a 1.5, a 5, a 999) degrades to absent, which the leaf
-  // resolves to the floor, so the operator always gets at least the mandated 10 retries.
-  // Candidate writes reject the malformed value through the boundary validator in
-  // src/config/diagnostics.ts before this degrading schema runs.
+  // The unified model-request retry budget (0..5; 0 disables proxy-side model HTTP retries).
+  // The accepted range is the resolution range: a malformed hand edit (a string, a 1.5) and
+  // an out-of-range number (a legacy 10, a 999) both degrade to absent, which the leaf
+  // resolves to the default 3 -- an old on-disk 10 never survives as a value and is never
+  // migrated to 5 either. Candidate writes reject the malformed value through the boundary
+  // validator in src/config/diagnostics.ts before this degrading schema runs.
   modelRequestMaxRetries: z.number().int()
-    .min(DEFAULT_MODEL_REQUEST_MAX_RETRIES)
+    .min(MODEL_REQUEST_MAX_RETRIES_MIN)
     .max(MODEL_REQUEST_MAX_RETRIES_LIMIT)
     .optional()
     .catch(undefined),

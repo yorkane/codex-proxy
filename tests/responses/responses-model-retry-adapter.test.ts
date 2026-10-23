@@ -1,12 +1,13 @@
 /**
  * 统一模型请求 lane 的 adapter 路径合同（fork 2026-10-23 用户裁决）。
  *
- * 用户合同：所有真实上游模型 HTTP 4xx/5xx 必须按统一预算重试至少 10 次（11 次发送），
- * env `OCX_MODEL_REQUEST_MAX_RETRIES` 只可上调（上限 100），config 可配到 100。钉四件事：
+ * 用户合同（2026-10-23 改约）：所有真实上游模型 HTTP 4xx/5xx 按统一预算重试，默认 3 次
+ * （4 次发送），env `OCX_MODEL_REQUEST_MAX_RETRIES` 与 config 同受范围 0..5 约束（env 越界
+ * 钳到 5，config 越界回落默认 3）。钉四件事：
  * 1. generic（无 transientRetryOn5xx 的 openai-chat key provider）初始发送现在进统一
  *    ladder：400 也重试，恰好 modelRequestMaxAttempts() 次物理发送，全程计入请求 ledger。
  * 2. 一个逻辑请求一个预算：初始 ladder 打满后 recovery leg（rebuildAndRefetch）拿 0 发送，
- *    以 429 request_send_budget_exhausted 收场，绝不放大到 11+。
+ *    以 429 request_send_budget_exhausted 收场，绝不放大到预算之外。
  * 3. 401 在无轮换池的 key provider 上按合同进同目标 ladder（不轮换身份、不写 cooldown）。
  * 4. 上游 x-should-retry: false / retryable:false 提示不豁免本地重试义务。
  */
@@ -30,8 +31,8 @@ import { isModelHttpErrorForPreflight } from "../../src/server/responses/model-e
 
 const originalFetch = globalThis.fetch;
 let releaseSpendHome: (() => void) | undefined;
-// 统一 ladder 的 11/101 发送合同只钉计数与 ledger 记账；真实指数退避（400ms 起、5s 封顶）
-// 会让单条 11 发行花 ~36s、env 100 的行花 ~490s，超单文件预算。用 jest 假计时器 +
+// 统一 ladder 的 4/6 发送合同只钉计数与 ledger 记账；真实指数退避（400ms 起、5s 封顶）
+// 的时长由 wire 证据钉。用 jest 假计时器 +
 // 排空循环驱动阶梯（tests/lib/model-request-http-retry.test.ts 的既有范式）：退避的
 // 真实时长由 helper 层测试与 wire 证据钉，本文件只钉发送次数。
 async function drain(maxTicks = 400): Promise<void> {
@@ -115,7 +116,7 @@ const totalSends = (logCtx: RequestLogContext): number =>
   (logCtx.attempts ?? []).reduce((sum, attempt) => sum + (attempt.sendCount ?? 0), 0);
 
 describe("unified model retry lane on the generic adapter path", () => {
-  test("the default ladder is 11 physical sends for a plain 503", async () => {
+  test("the default ladder is 4 physical sends for a plain 503", async () => {
     const upstream = failingResponses(503);
     const { logCtx } = await deliver(singleTargetConfig(), "model-plain");
     expect(upstream.sends).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
@@ -143,21 +144,22 @@ describe("unified model retry lane on the generic adapter path", () => {
     expect(totalSends(logCtx)).toBe(DEFAULT_MODEL_REQUEST_MAX_RETRIES + 1);
   });
 
-  test("the env raises the ladder: 100 retries = 101 sends", async () => {
+  test("the env raises the ladder to the ceiling: 5 retries = 6 sends", async () => {
+    // 2026-10-23 改约：范围 0..5，env 100 越界钳 5 → 6 送（意图不变：env 抬升阶梯到顶）。
     process.env[MODEL_REQUEST_MAX_RETRIES_ENV] = "100";
     const upstream = failingResponses(503);
     const { logCtx } = await deliver(singleTargetConfig(), "model-plain");
-    expect(upstream.sends).toBe(101);
-    expect(totalSends(logCtx)).toBe(101);
+    expect(upstream.sends).toBe(6);
+    expect(totalSends(logCtx)).toBe(6);
   });
 });
 
 describe("recovery legs share the one ladder budget", () => {
-  test("a key-429 rotation after the exhausted ladder is refused, sends stay 11", async () => {
-    // Two-key pool makes the 429 rotation arm eligible; the initial ladder spends all 11
+  test("a key-429 rotation after the exhausted ladder is refused, sends stay at the budget", async () => {
+    // Two-key pool makes the 429 rotation arm eligible; the initial ladder spends the whole
     // first, so the rotation hop's reserveDispatch hits total-exhausted and the request
-    // answers with the real upstream 429 at 11 sends. A recovery leg must not re-arm a
-    // fresh 11 on top of the exhausted ladder.
+    // answers with the real upstream 429 at the default budget. A recovery leg must not
+    // re-arm a fresh ladder on top of the exhausted one.
     const config = {
       defaultProvider: "pool",
       providers: { pool: keyChatProvider("pool", {

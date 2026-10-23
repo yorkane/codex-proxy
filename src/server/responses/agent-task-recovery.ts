@@ -3,7 +3,7 @@ import { decodeJwtPayload, extractAccountId } from "../../oauth/chatgpt";
 import type { OcxConfig } from "../../types";
 import { boundedBodyDecodeFailure, readBoundedResponseBody } from "../../lib/bounded-body";
 import { isModelHttpErrorStatus, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
-import { MODEL_REQUEST_MAX_RETRIES_LIMIT, modelRequestMaxRetries } from "../../lib/model-request-retry";
+import { modelRequestMaxRetries } from "../../lib/model-request-retry";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
 import { MAX_AGENT_TASK_CIPHERTEXT_BYTES, MAX_AGENT_TASK_ENCRYPTED_PARTS, structurallyValidFernetTokens } from "./encrypted-payload";
 import {
@@ -36,10 +36,10 @@ const OPENAI_TOKEN_AUDIENCE = "https://api.openai.com/v1";
 const MAX_ASSIGNMENT_BYTES = 2 * 1024 * 1024;
 const MAX_RECOVERY_RESPONSE_BYTES = 4 * 1024 * 1024;
 const CACHE_SCOPE_KEY = randomBytes(32);
-// 统一模型合同（2026-10-23）：recovery 是一次真 ChatGPT Codex 模型调用，4xx/5xx 全状态按
-// 统一预算重试（env > config > 地板 10）。legacy `retries` 只可抬升该预算、永不压到地板下；
-// 钳制上界与 leaf 一致（100）。retries  stays inside the caller's window, admission scope, and
-// shared flight (#3661).
+// 统一模型合同（2026-10-23 裁决）：recovery 是一次真 ChatGPT Codex 模型调用，4xx/5xx 全状态
+// 按统一预算重试（env > config > 默认 3，范围 0..5）。统一 leaf 是硬上限，legacy `retries`
+// 不再扩大它（legacy 值解析后钳在 MAX_RECOVERY_RETRIES，永不超过统一范围）。retries stays
+// inside the caller's window, admission scope, and shared flight (#3661).
 const MAX_RECOVERY_RETRIES = 2;
 /** 整条 recovery ladder 的总响应上界：逐-attempt 窗口累加之外再封一道，绝不无限。 */
 const RECOVERY_LADDER_MAX_MS = 15 * 60_000;
@@ -541,10 +541,13 @@ async function requestRecovery(
 ): Promise<AgentTaskRecoveryResolution> {
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? 45_000;
-  // 统一模型预算：leaf（env > 传入配置 > 地板 10）是基线，legacy `retries` 只可抬升它。
-  const unifiedRetries = modelRequestMaxRetries(options.modelRequestMaxRetries);
-  const raised = Number.isFinite(options.retries) ? Math.max(0, Math.floor(options.retries!)) : 0;
-  const retries = Math.min(MODEL_REQUEST_MAX_RETRIES_LIMIT, Math.max(unifiedRetries, raised));
+  // 统一模型预算：leaf（env > 传入配置 > 默认 3，钳 0..5）是本 ladder 的**硬上限**。
+  // 旧形态 `max(unified, legacyRetries)` 会让全局设 0（关闭代理内模型 HTTP 重试）时，
+  // 既有 agentTaskRecovery.retries=2 仍然重试 2 次——违背「统一 leaf 是总额权威」。
+  // 旧默认 10 抬升永远覆盖 legacy 的 0..2，掩盖了这条漏口；默认降到 3、范围收到 0..5 后
+  // 它变成可观察的行为差异，所以这里以 unified 为准。`options.retries` 字段与它的解析、
+  // 校验、配置面全部保留（配置兼容），只是不再扩大统一预算。
+  const retries = modelRequestMaxRetries(options.modelRequestMaxRetries);
   // `timeoutMs` 现在是**每次 attempt** 的响应窗口：共享 deadline 会在统一预算跑满前截断，
   // root 裁决逐 attempt 延长。整条 ladder 仍有界 = min(窗口×(重试+1), LADDER_MAX)，绝不无限。
   const ladderDeadlineMs = Math.min(RECOVERY_LADDER_MAX_MS, Math.max(timeoutMs, timeoutMs * (retries + 1)));

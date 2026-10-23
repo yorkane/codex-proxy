@@ -18,7 +18,7 @@ import { configReasoningPinsConfigError } from "./provider-validation";
 import { loopbackCompanionAllowed } from "../codex/loopback-target";
 import { UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD } from "../codex/upstream-host-health";
 import { EMPTY_COMPLETION_RETRY_MAX_LIMIT } from "../lib/empty-completion-budget";
-import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT } from "../lib/model-request-retry";
+import { MODEL_REQUEST_MAX_RETRIES_LIMIT, MODEL_REQUEST_MAX_RETRIES_MIN } from "../lib/model-request-retry";
 import { MAX_APP_OWNED_MEMORY_BUDGET_MB, MIN_APP_OWNED_MEMORY_BUDGET_MB } from "../lib/app-owned-memory";
 import { isMissingPathError } from "./atomic-write";
 import { getConfigDir, getConfigPath } from "./paths";
@@ -539,11 +539,11 @@ function dropCodexSafetyBufferingError(value: unknown): string | null {
 /**
  * The unified model-request retry budget, validated as an integer in the accepted range.
  *
- * The requirement is a floor: every model request retries at least 10 times on a 4xx/5xx, so
- * the persisted field only means anything inside 10-100. A hand edit with the wrong shape (a
- * "25" string, a 1.5, a 0, a 999) must not load as a config the pipeline quietly widens: the
- * operator believes they configured 0 and they get 10. It is rejected on write and degraded to
- * absent on load (which the leaf resolves to the floor), so the field either means what it
+ * The accepted range is 0-5 (0 disables proxy-side model HTTP retries, the default is 3), so
+ * the persisted field only means anything inside 0-5. A hand edit with the wrong shape (a
+ * "25" string, a 1.5, a 6, a 999, a legacy 10 from the pre-2026-10-23 floor era) must not
+ * load as a config the pipeline quietly reinterprets. It is rejected on write and degraded to
+ * absent on load (which the leaf resolves to the default 3), so the field either means what it
  * says or says nothing at all — the same pair as `emptyCompletionRetryMax`.
  */
 function modelRequestMaxRetriesError(value: unknown): string | null {
@@ -551,9 +551,10 @@ function modelRequestMaxRetriesError(value: unknown): string | null {
   if (!raw || !Object.hasOwn(raw, "modelRequestMaxRetries")) return null;
   const retries = raw.modelRequestMaxRetries;
   if (retries === undefined) return null;
+  if (retries === null) return null; // JSON null clears the key; an absent value is valid.
   if (typeof retries !== "number" || !Number.isInteger(retries)
-    || retries < DEFAULT_MODEL_REQUEST_MAX_RETRIES || retries > MODEL_REQUEST_MAX_RETRIES_LIMIT) {
-    return `schema_invalid: modelRequestMaxRetries: must be an integer from ${DEFAULT_MODEL_REQUEST_MAX_RETRIES} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}`;
+    || retries < MODEL_REQUEST_MAX_RETRIES_MIN || retries > MODEL_REQUEST_MAX_RETRIES_LIMIT) {
+    return `schema_invalid: modelRequestMaxRetries: must be an integer from ${MODEL_REQUEST_MAX_RETRIES_MIN} to ${MODEL_REQUEST_MAX_RETRIES_LIMIT}`;
   }
   return null;
 }

@@ -112,7 +112,7 @@ const totalSends = (logCtx: RequestLogContext): number =>
   sendCounts(logCtx).reduce((sum, count) => sum + count, 0);
 
 /**
- * Fake-clock 驱动：统一 lane 的 11 送阶梯在真实时钟下要烧满 30s+ 指数退避；本文件钉的是
+ * Fake-clock 驱动：统一 lane 的默认 4 送阶梯在真实时钟下要烧满指数退避；本文件钉的是
  * 发送计数，不是墙钟。启用 jest 假计时器后把工作交给 drain 循环推进（每 tick 之间冲刷
  * 微任务，让 fetch mock 的 Promise 链继续）。生产 delay 语义未动。
  */
@@ -186,12 +186,12 @@ describe("upstream sends per logical request", () => {
 
       // Reported together, with the status, so a turn that never reaches the adapter says so
       // instead of presenting as an empty URL list. 统一模型 lane 后 Devin 云端的 500 是
-      // 模型 HTTP 错误：transport 在统一预算内烧到权威 11 送；本行钉的不变量不变——
+      // 模型 HTTP 错误：transport 在统一预算内烧到权威默认 4 送（2026-10-23 改约）；本行钉的不变量不变——
       // 每个物理 URL 调用恰好记一次 send（chatCalls === totalSends），不遗漏不双计。
       expect({
         chatCalls: urls.filter(url => url.includes("GetChatMessage")).length,
         totalSends: totalSends(logCtx),
-      }, `status ${response.status}: ${body.slice(0, 200)}`).toEqual({ chatCalls: 11, totalSends: 11 });
+      }, `status ${response.status}: ${body.slice(0, 200)}`).toEqual({ chatCalls: 4, totalSends: 4 });
     } finally {
       dropSpendHome();
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -304,11 +304,11 @@ describe("upstream sends per logical request", () => {
 
     expect(response.status).toBe(502);
     await response.text();
-    // 统一模型请求合同（2026-10-23）：单一权威 11 送（10 次重试 + 首发）全部是普通阶梯
+    // 统一模型请求合同（2026-10-23 改约）：单一权威 4 送（3 次重试 + 首发）全部是普通阶梯
     // 可消费的 base——provider 行的 attempts:3 只可抬高 cap，压不动地板。旧合同的
-    // "3 送 + 第 4 送作为 reserve" 形态在 11 之内不存在。
-    expect(upstream.authorizations).toHaveLength(11);
-    expect(totalSends(logCtx)).toBe(11);
+    // "3 送 + 第 4 送作为 reserve" 形态在统一 lane 不存在。
+    expect(upstream.authorizations).toHaveLength(4);
+    expect(totalSends(logCtx)).toBe(4);
   });
 
   test("a one-target combo reduces to exactly the single-target shape", async () => {
@@ -320,10 +320,10 @@ describe("upstream sends per logical request", () => {
 
     expect(response.status).toBe(502);
     await response.text();
-    // 统一合同：combo 派生总额 = 权威 11（绝对数，不再 3+hops+reserve），零跳因此与直连
+    // 统一合同：combo 派生总额 = 权威默认 4（绝对数，不再 3+hops+reserve），零跳因此与直连
     // 同形的含义从"3 送"更新为"同一个权威总额"。
-    expect(upstream.authorizations).toHaveLength(11);
-    expect(sendCounts(logCtx)).toEqual([11]);
+    expect(upstream.authorizations).toHaveLength(4);
+    expect(sendCounts(logCtx)).toEqual([4]);
   });
 
   test("a denied first combo reservation makes no upstream request", async () => {
@@ -345,19 +345,20 @@ describe("upstream sends per logical request", () => {
   });
 
   test("a denied later combo reservation returns the prior upstream failure", async () => {
-    // 统一合同下这行的形状：caller 预算按生产 ingress 的统一 fund 构造（11/11），请求
-    // 进入时已花 10 送——首发目标的 leg 只剩 per-target holdback 给的 1 送，烧掉后共享
+    // 统一合同（2026-10-23 改约）下这行的形状：caller 预算按生产 ingress 的统一 fund
+    // 构造（4/4 = 默认 3 重试 + 首发），请求进入时已花 3 送——首发目标的 leg 只剩
+    // per-target holdback 给的 1 送，烧掉后共享
     // ledger 顶满，第二 combo 目标的预留被拒，返回首发真实 429（本地预算拒绝不得伪装
     // provider 失败，也不许合成人顶掉真实终态）。
     const budget = createRequestExecutionBudget({
       ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
-      maxTotalModelSends: 11,
-      baseSendAllowance: 11,
+      maxTotalModelSends: 4,
+      baseSendAllowance: 4,
     });
-    budget.used = 10;
+    budget.used = 3;
     const targets = comboOverTargets(2);
     (targets.providers as Record<string, Record<string, unknown>>).t0!.transientRetryOn5xx =
-      { enabled: true, attempts: 11 };
+      { enabled: true, attempts: 4 };
     const hits: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       hits.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -375,14 +376,14 @@ describe("upstream sends per logical request", () => {
   });
 
   test("a denied later combo reservation preserves a classified 413 response", async () => {
-    // 与 429 行同形：统一 lane 里 413 也是模型错误，进入时已花 10 送，首发只剩 1 送；
+    // 与 429 行同形：统一 lane 里 413 也是模型错误，进入时已花 3 送（权威 4/4），首发只剩 1 送；
     // 真实 413 的分类必须原样穿过（终态分类保留），第二目标预留被拒。
     const budget = createRequestExecutionBudget({
       ...CODEX_TEXT_GUARDED_BUDGET_POLICY,
-      maxTotalModelSends: 11,
-      baseSendAllowance: 11,
+      maxTotalModelSends: 4,
+      baseSendAllowance: 4,
     });
-    budget.used = 10;
+    budget.used = 3;
     const hits: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
       hits.push(new Headers(init?.headers).get("authorization") ?? "");
@@ -432,9 +433,12 @@ describe("upstream sends per logical request", () => {
   test("a thirteen-target combo burns the unified authority in target order", async () => {
     // The reported shape: a long failover combo exhausted the allowance after a few providers
     // and returned the last 502 while later declared targets were never attempted at all.
-    // 统一合同改变了这一行的期望：总额是权威 11 的绝对数，不再随声明目标数放大
-    // (3+hops+reserve 在 13 目标下要给 16 送，突破配置)。因此"每个声明目标都被触及"
-    // 在 13 目标下不再成立——前 11 送按目标顺序烧完后返回最后一次真实 502。
+    // 统一合同（2026-10-23 改约）下这一行的期望：总额是权威默认 4 送的绝对数，不再随
+    // 声明目标数放大（3+hops+reserve 在 13 目标下要给 16 送，突破配置）。共享 ledger 下
+    // 首目标 ladder 烧掉它的 per-target 份额后余量继续按声明顺序分发（每目标有
+    // holdback 保证至少一送），权威烧穿后剩余目标不再被触及——"每个声明目标都被触及"
+    // 在 13 目标下不成立。不变量保留：前若干目标按序触及、总额 ≤ 派生 policy 上限、
+    // 逐目标记账与物理发送一致。
     const upstream = alwaysFailing(502, "upstream busy");
     const logCtx: RequestLogContext = { model: "", provider: "" };
 
@@ -444,7 +448,7 @@ describe("upstream sends per logical request", () => {
     expect(response.status).toBe(502);
     await response.text();
     const bearers = upstream.authorizations;
-    // 前若干目标按声明顺序被触及（首目标独占整条 ladder），总数恰为权威上限。
+    // 前若干目标按声明顺序被触及（首目标 ladder + 逐目标 holdback），总数 ≤ 权威上限。
     expect(new Set(bearers).size).toBeGreaterThanOrEqual(2);
     expect(bearers[0]).toBe("Bearer sk-t0");
     expect(bearers).toContain("Bearer sk-t1");

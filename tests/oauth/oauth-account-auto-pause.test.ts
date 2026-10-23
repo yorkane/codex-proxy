@@ -264,16 +264,16 @@ test("Antigravity normalization retains permanent refusal and auto-pause ownersh
   const refusals: Response[] = [];
   // The Google adapter runs its own unified-lane ladder (no deferral scope at this seam):
   // the immediate pause settles on the first refusal, the ladder keeps retrying the real 403
-  // to the 11-send budget, and the normalized terminal inherits the permanent-refusal marker.
+  // to the default 4-send budget (2026-10-23 amended), and the normalized terminal inherits the permanent-refusal marker.
   const response = await fetchGoogleWithRetry("Antigravity", { url: "https://example.test", method: "POST", headers, body: "{}" }, {
     executor: (async () => { const r = await observe(refusal()); refusals.push(r); return r; }) as typeof fetch,
   }, );
   expect(response.status).toBe(403);
-  expect(refusals.length).toBe(11);
+  expect(refusals.length).toBe(4);
   expect(wasAccountAutoPaused(refusals[0]!)).toBe(true);
   expect(wasPermanentAccountRefusal(response)).toBe(true);
-  // The unified lane scheduled a real backoff per round; the seam spy recorded ten of them.
-  expect(delays.length).toBe(10);
+  // The unified lane scheduled a real backoff per round; the seam spy recorded three of them.
+  expect(delays.length).toBe(3);
   restoreImmediateBackoff();
 });
 

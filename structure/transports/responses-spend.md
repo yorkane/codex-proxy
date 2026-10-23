@@ -275,10 +275,11 @@ freezes the finite positive limit L when the request starts. The default guarded
 the initial bounded OAuth request profile allows at most eighteen. 统一模型请求 lane 改写的
 是 ingress 的 fund 而不是这个默认常量：`createInferenceSendBudget` 铸造时直接把
 `maxTotalModelSends = baseSendAllowance` 抬到权威 attempts（`src/lib/model-request-retry.ts`：
-env `OCX_MODEL_REQUEST_MAX_RETRIES` > `config.modelRequestMaxRetries` > 10 次重试 + 首发 = 11，
-地板 10、上限 100，env 可抬到 101），第 11 送不要求 reserve-funded 类；显式 caller 预算与
+env `OCX_MODEL_REQUEST_MAX_RETRIES` > `config.modelRequestMaxRetries` > 默认 3 次重试 + 首发 = 4，
+范围 0..5、attempts 1..6；0 关闭模型 HTTP 重试，funded=1 后共享 ledger 拒绝第二发，
+base=total 时最后一送不要求 reserve-funded 类）；显式 caller 预算与
 fixture 的 4/3 精确性不受影响。`expandInferenceOAuthSendBudget` 的 roster 抬升钳在该权威额
-之内（4×3=12 顶不破 11），Combo 派生 policy 的总额同样 = 权威 attempts（绝对数，不再是
+之内（0..5 授权下 roster 从不自扩预算），Combo 派生 policy 的总额同样 = 权威 attempts（绝对数，不再是
 3+hops+reserve 随目标数放大）。权威读取与 leg 询问经 `request-send-budget.ts` 的
 `requestModelSendLimit`（预算自身 policy 的 LIVE 值，0 是精确的 0）传给
 `transientSendCapFor` 第三参数，调用点不重复读 env/config。合同正文见

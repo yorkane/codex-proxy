@@ -38,7 +38,8 @@ let testDir = "";
 let previousHome: string | undefined;
 
 beforeEach(() => {
-  // Unified model lane: the native ladder retries 4xx/5xx up to the shared 11-send floor;
+  // Unified model lane: the native ladder retries 4xx/5xx up to the shared 4-send default
+  // (2026-10-23: 3 retries + first send);
   // fast timers keep the contract testable without paying the backoff in wall time.
   immediateBackoff();
   previousHome = process.env.OPENCODEX_HOME;
@@ -262,16 +263,16 @@ describe("managed native Messages", () => {
 
   test("key failover keeps requested effort on both physical attempts", async () => {
     // Unified model lane: a single 401 now recovers on the SAME key inside the ladder, so the
-    // pool fixture keeps the failed credential refusing for the whole 11-send ladder; the
+    // pool fixture keeps the failed credential refusing for the whole 4-send ladder; the
     // rotation fires once the ladder is spent and the rotated key carries the identical body.
-    const config = fixtureConfig(startUpstream((entry, index) => index < 11
+    const config = fixtureConfig(startUpstream((entry, index) => index < 4
       ? Response.json({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }, { status: 401 })
       : ok(entry)), { pool: true });
     const { response, requestId } = await send(config, { ...SOURCE_BODY, output_config: { effort: "xhigh" }, stream: false });
-    // 统一 lane（实测 11 送全 401 终局）：ladder 花光共享授权后轮换门无发送可花，本请求
+    // 统一 lane（实测 4 送全 401 终局）：ladder 花光共享授权后轮换门无发送可花，本请求
     // 不换 key。验证点保持在物理层：ladder 的每一送都携带请求的 effort 与逐字相同的 body。
     expect(response.status).toBe(401);
-    expect(seen).toHaveLength(11);
+    expect(seen).toHaveLength(4);
     for (const entry of seen) expect(entry.body).toEqual(seen[0]!.body);
     const row = rowFor(requestId);
     expect(row.protocolTrace?.mode).toBe("native");
@@ -291,8 +292,8 @@ describe("managed native Messages", () => {
     const { response, requestId } = await send(config, body);
     expect(rowFor(requestId).protocolTrace?.mode).toBe("native");
     // Unified model lane: every 429 of the ladder is a physical send, and the ladder is
-    // bounded by the request's shared 11-send authority on both ledger shapes.
-    expect(seen).toHaveLength(11);
+    // bounded by the request's shared 4-send authority on both ledger shapes.
+    expect(seen).toHaveLength(4);
     expect(response.status).toBe(429);
     const records = readFileSync(join(testDir, "spend-ledger.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(records.filter(record => record.kind === "reserve")).toHaveLength(seen.length);
@@ -300,7 +301,7 @@ describe("managed native Messages", () => {
       const next = await send(config, body);
       expect(next.response.status).toBe(429);
       expect(next.response.headers.get("x-opencodex-local-refusal")).toBe("workflow_spend_exhausted");
-      expect(seen).toHaveLength(11);
+      expect(seen).toHaveLength(4);
     }
   }, 20_000);
 
@@ -395,15 +396,15 @@ describe("managed native Messages", () => {
       { status: 429, headers: { "retry-after": "30" } })), { pool: true });
     config.providers.anth!.requestPacing = { enabled: true, keySelection: "round-robin" };
     forgetApiKeyRotationCursor("anth"); saveConfig(config);
-    // 统一 lane：round-robin 每请求换 key，每个请求的 429 在同 key ladder 上烧满 11 送
+    // 统一 lane：round-robin 每请求换 key，每个请求的 429 在同 key ladder 上烧满 4 送
     // （RA=30 由 fast-timer 记录秒过）并在终局把该 key 记冷却；两把 key 逐一冷却后，
     // 下一请求面对全冷却池零上游发送地本地 429 拒绝——用例的核心验证点保持在最后一跳。
     expect((await send(config, { ...SOURCE_BODY, stream: false })).response.status).toBe(429);
-    expect(seen).toHaveLength(11);
+    expect(seen).toHaveLength(4);
     expect((await send(config, { ...SOURCE_BODY, stream: false })).response.status).toBe(429);
-    expect(seen).toHaveLength(22);
+    expect(seen).toHaveLength(8);
     const next = await send(config, { ...SOURCE_BODY, stream: false });
-    expect(next.response.status).toBe(429); expect(seen).toHaveLength(22);
+    expect(next.response.status).toBe(429); expect(seen).toHaveLength(8);
     expect(Number(next.response.headers.get("retry-after"))).toBeGreaterThan(0);
   });
 
@@ -451,9 +452,9 @@ describe("managed native Messages", () => {
     const { requestId, response, text } = result;
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe(expectedRetryAfter);
-    // 统一 lane：429 烧满 11 送 ladder（RA 下限由 fast-timer 记录秒过），pacing 策略
+    // 统一 lane：429 烧满 4 送 ladder（RA 下限由 fast-timer 记录秒过），pacing 策略
     // （本地建议头 Retry-After 与 guidance 文案）是原验证点，逐字保持。
-    expect(seen).toHaveLength(11);
+    expect(seen).toHaveLength(4);
     expect(seen[0]!.path).toBe(providerName === "opencode-zen" ? "/zen/v1/messages" : "/v1/messages");
     const row = rowFor(requestId);
     expect(row.protocolTrace?.mode).toBe("native");

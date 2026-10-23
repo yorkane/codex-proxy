@@ -1,5 +1,11 @@
 import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
-import { DEFAULT_MODEL_REQUEST_MAX_RETRIES, MODEL_REQUEST_MAX_RETRIES_LIMIT, modelRequestMaxRetries } from "../lib/model-request-retry";
+import {
+  DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+  MODEL_REQUEST_MAX_RETRIES_LIMIT,
+  MODEL_REQUEST_MAX_RETRIES_MIN,
+  modelRequestMaxRetries,
+  modelRequestRetryEnvOverride,
+} from "../lib/model-request-retry";
 import { contextTierRecordConfigError, modelCapabilitiesConfigError } from "../config/provider-validation";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
@@ -1348,12 +1354,16 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     oauthOpenBrowser: config.oauthOpenBrowser !== false,
     showCodexCredits: config.showCodexCredits === true,
     // The unified model-request retry budget: the effective value as this process resolves it
-    // (env > config > the 10-retry floor) beside what is persisted, so a read of the safe config
-    // reports the number the pipeline will use rather than a stale persisted figure.
+    // (env > config > default 3; 0 disables proxy-side model HTTP retries) beside what is
+    // persisted, so a read of the safe config reports the number the pipeline will use rather
+    // than a stale persisted figure. Default/Min/Limit travel together so a UI can render the
+    // control without hardcoding them; EnvOverride is true only for a non-blank finite number.
     modelRequestMaxRetries: modelRequestMaxRetries(config.modelRequestMaxRetries),
     modelRequestMaxRetriesConfigured: config.modelRequestMaxRetries,
-    modelRequestMaxRetriesMin: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+    modelRequestMaxRetriesMin: MODEL_REQUEST_MAX_RETRIES_MIN,
     modelRequestMaxRetriesLimit: MODEL_REQUEST_MAX_RETRIES_LIMIT,
+    modelRequestMaxRetriesDefault: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
+    modelRequestMaxRetriesEnvOverride: modelRequestRetryEnvOverride(),
     providers,
   };
 }
