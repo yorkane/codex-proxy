@@ -21,30 +21,47 @@ Resolution is single-sourced in `src/lib/model-request-retry.ts`, a pure leaf wi
 or `src/server/**` import: environment `OCX_MODEL_REQUEST_MAX_RETRIES` over the caller-supplied
 configured value over the default. Fractions floor. An empty/whitespace environment value is unset; a
 non-empty value that is not a number is not a switch — it falls back to the configured value and then
-to the floor, because a malformed environment must not disable retry protection. A provider-level
-declaration (`transientRetryOn5xx.attempts`) is folded into the `configured` argument by the call
-site, so the effective order is env > provider > global > floor, and a provider value can only raise
-the authority, never press it below the floor. The schema and the write boundary (10-100 integers,
-read-degrade, write-reject) are [here](../config.md).
+to the floor, because a malformed environment must not disable retry protection. The authority for
+the per-request total has exactly three tiers: environment > global `modelRequestMaxRetries`
+> default 10. Ingress funds `maxTotalModelSends` and `baseSendAllowance` with
+`modelRequestMaxAttempts(configured)` in the inference context;
+`transientRetryOn5xx.attempts` on a provider row is not a tier of that authority.
+`transientSendCapFor` keeps it as the legacy per-leg cap candidate only:
+max(authority, provider attempts) minus sends already used, intersected per leg with the shared
+ledger. A provider value can widen one leg above the authority but cannot raise the logical
+request's total past it (attempts 12 on an 11-funded request still ends at 11 physical sends),
+and a low provider value cannot press the authority down. The read/write boundary is asymmetric
+and is documented on [the config surface](../config.md): a hand-edited config value outside
+10-100, a fraction, a negative or a string is malformed, degrades to absent at load, and
+resolves to the default 10 (never clamped to 100); an environment value, once parsed as a number,
+floors fractions and clamps into 10-100. Candidate writes reject the malformed values.
 
 The configured value is a top-level key of the **proxy's own `config.json`**. It is not the injected
 `config.toml` pair `request_max_retries` / `stream_max_retries` that bounds the Codex client's own
 retries (`OCX_CODEX_REQUEST_MAX_RETRIES` / `OCX_CODEX_STREAM_MAX_RETRIES`); the two key families are
 independent, with no aliasing and no inheritance in either direction.
 
-Status: implementation verification is in progress. Focused test files exist for every layer named
-above (`tests/lib/model-request-retry.test.ts`, `tests/lib/model-request-http-retry.test.ts`,
-`tests/lib/model-retry-scope.test.ts`, `tests/lib/native-model-retry.test.ts`,
-`tests/lib/owned-model-retry.test.ts`, `tests/lib/sidecar-model-retry.test.ts`,
-`tests/adapters/model-http-retry.test.ts`, `tests/adapters/google/google-http-model-retry.test.ts`,
-`tests/providers/kiro/kiro-model-retry.test.ts`, `tests/providers/cursor/cursor-model-retry.test.ts`,
-`tests/config/model-request-retry-config.test.ts`, `tests/responses/responses-capacity-pre-output.test.ts`,
-`tests/responses/responses-model-retry-adapter.test.ts`,
-`tests/responses/native-model-retry-ladder.test.ts`,
-`tests/oauth/oauth-account-auto-pause-deferral.test.ts`); the suite is executed centrally by the
-test slot, not claimed here. **Nothing here is deployed or release-admitted**; the release gates in
-the fork operations docs are unchanged by this contract, and no path is claimed to issue exactly 11
-sends: the floor is a minimum, and the limitations named below cut against full-path exactness.
+Focused test files cover every layer named above (
+  `tests/lib/model-request-retry.test.ts`,
+  `tests/lib/model-request-http-retry.test.ts`,
+  `tests/lib/model-retry-scope.test.ts`,
+  `tests/lib/native-model-retry.test.ts`,
+  `tests/lib/owned-model-retry.test.ts`,
+  `tests/lib/sidecar-model-retry.test.ts`,
+  `tests/adapters/model-http-retry.test.ts`,
+  `tests/adapters/google/google-http-model-retry.test.ts`,
+  `tests/providers/kiro/kiro-model-retry.test.ts`,
+  `tests/providers/cursor/cursor-model-retry.test.ts`,
+  `tests/config/model-request-retry-config.test.ts`,
+  `tests/responses/responses-capacity-pre-output.test.ts`,
+  `tests/responses/responses-model-retry-adapter.test.ts`,
+  `tests/responses/native-model-retry-ladder.test.ts`,
+  `tests/oauth/oauth-account-auto-pause-deferral.test.ts`); the suite is executed centrally by the
+test slot, not claimed here. This page defines the contract's behavior and invariants; it carries
+no dynamic publication, deployment, or production state - those facts live in the dated
+operations report of the proxy workspace (`doc/model-request-retry-20261023.md`), not
+here. No path is promised to issue exactly 11 sends: the floor is a minimum, and the limitations
+named below cut against full-path exactness.
 
 ## One ledger, no multiplication
 
@@ -166,9 +183,9 @@ never books sends itself, and every physical send goes through the existing acco
 
 ## Known limits against a strict "every failure retries" reading
 
-The raw-HTTP mandate (400..599 retries within the budget) is wired on the dispatch lane, the adapter
-shells, the native lanes, the sidecars and the runTurn preflight gate, each with focused coverage
-named above. The three limits below are the named exceptions to that mandate, not a general hedge;
+The raw-HTTP mandate (400..599 retried within the budget) is implemented on the dispatch lane, the
+adapter shells, the native lanes, the sidecars and the runTurn preflight gate. The three limits
+below are the named exceptions to that mandate, not a general hedge;
 closing them needs an owner-level restart-protocol decision.
 
 - **Native-control WebSocket multi-response channels**: only a refusal on the **first frame** is
