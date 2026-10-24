@@ -501,6 +501,7 @@ describe("shadow call intercept request path (issue #311)", () => {
   });
 
   test("rewrites gpt-5.6-terra to the configured fallback model", async () => {
+    takeSpendHome();
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
@@ -621,6 +622,14 @@ describe("a combo shadow-call target enters the failover loop (#4129)", () => {
 
   test("a helper call rewritten to a combo hops past a 429 to the second target", async () => {
     takeSpendHome();
+    // The 429 hops to the next combo target once per target. The unified model lane
+    // (7d4957b231) retries a 429 on the same target inside the shared budget, which
+    // would consume the first target's turn here; this row pins the combo hop with the
+    // ladder at its minimum (env=1 -> the combo per-target initial allowance of one
+    // send wins the intersection). Same-target ladder behavior is pinned in
+    // model-request-http-retry.test.ts.
+    const prevModelRetries = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "1";
     const urls: string[] = [];
     const logCtx: RequestLogContext = { model: "", provider: "" };
     globalThis.fetch = (async (url: unknown) => {
@@ -636,6 +645,8 @@ describe("a combo shadow-call target enters the failover loop (#4129)", () => {
     ]);
     const response = await post(config, "gpt-5.6-luna", "turn", logCtx);
 
+    if (prevModelRetries === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+    else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = prevModelRetries;
     expect(response.ok).toBe(true);
     // The whole point: two upstream attempts, in configured order.
     expect(urls).toHaveLength(2);
@@ -878,6 +889,7 @@ describe("shadow phantom-tool allowlist scoping", () => {
   });
 
   test("a shadow-replaced request drops an allowlisted phantom and completes", async () => {
+    takeSpendHome();
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
@@ -915,6 +927,7 @@ describe("shadow phantom-tool allowlist scoping", () => {
   });
 
   test("a NON-shadow request keeps fail-closed behavior for the same name", async () => {
+    takeSpendHome();
     globalThis.fetch = (async () => Response.json({
       choices: [{
         message: {
@@ -966,6 +979,7 @@ describe("shadow phantom-tool allowlist scoping", () => {
     stream: false,
   });
   const phantomFetch = () => {
+    takeSpendHome();
     globalThis.fetch = (async () => Response.json({
       choices: [{
         message: {
@@ -1031,6 +1045,7 @@ describe("shadow phantom-tool allowlist scoping", () => {
   });
 
   test("a direct third-party STREAM gets the gate as well as the budget", async () => {
+    takeSpendHome();
     // The budget is only half the fix: the bridge skips its whole emission-repair layer
     // (name repair, the container drop tier, the filtered-container terminal) unless the
     // serving-route gate rides the translator options. A streaming direct-third-party turn
