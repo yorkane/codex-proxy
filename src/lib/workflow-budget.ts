@@ -143,7 +143,12 @@ export const DEFAULT_WORKFLOW_BUDGET_POLICY: WorkflowBudgetPolicy = {
   // written against is bounded harder by the send and child-count caps. interactiveReserve
   // still fences the fan-out off its own conversation.
   maxConcurrentChildren: 16,
-  maxPhysicalSends: 256,
+  // 2026-10-25 (fork wdev): 256 per 10-minute window proved too tight for this fleet —
+  // production refusals recorded roots at 256/257 sends with 7-8 children, i.e. the
+  // cap fired on ordinary fan-out traffic, not on a runaway shape. 1024 is 4x the
+  // old ceiling and still bounds a runaway inside the window; the concurrency and
+  // distinct-child caps are unchanged.
+  maxPhysicalSends: 1024,
   maxDistinctChildren: 64,
   interactiveReserve: 1,
   maxTrackedRoots: 512,
