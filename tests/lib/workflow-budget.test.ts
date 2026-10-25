@@ -100,6 +100,12 @@ describe("workflow count caps", () => {
     }
   });
 
+  test("the fork send ceiling default is 1024 per window", () => {
+    // 2026-10-25 fork default (235.t fan-out refusals at 256/257 sends); the management
+    // snapshot echoes it on GET /api/workflow-budget, so the operator view is the deployment proof.
+    expect(DEFAULT_WORKFLOW_BUDGET_POLICY.maxPhysicalSends).toBe(1024);
+  });
+
   test("the raised ceiling of 16 refuses at its own boundary and re-admits after release", () => {
     const t0 = 1_700_000_000_000;
     expect(DEFAULT_WORKFLOW_BUDGET_POLICY.maxConcurrentChildren).toBe(16);
