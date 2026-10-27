@@ -44,7 +44,9 @@ async function settleWithFakeTimers<T>(work: () => Promise<T>, maxTicks = 300): 
   let settled = false;
   void promise.then(() => { settled = true; }, () => { settled = true; });
   for (let i = 0; i < maxTicks && !settled; i++) {
-    jest.advanceTimersByTime(5_000);
+    // 步进必须小于 bounded-body 的 5s deadline：每轮归一化+快照的 clone 读取都占一个 tick，
+    // 5s 步进会在读取在途时触发 inactivity 超时，把 profile 页判成 truncated。
+    jest.advanceTimersByTime(250);
     for (let j = 0; j < 30; j++) await Promise.resolve();
   }
   return promise;
