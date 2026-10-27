@@ -329,8 +329,8 @@ A source area can be described by more than one doc, because these docs are orga
 | `src/server/responses/advisor-slot.ts` | [`advisor.md`](advisor.md) |
 | `src/server/responses/anthropic-thinking-recovery.ts` | [`transports/anthropic-thinking-recovery.md`](transports/anthropic-thinking-recovery.md) |
 | `src/server/responses/capacity-pre-output.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
-| `src/server/responses/model-error-preflight.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/server/responses/compact.ts` | [`transports/responses-citations.md`](transports/responses-citations.md) |
+| `src/server/responses/model-error-preflight.ts` | [`transports/model-request-retry.md`](transports/model-request-retry.md) |
 | `src/server/responses/opengateway-completion-guard.ts` | [`providers/opengateway.md`](providers/opengateway.md) |
 | `src/server/responses/passthrough-completion.ts` | [`providers/opengateway.md`](providers/opengateway.md) |
 | `src/server/responses/passthrough-dispatch.ts` | [`providers/opengateway.md`](providers/opengateway.md) |
