@@ -10,7 +10,16 @@ import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与\n// 交还形状，不是预算形状——显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法）。\nconst previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;\nbeforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });\nafterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });\n\nconst GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
+// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与
+// 交还形状，不是预算形状。文件级钉 2（3 发预算）：credit refusal 归一化为 429+same-target-hold
+// 后 lane 停在同票，dispatch 换账号的轮换 hop 花请求发送预算——实测钉 1 时轮换 hop 报
+// request_send_budget_exhausted，钉 2 时 authorizations 恰为 [账号0, 账号1] 两发。守
+// 「单发不轮换」合同的一般 400 用例在用例内局部覆盖回 0（同 5cd6c044 轮 combo 行的钉法）。
+const previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+beforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "2"; });
+afterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });
+
+const GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
 const CREDIT_MESSAGE = "You have insufficient credits to make this request. Please purchase more credits to continue using the service.";
 const COMPLETED = [
   JSON.stringify({ type: "text-delta", text: "OK" }),
@@ -79,9 +88,16 @@ describe("Command Code credit refusal through the dispatch path", () => {
   }, 20_000);
 
   test("an ordinary BAD_REQUEST stays on the account and is never treated as exhaustion", async () => {
+    // The unified lane replays an ordinary 400 on the same credential inside the shared
+    // budget, which breaks the upstream single-send assertion; this row pins the
+    // classification contract with 0 retries = 1 send (same-target replay shape is pinned
+    // in model-request-http-retry.test.ts, not here).
+    const prevModelRetries = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0";
     const { response, body, authorizations } = await sendWithFirstAccountRefusal(() => Response.json(
       { success: false, error: { code: "BAD_REQUEST", message: "invalid params" } }, { status: 400 },
     ));
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = prevModelRetries;
 
     expect(response.status, body).toBe(400);
     expect(authorizations).toEqual(["Bearer synthetic-command-0"]);

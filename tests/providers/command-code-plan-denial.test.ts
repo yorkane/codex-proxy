@@ -27,7 +27,16 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 // Combo and policy routes each make two loopback-free sends; suite load can push past 5s.
 setDefaultTimeout(30_000);
 
-// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与\n// 交还形状，不是预算形状——显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法）。\nconst previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;\nbeforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });\nafterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });\n\nconst GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
+// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与
+// 交还形状，不是预算形状。文件级钉 2（3 发预算）：适配层 effort-repair 链需 2 发、dispatch 的
+// combo hop / web-search sidecar combo / policy 下一候选最多需 3 发；plan refusal 被标
+// same-target-hold，lane 即停，refusal-once 类断言在钉 2 下仍是首发单发。守「单发」分类合同
+// 的 lookalike 用例在用例内局部覆盖回 0（同 5cd6c044 轮 combo 行的逐用例钉法）。
+const previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+beforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "2"; });
+afterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });
+
+const GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
 const REFUSED_MODEL = "google/gemini-4-argon";
 const SERVED_MODEL = "deepseek/deepseek-v4-flash";
 // Synthetic canaries: none of these may reach a client body or a log line. The key canary is
@@ -97,6 +106,11 @@ describe("Command Code MODEL_NOT_IN_PLAN refusal at the adapter", () => {
   });
 
   test("leaves every other 403 and every lookalike untouched", async () => {
+    // The lane replays an unclaimed 403 on the same target inside the shared budget, which
+    // breaks this row's single-send classification assertion; pin 0 here so the row tests
+    // the refusal classifier, not the replay shape (pinned in model-request-http-retry.test.ts).
+    const prevModelRetries = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0";
     const fixtures: Array<{ status: number; body: unknown }> = [
       { status: 403, body: { success: false, error: { code: "FORBIDDEN", message: "Access denied" } } },
       { status: 403, body: planRefusalBody("MODEL_NOT_IN_PLAN_OTHER: something else") },
@@ -120,6 +134,7 @@ describe("Command Code MODEL_NOT_IN_PLAN refusal at the adapter", () => {
       expect(response.headers.get("x-opencodex-refusal")).toBeNull();
       expect(await response.json()).toEqual(fixture.body);
     }
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = prevModelRetries;
   });
 
   test("fails open for malformed, oversized and invalid UTF-8 bodies", async () => {

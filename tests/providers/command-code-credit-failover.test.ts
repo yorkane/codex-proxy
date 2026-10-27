@@ -3,7 +3,14 @@ import { createCommandCodeAdapter } from "../../src/adapters/command-code";
 import { resetCommandCodeReasoningEffortsForTest } from "../../src/providers/command-code-efforts";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 
-// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与\n// 交还形状，不是预算形状——显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法）。\nconst previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;\nbeforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });\nafterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });\n\nconst CREDITS_EXHAUSTED = {
+// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与
+// 交还形状，不是预算形状——文件级显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法），
+// 唯一例外是 effort-repair 链用例，在用例内局部覆盖为 1（首发 + repair 重投 = 2 发）。
+const previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+beforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });
+afterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });
+
+const CREDITS_EXHAUSTED = {
   success: false,
   error: {
     code: "BAD_REQUEST",
@@ -167,6 +174,12 @@ describe("Command Code insufficient-credit refusal", () => {
   });
 
   test("normalizes the retry response after a reasoning-effort rejection", async () => {
+    // The adapter's reasoning-effort repair chain spends two physical sends: the first is
+    // rejected with a 400 effort refusal, the repair replay carries the credit refusal.
+    // The lane's shared budget funds the replay, so this row overrides the file-level pin
+    // to 1 retry = 2 sends; the repair is armed only while the ledger has a send left.
+    const prevModelRetries = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "1";
     let calls = 0;
     const fetchMock = (async () => {
       calls += 1;
@@ -178,6 +191,7 @@ describe("Command Code insufficient-credit refusal", () => {
     const adapter = adapterWith(fetchMock);
     const response = await adapter.fetchResponse(await adapter.buildRequest(parsed("moonshotai/Kimi-K3", "max")));
 
+    process.env.OCX_MODEL_REQUEST_MAX_RETRIES = prevModelRetries;
     expect(calls).toBe(2);
     expect(response.status).toBe(429);
     expect(response.headers.get("x-opencodex-refusal")).toBe("insufficient-credits");
