@@ -304,7 +304,6 @@ export function markJournalInjectedState(
   journal.injectedRootWebSearch = ownership.injectedRootWebSearch ?? null;
   journal.replacedRootWebSearch = ownership.replacedRootWebSearch ?? null;
   journal.injectedRequestMaxRetries = ownership.retryBudget?.injectedRequestMaxRetries ?? null;
-  journal.injectedRequestMaxRetries = ownership.retryBudget?.injectedRequestMaxRetries ?? null;
   journal.injectedStreamMaxRetries = ownership.retryBudget?.injectedStreamMaxRetries ?? null;
   journal.injectedRequestMaxRetriesFromEnv = ownership.retryBudget?.injectedRequestMaxRetriesFromEnv ?? null;
   journal.injectedStreamMaxRetriesFromEnv = ownership.retryBudget?.injectedStreamMaxRetriesFromEnv ?? null;

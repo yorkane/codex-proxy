@@ -834,6 +834,7 @@ async function transientRetryRun(
     // 「模型 4xx/5xx 至少重试 10 次」，2026-10-23 用户裁决）不被上游提示豁免——
     // x-should-retry 从来不是模型 lane 的输入（该 lane 只读 Retry-After）。
     if (res.ok || !isRetryableStatus(res.status) || isNonReplayableResponse(res)
+      || (opts.modelRetryMode === true && isSameTargetRetryHold(res))
       || (opts.modelRetryMode !== true
         && res.headers.get(REPLAY_REFUSAL_NO_RETRY_HEADER) === REPLAY_REFUSAL_NO_RETRY_VALUE)) return res;
     // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
