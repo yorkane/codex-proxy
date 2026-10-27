@@ -21,7 +21,7 @@ import {
   MODEL_NOT_IN_PLAN_CODE,
   MODEL_NOT_IN_PLAN_REFUSAL_MARKER,
 } from "../lib/errors";
-import { markResponseNonReplayable, markSameTargetRetryHold } from "../lib/upstream-retry";
+import { markSameTargetRetryHold } from "../lib/upstream-retry";
 import { CommandCodeToolTextFilter, type CommandCodeDeclaredTools } from "./command-code-tool-text";
 import { EMPTY_COMMAND_CODE_PROJECT_CONTEXT, loadCommandCodeProjectContext } from "./command-code-project-context";
 
@@ -778,9 +778,11 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
         const response = await normalizeCommandCodeRefusal(raw, creditRefusalRotates, modelId, ctx?.abortSignal);
         if (response.ok) return response;
         // A plan refusal is final for this model: no effort downgrade can change the plan,
-        // and no unified-lane replay can change it. Stop the lane with the non-replayable marker.
+        // and no unified-lane replay can change it. Same-target hold stops the lane (the
+        // marker travels with the 400 through dispatch untouched; non-replayable would route
+        // it through the sanitized 502 envelope and lose the model_not_in_plan code).
         if (isVerifiedModelNotInPlanResponse(response)) {
-          markResponseNonReplayable(response);
+          markSameTargetRetryHold(response);
           return response;
         }
         // The credit refusal is account-level: replaying it on the same credential wastes every

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {afterEach, beforeEach, describe, expect, test} from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,7 @@ import type { OcxConfig } from "../../src/types";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
+// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与\n// 交还形状，不是预算形状——显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法）。\nconst previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;\nbeforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });\nafterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });\n\nconst GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
 const CREDIT_MESSAGE = "You have insufficient credits to make this request. Please purchase more credits to continue using the service.";
 const COMPLETED = [
   JSON.stringify({ type: "text-delta", text: "OK" }),

@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import {afterEach, describe, expect, test, beforeEach} from "bun:test";
 import { createCommandCodeAdapter } from "../../src/adapters/command-code";
 import { resetCommandCodeReasoningEffortsForTest } from "../../src/providers/command-code-efforts";
 import type { OcxParsedRequest, OcxProviderConfig } from "../../src/types";
 
-const CREDITS_EXHAUSTED = {
+// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与\n// 交还形状，不是预算形状——显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法）。\nconst previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;\nbeforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });\nafterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });\n\nconst CREDITS_EXHAUSTED = {
   success: false,
   error: {
     code: "BAD_REQUEST",

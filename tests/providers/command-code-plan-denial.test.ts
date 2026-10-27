@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {afterEach, beforeEach, describe, expect, setDefaultTimeout, test} from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +27,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 // Combo and policy routes each make two loopback-free sends; suite load can push past 5s.
 setDefaultTimeout(30_000);
 
-const GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
+// fork 统一模型 lane（2026-10-23 合同）：400..599 全集按预算重投；本文件钉的是 refusal 分类与\n// 交还形状，不是预算形状——显式 0 预算钉单发（同 5cd6c044 轮 combo 行的钉法）。\nconst previousModelRetryEnv = process.env.OCX_MODEL_REQUEST_MAX_RETRIES;\nbeforeEach(() => { process.env.OCX_MODEL_REQUEST_MAX_RETRIES = "0"; });\nafterEach(() => { if (previousModelRetryEnv === undefined) delete process.env.OCX_MODEL_REQUEST_MAX_RETRIES; else process.env.OCX_MODEL_REQUEST_MAX_RETRIES = previousModelRetryEnv; });\n\nconst GENERATE_URL = "https://api.commandcode.ai/alpha/generate";
 const REFUSED_MODEL = "google/gemini-4-argon";
 const SERVED_MODEL = "deepseek/deepseek-v4-flash";
 // Synthetic canaries: none of these may reach a client body or a log line. The key canary is
