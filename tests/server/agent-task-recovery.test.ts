@@ -19,7 +19,7 @@ import {
   FINAL_ANSWER_ENVELOPE,
   FINAL_ANSWER_TASK_ENVELOPE,
   originalFetch,
-  post,
+  post as handlePost,
   providerResponse,
   recoveryArgumentsDoneSse,
   recoveryCompletedSse,
@@ -30,15 +30,129 @@ import {
 } from "../helpers/agent-task-recovery";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { immediateBackoff, restoreImmediateBackoff } from "../helpers/immediate-backoff";
+import { createAgentTaskRecoveryFixture } from "../helpers/agent-task-recovery-fixture";
+import { resolveCachedAgentTaskRecoveryWithResult } from "../../src/server/responses/agent-task-recovery-cache";
+
+test("fixture rejects a foreign recovery before it can advance this case's counter", async () => {
+  const fixture = caseFixture;
+  let sends = 0;
+  fixture.stub((async () => { sends++; return new Response(recoverySse("fixture")); }) as typeof fetch);
+  const foreign = new Request("https://chatgpt.com/backend-api/codex/responses", {
+    headers: codexHeaders("previous-case", { "user-agent": "previous-case" }),
+  });
+  fixture.expectForeignFetch(foreign);
+  try {
+    await expect(fetch(foreign)).rejects.toThrow("foreign recovery fetch");
+    expect(sends).toBe(0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("fixture reports unexpected fetches even when recovery catches their rejection", async () => {
+  const fixture = caseFixture;
+  fixture.stub((async () => new Response(recoverySse("must not run"))) as typeof fetch);
+  const foreign = new Request("http://localhost/v1/responses", { headers: codexHeaders("unexpected-case") });
+  expect(await recoverEncryptedAgentTaskWithResult(foreign, encryptedInput(), {}, routedConfig()))
+    .toEqual({ recovered: false, reason: "recovery_transport_error" });
+  try {
+    await expect(fixture.close()).rejects.toThrow("recovery fixture cleanup failed");
+  } finally {
+    // The deliberately rejected fixture is complete; keep ordinary afterEach independent.
+    caseFixture = createAgentTaskRecoveryFixture();
+  }
+});
+
+test("fixture close waits for shared work after caller cancellation and fetch settlement", async () => {
+  const fixture = caseFixture;
+  let release!: () => void;
+  const body = new Promise<void>(resolve => { release = resolve; });
+  const caller = new AbortController();
+  let fetchSettled = false;
+  let workSettled = false;
+  let closed = false;
+  fixture.stub((async () => new Response("fixture")) as typeof fetch);
+  const installedFetch = globalThis.fetch;
+  const pending = resolveCachedAgentTaskRecoveryWithResult(fixture.marker, 200, async () => {
+    await fetch("https://chatgpt.com/backend-api/codex/responses", { headers: fixture.request().headers });
+    fetchSettled = true;
+    await body;
+    workSettled = true;
+    return { recovered: false, reason: "recovery_aborted" };
+  }, caller.signal);
+  // Let the synthetic mock's response settle while its owned body work remains blocked.
+  await Promise.resolve();
+  await Promise.resolve();
+  caller.abort();
+  expect(await pending).toEqual({ recovered: false, reason: "caller_cancelled" });
+  const closing = fixture.close().then(() => { closed = true; });
+  try {
+    await Promise.resolve();
+    expect(fetchSettled).toBe(true);
+    expect(workSettled).toBe(false);
+    expect(closed).toBe(false);
+    expect(globalThis.fetch).toBe(installedFetch);
+    release();
+    await closing;
+    expect(workSettled).toBe(true);
+    expect(globalThis.fetch).toBe(originalFetch);
+  } finally {
+    release();
+    await closing;
+  }
+});
+
+test("fixture close releases a gated recovery after an assertion fails", async () => {
+  const fixture = caseFixture;
+  const events: string[] = [];
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  fixture.releaseOnClose(() => { events.push("released"); release(); });
+  fixture.stub((async () => {
+    started();
+    await gate;
+    events.push("mock-settled");
+    return new Response(recoverySse("fixture"));
+  }) as typeof fetch);
+  const pending = fixture.track(recoverEncryptedAgentTaskWithResult(fixture.request(), encryptedInput(), {}, routedConfig()));
+  try {
+    await ready;
+    let assertion: unknown;
+    try {
+      expect("unreleased gate").toBe("released gate");
+    } catch (error) {
+      assertion = error;
+    } finally {
+      await fixture.close();
+    }
+    expect(assertion).toBeDefined();
+    expect(events).toEqual(["released", "mock-settled"]);
+    expect(await pending).toEqual({ recovered: false, reason: "recovery_aborted" });
+  } finally {
+    release();
+    await pending;
+    await fixture.close();
+  }
+});
 
 // Direct handler dispatch never takes the writer lease that startServer would take, so it is refused.
 let releaseSpendHome: (() => void) | undefined;
+let caseFixture: ReturnType<typeof createAgentTaskRecoveryFixture>;
+const post: typeof handlePost = (...args) => {
+  args[4] = args[4] ? AbortSignal.any([args[4], caseFixture.signal]) : caseFixture.signal;
+  return caseFixture.track(handlePost(...args));
+};
 beforeEach(() => {
   releaseSpendHome = acquireOwnedSpendHome();
+  caseFixture = createAgentTaskRecoveryFixture();
 });
-afterEach(() => {
-  releaseSpendHome?.();
-  releaseSpendHome = undefined;
+afterEach(async () => {
+  try { await caseFixture.close(); } finally {
+    releaseSpendHome?.();
+    releaseSpendHome = undefined;
+  }
 });
 
 describe("agent task recovery (opt-in, default off)", () => {
@@ -46,10 +160,6 @@ describe("agent task recovery (opt-in, default off)", () => {
     resetAgentTaskRecoveryState();
   });
 
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    resetAgentTaskRecoveryState();
-  });
 
   for (const messageType of ["NEW_TASK", "MESSAGE", "FOLLOWUP_TASK"] as const) {
     test(`typed ${messageType} recovery preserves boolean, replay and discard contracts`, async () => {
@@ -149,7 +259,7 @@ describe("agent task recovery (opt-in, default off)", () => {
     let cancels = 0;
     let reads = 0;
     let releaseCancel: (() => void) | undefined;
-    const cancellation = new Promise<void>(resolve => { releaseCancel = resolve; });
+    const cancellation = caseFixture.track(new Promise<void>(resolve => { releaseCancel = resolve; }));
     globalThis.fetch = (async () => new Response(new ReadableStream({
       pull() { reads++; },
       cancel() {
@@ -186,7 +296,7 @@ describe("agent task recovery (opt-in, default off)", () => {
         pull(controller) {
           controller.enqueue(new Uint8Array([0xe2, 0x82]));
           started();
-          return new Promise<void>(() => {});
+          return caseFixture.track(new Promise<void>(resolve => { caseFixture.releaseOnClose(resolve); }));
         },
       }, { highWaterMark: 0 })));
       return new Promise<Response>((_resolve, reject) => {
@@ -757,6 +867,7 @@ describe("agent task recovery (opt-in, default off)", () => {
     }) as typeof fetch;
     const headers = codexHeaders("acct-flight", { "x-codex-parent-thread-id": "parent-flight" });
 
+    caseFixture.releaseOnClose(() => releaseRecovery?.());
     const first = post(routedConfig(), "xai/grok-4.5", encryptedInput(), headers);
     const second = post(routedConfig(), "xai/grok-4.5", encryptedInput(), headers);
     for (let turn = 0; turn < 200 && agentTaskRecoveryWaiterCountForTests() < 2; turn += 1) {
@@ -897,10 +1008,6 @@ describe("mid-thread encrypted agent task recovery (#4089)", () => {
     resetAgentTaskRecoveryState();
   });
 
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    resetAgentTaskRecoveryState();
-  });
 
   /** A mid-thread model switch: same Codex caller, same credentials, no spawn markers. */
   const midThreadHeaders = (accountId = "acct-caller"): Headers => {
@@ -1006,7 +1113,6 @@ describe("mid-thread encrypted agent task recovery (#4089)", () => {
 
 describe("bounded multipart encrypted task recovery", () => {
   beforeEach(() => resetAgentTaskRecoveryState());
-  afterEach(() => { globalThis.fetch = originalFetch; resetAgentTaskRecoveryState(); });
   const multipart = (tokens: string[] = [FERNET_TASK, SECOND_FERNET_TASK]) => agentMessage([
     { type: "input_text", text: ROUTING_ENVELOPE },
     ...tokens.map(encrypted_content => ({ type: "encrypted_content", encrypted_content })),
@@ -1088,6 +1194,7 @@ describe("bounded multipart encrypted task recovery", () => {
     let started!: () => void;
     const ready = new Promise<void>(resolve => { started = resolve; });
     globalThis.fetch = (() => { started(); return new Promise<Response>(resolve => { release = resolve; }); }) as typeof fetch;
+    caseFixture.releaseOnClose(() => release(new Response(recoverySse("Abandoned mutation fixture."))));
     const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
     const input = multipart();
     const pending = recoverEncryptedAgentTaskWithResult(req, input, {}, routedConfig());
@@ -1140,7 +1247,6 @@ describe("bounded multipart encrypted task recovery", () => {
 
 describe("FINAL_ANSWER encrypted task recovery", () => {
   beforeEach(() => resetAgentTaskRecoveryState());
-  afterEach(() => { globalThis.fetch = originalFetch; resetAgentTaskRecoveryState(); });
 
   test("recovers a FINAL_ANSWER without a Task name line and replays it from cache", async () => {
     const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
@@ -1266,7 +1372,6 @@ describe("FINAL_ANSWER encrypted task recovery", () => {
 
 describe("recovery refuses a wrong-family echoed routing header", () => {
   beforeEach(() => resetAgentTaskRecoveryState());
-  afterEach(() => { globalThis.fetch = originalFetch; resetAgentTaskRecoveryState(); });
 
   const echoCases: Array<[string, string, string]> = [
     ["FINAL_ANSWER envelope echoing a NEW_TASK header", FINAL_ANSWER_ENVELOPE, `${ROUTING_ENVELOPE}Recovered final answer.`],
@@ -1297,18 +1402,17 @@ describe("recovery refuses a wrong-family echoed routing header", () => {
 
 describe("agent task recovery transient retry (#3661)", () => {
   beforeEach(() => resetAgentTaskRecoveryState());
-  afterEach(() => { globalThis.fetch = originalFetch; resetAgentTaskRecoveryState(); });
 
-  const req = () => new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+  const req = () => caseFixture.request();
 
   test.each([500, 502, 503, 504, 520] as const)("a transient %d refusal retries within the configured budget and recovers", async status => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       return fetches === 1
         ? new Response("private failure", { status })
         : new Response(recoverySse("Recovered after outage."));
-    }) as typeof fetch;
+    }) as typeof fetch);
     const input = encryptedInput();
     expect(await recoverEncryptedAgentTaskWithResult(req(), input, { retries: 1 }, routedConfig()))
       .toEqual({ recovered: true });
@@ -1319,10 +1423,10 @@ describe("agent task recovery transient retry (#3661)", () => {
 
   test.each([400, 401, 403, 404, 429] as const)("a %d refusal is retried to the budget and stays the terminal answer", async status => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       return new Response("private failure", { status });
-    }) as typeof fetch;
+    }) as typeof fetch);
     // 统一模型合同（2026-10-23）：400..599 全集都是重试对象，本地不再按状态码分「terminal 类」。
     // 本用例钉住的新合同：全局预算 2 用尽后，最终答案仍是这个 4xx 的 recovery_http_rejected，
     // 输入原样、缓存不落。退避计时用 immediate-backoff helper（只拦 sleepWithAbort 栈）。
@@ -1343,10 +1447,10 @@ describe("agent task recovery transient retry (#3661)", () => {
 
   test("persistent transient rejections exhaust the bounded retry budget", async () => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       return new Response("private failure", { status: 503 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     // 统一预算权威 = 传入的全局配置值（modelRequestMaxRetries: 2）；legacy retries 不再抬升它。
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2, modelRequestMaxRetries: 2 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_http_rejected" });
@@ -1355,10 +1459,10 @@ describe("agent task recovery transient retry (#3661)", () => {
 
   test("a legacy retries value beyond the unified budget no longer expands it", async () => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       return new Response("private failure", { status: 503 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     // 统一 leaf（无 env、无传入配置 => 默认 3）是硬上限；legacy retries: 99 不再扩预算。
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 99 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_http_rejected" });
@@ -1386,11 +1490,11 @@ describe("agent task recovery transient retry (#3661)", () => {
 
   test("transport failures retry while invalid recovery output stays terminal", async () => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       if (fetches === 1) throw new TypeError("private transport failure");
       return new Response("data: {not-json}\n\n");
-    }) as typeof fetch;
+    }) as typeof fetch);
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_invalid_output" });
     expect(fetches).toBe(2);
@@ -1398,10 +1502,10 @@ describe("agent task recovery transient retry (#3661)", () => {
 
   test("persistent transport failures exhaust the same bounded budget", async () => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       throw new TypeError("private transport failure");
-    }) as typeof fetch;
+    }) as typeof fetch);
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2, modelRequestMaxRetries: 2 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_transport_error" });
     expect(fetches).toBe(3);
@@ -1410,10 +1514,10 @@ describe("agent task recovery transient retry (#3661)", () => {
   test("caller cancellation during retry backoff reports caller_cancelled without another send", async () => {
     const caller = new AbortController();
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       return new Response("private failure", { status: 503 });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const pending = recoverEncryptedAgentTaskWithResult(
       req(), encryptedInput(), { retries: 2 }, routedConfig(), { abortSignal: caller.signal },
     );
@@ -1425,10 +1529,10 @@ describe("agent task recovery transient retry (#3661)", () => {
 
   test("a Retry-After past the recovery deadline ends with the failure instead of resending early", async () => {
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       return new Response("private failure", { status: 503, headers: { "retry-after": "30" } });
-    }) as typeof fetch;
+    }) as typeof fetch);
     const started = Date.now();
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 2, timeoutMs: 5_000 }, routedConfig()))
       .toEqual({ recovered: false, reason: "recovery_http_rejected" });
@@ -1441,7 +1545,7 @@ describe("agent task recovery transient retry (#3661)", () => {
     let fetches = 0;
     let firstAt = 0;
     let secondAt = 0;
-    globalThis.fetch = (async () => {
+    caseFixture.stub((async () => {
       fetches += 1;
       if (fetches === 1) {
         firstAt = Date.now();
@@ -1449,7 +1553,7 @@ describe("agent task recovery transient retry (#3661)", () => {
       }
       secondAt = Date.now();
       return new Response(recoverySse("Recovered after outage."));
-    }) as typeof fetch;
+    }) as typeof fetch);
     expect(await recoverEncryptedAgentTaskWithResult(req(), encryptedInput(), { retries: 1 }, routedConfig()))
       .toEqual({ recovered: true });
     expect(fetches).toBe(2);

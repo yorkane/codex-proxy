@@ -6,7 +6,7 @@ import {
   modelRequestMaxRetries,
   modelRequestRetryEnvOverride,
 } from "../lib/model-request-retry";
-import { contextTierRecordConfigError, modelCapabilitiesConfigError } from "../config/provider-validation";
+import { contextTierRecordConfigError, modelCapabilitiesConfigError, providerInputModalitiesConfigError } from "../config/provider-validation";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
@@ -754,7 +754,7 @@ export function providerManagementConfigError(
   }
   const contextTiersError = contextTierRecordConfigError(raw.modelContextTiers);
   if (contextTiersError) return contextTiersError;
-  const capabilitiesError = modelCapabilitiesConfigError(raw.modelCapabilities);
+  const capabilitiesError = providerInputModalitiesConfigError(raw.inputModalities) ?? modelCapabilitiesConfigError(raw.modelCapabilities);
   if (capabilitiesError) return capabilitiesError;
   const pinsError = providerReasoningPinsConfigError(raw);
   if (pinsError) return pinsError;
@@ -1118,6 +1118,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelContextWindows: "editor",
   modelContextTiers: "editor",
   modelInputModalities: "editor",
+  inputModalities: "editor",
   modelCapabilities: "editor",
   modelMaxInputTokens: "runtime",
   modelAutoCompactTokenLimits: "editor",

@@ -75,6 +75,8 @@ export const RESPONSES_CORE_MODULES = [
   "passthrough-delivery.ts",
   // Reached from passthrough-dispatch.ts: bounded HTTP/SSE pre-output model-error projection.
   "capacity-pre-output.ts",
+  // Reached from passthrough-delivery.ts: buffered combo children must honor a required tool_choice (#7456).
+  "combo-required-tool-contract.ts",
   "buffered-sse-json.ts",
   "terminal-error-redaction.ts",
   // Reached from passthrough-delivery.ts: overload terminals carry a client retry directive.

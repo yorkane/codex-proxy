@@ -521,6 +521,7 @@ async function injectCodexConfigImpl(
         userRequestMaxRetries: plan.userRequestMaxRetries,
         userStreamMaxRetries: plan.userStreamMaxRetries,
       },
+      injectedSubagentDefaults: plan.injectedSubagentDefaults,
       // This is the catalog artifact selected for this injection, even when config.toml
       // already points at that path and therefore needs no textual rewrite.
       injectedCatalogPath: plan.catalogPath,
@@ -905,7 +906,6 @@ export {
   setRootOpenaiBaseUrl,
   setRootRealtimeWsBaseUrl,
   stripInjectedOpenaiBaseUrl,
-  stripRootContextWindowOverrides,
 } from "./inject/config-toml";
 
 export {
