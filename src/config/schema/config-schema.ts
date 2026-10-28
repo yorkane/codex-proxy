@@ -229,8 +229,9 @@ export const configSchema = z.object({
   preferModelAliasIds: z.boolean().optional().catch(false),
   // Malformed hand edits disable this opt-in projection without rejecting providers.
   cursorEffortRows: z.boolean().optional().catch(false),
-  // Fast selectors default on; malformed hand edits disable them without rejecting providers.
-  fastRows: z.boolean().default(true).catch(false),
+  // Fork inversion (#5694 pattern, 2026-10-28): Fast selectors default OFF. Absence,
+  // explicit false, and malformed hand edits all disable them; only an explicit true opts in.
+  fastRows: z.boolean().default(false).catch(false),
   // Ultra Fast is opt-in for the same reason and degrades the same way: a malformed hand
   // edit turns the tier off rather than rejecting the config that carries it.
   ultraFastTier: z.boolean().optional().catch(false),

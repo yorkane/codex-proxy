@@ -49,7 +49,11 @@ export function getDefaultConfig(): OcxConfig {
     // (the default value) so a fresh install records the mandated default on disk instead of
     // leaving it to be inferred.
     modelRequestMaxRetries: DEFAULT_MODEL_REQUEST_MAX_RETRIES,
-    fastRows: true,
+    // Fork default (2026-10-28): Fast rows and Fast mode ship disabled. Both are written
+    // explicitly so a fresh install records the decision on disk; operators re-enable per box
+    // (fastRows: true / fastMode: true, or null for caller passthrough).
+    fastRows: false,
+    fastMode: false,
     managementUsageMaxReadBytes: 64 * 1024 * 1024,
     appOwnedMemoryBudgetMb: DEFAULT_APP_OWNED_MEMORY_BUDGET_BYTES / (1024 * 1024),
     // Fresh/re-initialized configs are already written in the current three-tier

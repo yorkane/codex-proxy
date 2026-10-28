@@ -126,9 +126,16 @@ describe("explicit opt-out at the request path", () => {
 
 
 
-test("omitted Fast flag resolves selectors on ordinary and Fast-only ingress", () => {
+test("the Fast flag resolves selectors on ordinary and Fast-only ingress", () => {
   const config = configWith({ fixture: provider({ models: ["m"], supportsServiceTier: true }) });
-  delete config.fastRows;
   expect(parseSyntheticRowId("fixture/m--fast", config).fastRow).toEqual({ baseId: "fixture/m" });
   expect(parseFastOnlyRowId(config, () => "fixture/m--fast")).toEqual({ baseId: "fixture/m" });
+});
+
+// Fork inversion (2026-10-28): an omitted flag is the shipped default = OFF.
+test("an omitted Fast flag disables the grammar on both ingress paths", () => {
+  const config = configWith({ fixture: provider({ models: ["m"], supportsServiceTier: true }) });
+  delete config.fastRows;
+  expect(parseSyntheticRowId("fixture/m--fast", config).fastRow).toBeNull();
+  expect(parseFastOnlyRowId(config, () => "fixture/m--fast")).toBeNull();
 });

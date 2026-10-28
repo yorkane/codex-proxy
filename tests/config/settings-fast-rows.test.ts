@@ -63,21 +63,26 @@ afterEach(() => {
 });
 
 describe("/api/settings fastRows", () => {
-  test("an unconfigured install reports fastRows enabled by default", async () => {
+  // Fork inversion (2026-10-28): Fast rows ship disabled; only an explicit true opts in.
+  test("an unconfigured install reports fastRows disabled by default", async () => {
     const res = await settingsRequest(baseConfig());
     const body = await res!.json() as { fastRows?: boolean };
-    expect(body.fastRows).toBe(true);
+    expect(body.fastRows).toBe(false);
   });
 
-  test("disabling persists to disk and survives a reload", async () => {
+  test("disabling an enabled box deletes the key and survives a reload", async () => {
     const config = baseConfig();
+    config.fastRows = true;
     saveConfig(config);
     const put = await settingsRequest(config, { fastRows: false });
     expect(put!.status).toBe(200);
     expect(await put!.json()).toMatchObject({ ok: true, fastRows: false });
-    // The live object and the file must agree
-    expect(config.fastRows).toBe(false);
+    // Off is the default, so the key leaves the file: live and disk agree on `absent`.
+    expect(config.fastRows).toBeUndefined();
+    // The load schema materializes the default: disk key absent, loaded value false.
     expect(loadConfig().fastRows).toBe(false);
+    const raw = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf8")) as Record<string, unknown>;
+    expect(Object.hasOwn(raw, "fastRows")).toBe(false);
 
     const get = await settingsRequest(config);
     expect(await get!.json()).toMatchObject({ fastRows: false });
@@ -97,22 +102,22 @@ describe("/api/settings fastRows", () => {
     expect(await res!.json()).toMatchObject({ error: "fastRows boolean is required" });
   });
 
-  test("turning it back on deletes the key and restores default true", async () => {
+  test("turning it on persists true, and the default stays off", async () => {
     const config = baseConfig();
-    config.fastRows = false;
     saveConfig(config);
     const res = await settingsRequest(config, { fastRows: true });
     expect(res!.status).toBe(200);
     expect(await res!.json()).toMatchObject({ ok: true, fastRows: true });
     expect(loadConfig().fastRows).toBe(true);
     const raw = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf8")) as Record<string, unknown>;
-    expect(Object.hasOwn(raw, "fastRows")).toBe(false);
+    expect(raw.fastRows).toBe(true);
   });
 
   test("converges Codex and refreshes enabled client integrations when fastRows changes", async () => {
     let converged = 0;
     let integrationsRefreshed = 0;
     const config = baseConfig();
+    config.fastRows = true;
     config.clientIntegrations = { grok: false, "claude-desktop": false };
     saveConfig(config);
     const res = await settingsRequest(config, { fastRows: false }, {

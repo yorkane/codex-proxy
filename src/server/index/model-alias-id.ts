@@ -22,7 +22,7 @@ export function preferredModelAliasId(
   if (config.preferModelAliasIds !== true) return undefined;
   // Built-in bare aliases are not stable Fast bases. Preserve the qualified ID
   // when promotion would publish a synthetic sibling that ingress cannot parse.
-  if (config.fastRows !== false && fastEligible && !fastBases()(alias)) return undefined;
+  if (config.fastRows === true && fastEligible && !fastBases()(alias)) return undefined;
   try {
     // Preview cannot consume a combo's round-robin selection state. A policy/combo,
     // reserved native name or another provider's native id must keep its own meaning.

@@ -218,7 +218,7 @@ client files name the live owner's port, and a refresh from the sibling would re
 ## Fast model selectors
 
 The serving proxy resolves `fastRowAvailable` on every management model row, including its
-`fastRows` setting (default true), canonical eligibility, native upstream tier evidence, and
+`fastRows` setting (fork inversion 2026-10-28: default off, explicit `true` opt-in), canonical eligibility, native upstream tier evidence, and
 exact-ID collisions checked before disabled rows are filtered. Management and CLI projections
 carry the boolean into the shared client serializers. Only true creates an additive `--fast`
 selector, preserving the underlying provider, model ID, modalities, limits, and effort metadata.

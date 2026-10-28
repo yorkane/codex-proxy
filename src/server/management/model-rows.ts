@@ -507,7 +507,7 @@ export async function listManagementModelRows(
   const rows = [...visibleNative, ...dedupedRouted, ...customRowsWithExportMetadata];
   // Include disabled rows and configured aliases before the export visibility filter:
   // a hidden real `x--fast` must never become a synthetic selector for another model.
-  const knownIds = config.fastRows === false ? new Set<string>() : knownEffortRowIds(config);
+  const knownIds = config.fastRows !== true ? new Set<string>() : knownEffortRowIds(config);
   for (const row of rows) knownIds.add(row.namespaced);
   const isVisionSidecarConsumer = visionSidecarConsumerClassifier(config);
   return rows.map(row => {

@@ -95,3 +95,4 @@ desktop/src-tauri/target/
 desktop/bun.lock
 .playwright-cli/
 scripts/__pycache__/
+node_modules

@@ -65,6 +65,8 @@ function xaiConfig(
     port: 0,
     hostname: "127.0.0.1",
     codexAutoStart: false,
+    // Fork inversion (2026-10-28): the --fast selector grammar is opt-in; this suite pins it on.
+    fastRows: true,
     defaultProvider: "xai",
     providers: {
       xai: {

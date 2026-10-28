@@ -1091,7 +1091,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             desktopInputs.nativeContextCap,
             config.fastMode,
             // Explicit opt-out omits the Fast predicate.
-            config.fastRows !== false
+            config.fastRows === true
               ? (model: { provider: string; id: string; supportsServiceTier?: boolean }) =>
                 model.provider === "native"
                   ? nativeFastEligible(model.id)
@@ -1240,7 +1240,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         // and resolve the bundle table once for the whole list rather than once per row.
         const effortRowsEnabled = config.cursorEffortRows === true;
         // Explicit opt-out skips policy resolution and additional rows.
-        const fastRowsEnabled = config.fastRows !== false;
+        const fastRowsEnabled = config.fastRows === true;
         // One inventory serves both grammars; building it twice would double the work on a
         // hot path for no benefit.
         const effortRowKnownIds = effortRowsEnabled || fastRowsEnabled

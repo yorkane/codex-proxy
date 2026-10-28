@@ -157,6 +157,8 @@ describe("native Anthropic image input reaches client documents", () => {
       port: 10100,
       hostname: "127.0.0.1",
       defaultProvider: provider,
+      // Fork inversion (2026-10-28): the --fast selector grammar needs the top-level opt-in.
+      fastRows: true,
       providers: {
         [provider]: {
           adapter: "anthropic",
@@ -164,6 +166,7 @@ describe("native Anthropic image input reaches client documents", () => {
           authMode: provider === "anthropic" ? "oauth" : "key",
           liveModels: false,
           // Anthropic Fast is opt-in; enable it so the export roster includes the --fast selectors.
+          // Fork inversion (2026-10-28): the fastRows selector grammar is likewise opt-in now.
           fastEnabled: true,
         },
       },
@@ -753,8 +756,10 @@ describe("default Fast availability reaches external exports", () => {
     });
   }
 
-  test("omitted flag exports eligible Fast to pi, with the base still selectable", async () => {
-    const config = fastConfig();
+  // Fork inversion (2026-10-28): the omitted flag is now the shipped-off default; the
+  // export test pins the explicit opt-in (a companion pins omission => no Fast rows).
+  test("the opt-in exports eligible Fast to pi, with the base still selectable", async () => {
+    const config = fastConfig({ fastRows: true });
     const rows = await modelRows(config);
     expect(rows.find(row => row.namespaced === "fixture/m")?.fastRowAvailable).toBe(true);
     expect(rows.find(row => row.namespaced === "fixture/slow")?.fastRowAvailable).toBe(false);

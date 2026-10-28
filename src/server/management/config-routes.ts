@@ -433,7 +433,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // needing to know that `undefined` and `false` mean the same thing here.
       ultraFastTier: config.ultraFastTier === true,
       // Absent means on by default: the GUI renders a switch enabled unless explicit false.
-      fastRows: config.fastRows !== false,
+      fastRows: config.fastRows === true,
       codexMainAccountHardLock: isMainAccountHardLockEnabled(config),
       // Absent means off: the fallback is an extension of the lock, so the GUI renders
       // the extended fields empty unless an explicit section exists.
@@ -755,7 +755,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     let pickerIsEnabled = pickerWasEnabled;
     const authlessWasEnabled = config.codexDesktopAuthless === true;
     const clientCompactionWasEnabled = config.codexClientCompaction === true;
-    const fastRowsWasEnabled = config.fastRows !== false;
+    const fastRowsWasEnabled = config.fastRows === true;
     try {
       if (typeof body.codexAutoStart === "boolean") {
         config.codexAutoStart = body.codexAutoStart;
@@ -784,8 +784,10 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // default, and a written `false` would survive as a decision nobody made.
       if (body.ultraFastTier === true) config.ultraFastTier = true;
       else if (body.ultraFastTier === false) deleteConfigTopLevelKey(config, "ultraFastTier");
-      if (body.fastRows === false) config.fastRows = false;
-      else if (body.fastRows === true) deleteConfigTopLevelKey(config, "fastRows");
+      // Inverted default (fork 2026-10-28): off is the default, so ON is the persisted decision
+      // (writes true) and OFF deletes the key back to the shipped default.
+      if (body.fastRows === true) config.fastRows = true;
+      else if (body.fastRows === false) deleteConfigTopLevelKey(config, "fastRows");
       // Inverted from the pair above because the default is on (#5694): off is the persisted
       // decision, so it writes `false`, while on deletes the key and returns to the default.
       if (hardLockThresholds !== undefined) config.codexMainAccountHardLockThresholds = { ...hardLockThresholds };
@@ -888,7 +890,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     const authlessIsEnabled = config.codexDesktopAuthless === true;
     const clientCompactionIsEnabled = config.codexClientCompaction === true;
-    const fastRowsIsEnabled = config.fastRows !== false;
+    const fastRowsIsEnabled = config.fastRows === true;
     const fastRowsChanged = fastRowsWasEnabled !== fastRowsIsEnabled;
     const desktopSwitchesChanged = authlessWasEnabled !== authlessIsEnabled
       || clientCompactionWasEnabled !== clientCompactionIsEnabled;
@@ -928,7 +930,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       showCodexCredits: config.showCodexCredits === true,
       catalogRefreshPending,
-      fastRows: config.fastRows !== false,
+      fastRows: config.fastRows === true,
       codexDesktopAuthless: authlessIsEnabled,
       codexClientCompaction: clientCompactionIsEnabled,
       loopbackManagementAuth: config.loopbackManagementAuth === true,

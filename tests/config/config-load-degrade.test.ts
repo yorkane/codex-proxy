@@ -205,9 +205,12 @@ test("load drops a malformed global auto-review override and keeps a valid one",
   expect(loadConfig().autoReviewOverride).toEqual({ enabled: true, model: "9router/ocg-muse-spark-1.3-contributor" });
 });
 
-test("Fast rows default on for fresh and omitted config; explicit false and malformed values disable", () => {
-  expect(getDefaultConfig().fastRows).toBe(true);
-  for (const [value, expected] of [[undefined, true], [true, true], [false, false], ["invalid", false]] as const) {
+// Fork inversion (2026-10-28): Fast rows ship disabled; only an explicit true opts in,
+// and a malformed hand edit disables. The fresh-install default writes the key explicitly.
+test("Fast rows default off for fresh and omitted config; explicit true enables, false and malformed disable", () => {
+  expect(getDefaultConfig().fastRows).toBe(false);
+  expect(getDefaultConfig().fastMode).toBe(false);
+  for (const [value, expected] of [[undefined, false], [true, true], [false, false], ["invalid", false]] as const) {
     const config = { ...candidate({}), fastRows: value };
     writeFileSync(getConfigPath(), JSON.stringify(config), "utf8");
     const loaded = loadConfig();
